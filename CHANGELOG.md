@@ -4,6 +4,10 @@ Docs: https://docs.openclaw.ai
 
 ## Unreleased
 
+### Changes
+
+- Gateway/config reload (local fork): optional `gateway.reload.browserProfiles` (`restart` default, `hot`) so `browser.profiles` edits can hot-apply without a full gateway process restart when `gateway.reload.mode` allows it.
+
 ## 2026.4.5
 
 ### Breaking
