@@ -6,6 +6,7 @@ Docs: https://docs.openclaw.ai
 
 ### Changes
 
+- Gateway/config reload: add optional `gateway.reload.browserProfiles` (`restart` default, `hot`) so `browser.profiles` edits can update the runtime snapshot without a full gateway process restart when paired with `gateway.reload.mode=hybrid` (or when no other restart-required paths change).
 - Plugins/webhooks: add a bundled webhook ingress plugin so external automation can create and drive bound TaskFlows through per-route shared-secret endpoints. (#61892) Thanks @mbelinky.
 - Tools/media generation: preserve intent across auth-backed image, music, and video provider fallback, remap size, aspect ratio, resolution, and duration hints to the closest supported option, and surface explicit provider capabilities plus mode-aware video-to-video support.
 - Memory/wiki: restore the bundled `memory-wiki` stack with plugin, CLI, sync/query/apply tooling, and memory-host integration for wiki-backed memory workflows.
