@@ -451,6 +451,8 @@ export const FIELD_HELP: Record<string, string> = {
   "gateway.reload.mode":
     'Controls how config edits are applied: "off" ignores live edits, "restart" always restarts, "hot" applies in-process, and "hybrid" tries hot then restarts if required. Keep "hybrid" for safest routine updates.',
   "gateway.reload.debounceMs": "Debounce window (ms) before applying config changes.",
+  "gateway.reload.browserProfiles":
+    'When set to "hot", changes under `browser.profiles` (for example `cdpUrl`) are treated as hot-reloadable so the runtime config snapshot updates without a full gateway process restart (with `hybrid`, or when no restart-required paths change alongside). Default/absent behaves like "restart". Other `browser.*` keys still require a gateway restart.',
   "gateway.reload.deferralTimeoutMs":
     "Maximum time (ms) to wait for in-flight operations to complete before forcing a SIGUSR1 restart. Default: 300000 (5 minutes). Lower values risk aborting active subagent LLM calls.",
   "gateway.nodes.browser.mode":

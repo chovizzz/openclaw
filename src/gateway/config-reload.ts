@@ -165,7 +165,7 @@ export function startGatewayConfigReloader(opts: {
     }
 
     opts.log.info(`config change detected; evaluating reload (${changedPaths.join(", ")})`);
-    const plan = buildGatewayReloadPlan(changedPaths);
+    const plan = buildGatewayReloadPlan(changedPaths, nextConfig);
     if (settings.mode === "off") {
       opts.log.info("config reload disabled (gateway.reload.mode=off)");
       return;

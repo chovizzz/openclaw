@@ -1234,6 +1234,8 @@ importers:
         specifier: workspace:*
         version: link:../../packages/plugin-sdk
 
+  extensions/vydra: {}
+
   extensions/whatsapp:
     dependencies:
       '@whiskeysockets/baileys':

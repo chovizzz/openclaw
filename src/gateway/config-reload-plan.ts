@@ -1,4 +1,5 @@
 import { type ChannelId, listChannelPlugins } from "../channels/plugins/index.js";
+import type { OpenClawConfig } from "../config/types.js";
 import { getActivePluginRegistry } from "../plugins/runtime.js";
 
 export type ChannelKind = ChannelId;
@@ -172,7 +173,24 @@ function matchRule(path: string): ReloadRule | null {
   return null;
 }
 
-export function buildGatewayReloadPlan(changedPaths: string[]): GatewayReloadPlan {
+function isBrowserProfilesPath(path: string): boolean {
+  return path === "browser.profiles" || path.startsWith("browser.profiles.");
+}
+
+function matchReloadRuleForPath(
+  path: string,
+  cfg: OpenClawConfig | null | undefined,
+): ReloadRule | null {
+  if (cfg?.gateway?.reload?.browserProfiles === "hot" && isBrowserProfilesPath(path)) {
+    return { prefix: "browser.profiles", kind: "hot" };
+  }
+  return matchRule(path);
+}
+
+export function buildGatewayReloadPlan(
+  changedPaths: string[],
+  cfg?: OpenClawConfig | null,
+): GatewayReloadPlan {
   const plan: GatewayReloadPlan = {
     changedPaths,
     restartGateway: false,
@@ -215,7 +233,7 @@ export function buildGatewayReloadPlan(changedPaths: string[]): GatewayReloadPla
   };
 
   for (const path of changedPaths) {
-    const rule = matchRule(path);
+    const rule = matchReloadRuleForPath(path, cfg);
     if (!rule) {
       plan.restartGateway = true;
       plan.restartReasons.push(path);

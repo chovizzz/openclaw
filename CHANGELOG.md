@@ -6,6 +6,8 @@ Docs: https://docs.openclaw.ai
 
 ### Changes
 
+- Gateway/config reload (local fork): optional `gateway.reload.browserProfiles` (`restart` default, `hot`) so `browser.profiles` edits can hot-apply without a full gateway process restart when `gateway.reload.mode` allows it.
+
 ### Fixes
 
 - Gateway/tools: anchor trusted local `MEDIA:` tool-result passthrough on the exact raw name of this run's registered built-in tools, and reject client tool definitions whose names normalize-collide with a built-in or with another client tool in the same request (`400 invalid_request_error` on both JSON and SSE paths), so a client-supplied tool named like a built-in can no longer inherit its local-media trust. (#67303)

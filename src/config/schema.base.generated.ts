@@ -21389,6 +21389,21 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
                 title: "Config Reload Debounce (ms)",
                 description: "Debounce window (ms) before applying config changes.",
               },
+              browserProfiles: {
+                anyOf: [
+                  {
+                    type: "string",
+                    const: "restart",
+                  },
+                  {
+                    type: "string",
+                    const: "hot",
+                  },
+                ],
+                title: "Browser Profiles Config Reload",
+                description:
+                  'When set to "hot", changes under `browser.profiles` (for example `cdpUrl`) are treated as hot-reloadable so the runtime config snapshot updates without a full gateway process restart (with `hybrid`, or when no restart-required paths change alongside). Default/absent behaves like "restart". Other `browser.*` keys still require a gateway restart.',
+              },
               deferralTimeoutMs: {
                 type: "integer",
                 minimum: 0,
@@ -24476,6 +24491,11 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
       label: "Config Reload Debounce (ms)",
       help: "Debounce window (ms) before applying config changes.",
       tags: ["network", "reliability", "performance"],
+    },
+    "gateway.reload.browserProfiles": {
+      label: "Browser Profiles Config Reload",
+      help: 'When set to "hot", changes under `browser.profiles` (for example `cdpUrl`) are treated as hot-reloadable so the runtime config snapshot updates without a full gateway process restart (with `hybrid`, or when no restart-required paths change alongside). Default/absent behaves like "restart". Other `browser.*` keys still require a gateway restart.',
+      tags: ["network", "reliability", "storage"],
     },
     "gateway.reload.deferralTimeoutMs": {
       label: "Restart Deferral Timeout (ms)",

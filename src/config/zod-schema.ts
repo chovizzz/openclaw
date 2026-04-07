@@ -772,6 +772,7 @@ export const OpenClawSchema = z
               ])
               .optional(),
             debounceMs: z.number().int().min(0).optional(),
+            browserProfiles: z.union([z.literal("restart"), z.literal("hot")]).optional(),
             deferralTimeoutMs: z.number().int().min(0).optional(),
           })
           .strict()

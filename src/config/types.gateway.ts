@@ -200,11 +200,26 @@ export type GatewayRemoteConfig = {
 
 export type GatewayReloadMode = "off" | "restart" | "hot" | "hybrid";
 
+export type GatewayReloadBrowserProfilesMode = "restart" | "hot";
+
 export type GatewayReloadConfig = {
   /** Reload strategy for config changes (default: hybrid). */
   mode?: GatewayReloadMode;
   /** Debounce window for config reloads (ms). Default: 300. */
   debounceMs?: number;
+  /**
+   * How `browser.profiles` subtree changes participate in config reload planning.
+   *
+   * - `restart` (default): match the browser plugin's `restartPrefixes: ["browser"]`
+   *   behavior for profile edits (full gateway restart when required by reload mode).
+   * - `hot`: treat `browser.profiles` and nested keys as hot-reloadable so profile
+   *   edits (for example `cdpUrl`) update the runtime config snapshot without a
+   *   process restart when `gateway.reload.mode` is `hybrid` (or apply under `hot`
+   *   when no other restart-required paths changed in the same reload).
+   *
+   * Other `browser.*` keys outside `browser.profiles` still require a gateway restart.
+   */
+  browserProfiles?: GatewayReloadBrowserProfilesMode;
   /**
    * Maximum time (ms) to wait for in-flight operations to complete before
    * forcing a SIGUSR1 restart. Default: 300000 (5 minutes).
