@@ -153,6 +153,21 @@ describe("buildGatewayReloadPlan", () => {
     expect(plan.hotReasons).toEqual([]);
   });
 
+  it("hot-reloads browser.profiles when gateway.reload.browserProfiles is hot", () => {
+    const cfg = { gateway: { reload: { browserProfiles: "hot" as const } } };
+    const plan = buildGatewayReloadPlan(["browser.profiles.hubstudio-1.cdpUrl"], cfg);
+    expect(plan.restartGateway).toBe(false);
+    expect(plan.restartReasons).toEqual([]);
+    expect(plan.hotReasons).toContain("browser.profiles.hubstudio-1.cdpUrl");
+  });
+
+  it("still restarts for browser keys outside profiles when browserProfiles is hot", () => {
+    const cfg = { gateway: { reload: { browserProfiles: "hot" as const } } };
+    const plan = buildGatewayReloadPlan(["browser.enabled"], cfg);
+    expect(plan.restartGateway).toBe(true);
+    expect(plan.restartReasons).toContain("browser.enabled");
+  });
+
   it("restarts the Gmail watcher for hooks.gmail changes", () => {
     const plan = buildGatewayReloadPlan(["hooks.gmail.account"]);
     expect(plan.restartGateway).toBe(false);
