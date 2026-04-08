@@ -43,6 +43,12 @@ function pruneStaleRuntimeSymlinks() {
 
 pruneStaleRuntimeSymlinks();
 
+// tsdown defaults to logLevel "warn", so this step often prints nothing for minutes — not a hang.
+// Use: OPENCLAW_BUILD_VERBOSE=1 pnpm build
+if (!process.env.OPENCLAW_BUILD_VERBOSE) {
+  console.error("tsdown: bundling (quiet); set OPENCLAW_BUILD_VERBOSE=1 for progress logs…");
+}
+
 function findFatalUnresolvedImport(lines) {
   for (const line of lines) {
     if (!UNRESOLVED_IMPORT_RE.test(line)) {

@@ -42,7 +42,11 @@ import {
   restoreMemoryPluginState,
 } from "./memory-state.js";
 import { isPathInside, safeStatSync } from "./path-safety.js";
-import { resolvePluginModuleExport } from "./plugin-module-export.js";
+import {
+  resolveBundledChannelSetupEntryContract,
+  resolvePluginModuleExport,
+  unwrapPluginModuleDefaultExport,
+} from "./plugin-module-export.js";
 import { createPluginRegistry, type PluginRecord, type PluginRegistry } from "./registry.js";
 import { resolvePluginCacheInputs } from "./roots.js";
 import {
@@ -486,12 +490,19 @@ function validatePluginConfig(params: {
 function resolveSetupChannelRegistration(moduleExport: unknown): {
   plugin?: ChannelPlugin;
 } {
-  const resolved =
-    moduleExport &&
-    typeof moduleExport === "object" &&
-    "default" in (moduleExport as Record<string, unknown>)
-      ? (moduleExport as { default: unknown }).default
-      : moduleExport;
+  const bundled = resolveBundledChannelSetupEntryContract(moduleExport);
+  if (bundled) {
+    try {
+      const plugin = bundled.loadSetupPlugin();
+      if (plugin && typeof plugin === "object") {
+        return { plugin: plugin as ChannelPlugin };
+      }
+    } catch {
+      return {};
+    }
+    return {};
+  }
+  const resolved = unwrapPluginModuleDefaultExport(moduleExport);
   if (!resolved || typeof resolved !== "object") {
     return {};
   }

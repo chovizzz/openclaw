@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   resolveBundledChannelEntryContract,
+  resolveBundledChannelSetupEntryContract,
   resolvePluginModuleExport,
   unwrapPluginModuleDefaultExport,
 } from "./plugin-module-export.js";
@@ -89,5 +90,17 @@ describe("resolveBundledChannelEntryContract", () => {
         default: { kind: "bundled-channel-entry", id: "x" },
       }),
     ).toBeNull();
+  });
+});
+
+describe("resolveBundledChannelSetupEntryContract", () => {
+  it("resolves nested default exports", () => {
+    const inner = {
+      kind: "bundled-channel-setup-entry" as const,
+      loadSetupPlugin: () => ({}) as object,
+    };
+    const entry = resolveBundledChannelSetupEntryContract({ default: { default: inner } });
+    expect(entry?.kind).toBe("bundled-channel-setup-entry");
+    expect(typeof entry?.loadSetupPlugin).toBe("function");
   });
 });
