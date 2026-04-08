@@ -9,6 +9,10 @@ import type {
   BundledChannelSetupEntryContract,
 } from "../../plugin-sdk/channel-entry-contract.js";
 import { loadPluginManifestRegistry } from "../../plugins/manifest-registry.js";
+import {
+  resolveBundledChannelEntryContract,
+  resolveBundledChannelSetupEntryContract,
+} from "../../plugins/plugin-module-export.js";
 import type { PluginRuntime } from "../../plugins/runtime/types.js";
 import {
   buildPluginLoaderAliasMap,
@@ -25,56 +29,6 @@ type GeneratedBundledChannelEntry = {
 
 const log = createSubsystemLogger("channels");
 const nodeRequire = createRequire(import.meta.url);
-
-function resolveChannelPluginModuleEntry(
-  moduleExport: unknown,
-): BundledChannelEntryContract | null {
-  const resolved =
-    moduleExport &&
-    typeof moduleExport === "object" &&
-    "default" in (moduleExport as Record<string, unknown>)
-      ? (moduleExport as { default: unknown }).default
-      : moduleExport;
-  if (!resolved || typeof resolved !== "object") {
-    return null;
-  }
-  const record = resolved as Partial<BundledChannelEntryContract>;
-  if (record.kind !== "bundled-channel-entry") {
-    return null;
-  }
-  if (
-    typeof record.id !== "string" ||
-    typeof record.name !== "string" ||
-    typeof record.description !== "string" ||
-    typeof record.register !== "function" ||
-    typeof record.loadChannelPlugin !== "function"
-  ) {
-    return null;
-  }
-  return record as BundledChannelEntryContract;
-}
-
-function resolveChannelSetupModuleEntry(
-  moduleExport: unknown,
-): BundledChannelSetupEntryContract | null {
-  const resolved =
-    moduleExport &&
-    typeof moduleExport === "object" &&
-    "default" in (moduleExport as Record<string, unknown>)
-      ? (moduleExport as { default: unknown }).default
-      : moduleExport;
-  if (!resolved || typeof resolved !== "object") {
-    return null;
-  }
-  const record = resolved as Partial<BundledChannelSetupEntryContract>;
-  if (record.kind !== "bundled-channel-setup-entry") {
-    return null;
-  }
-  if (typeof record.loadSetupPlugin !== "function") {
-    return null;
-  }
-  return record as BundledChannelSetupEntryContract;
-}
 
 function createModuleLoader() {
   const jitiLoaders = new Map<string, ReturnType<typeof createJiti>>();
@@ -151,7 +105,7 @@ function loadGeneratedBundledChannelEntries(): readonly GeneratedBundledChannelE
 
     try {
       const sourcePath = resolveCompiledBundledModulePath(manifest.source);
-      const entry = resolveChannelPluginModuleEntry(
+      const entry = resolveBundledChannelEntryContract(
         loadBundledModule(sourcePath, manifest.rootDir),
       );
       if (!entry) {
@@ -161,7 +115,7 @@ function loadGeneratedBundledChannelEntries(): readonly GeneratedBundledChannelE
         continue;
       }
       const setupEntry = manifest.setupSource
-        ? resolveChannelSetupModuleEntry(
+        ? resolveBundledChannelSetupEntryContract(
             loadBundledModule(
               resolveCompiledBundledModulePath(manifest.setupSource),
               manifest.rootDir,

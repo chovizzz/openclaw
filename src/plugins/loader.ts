@@ -1539,7 +1539,19 @@ export function loadOpenClawPlugins(options: PluginLoadOptions = {}): PluginRegi
     }
 
     if (typeof register !== "function") {
-      logger.error(`[plugins] ${record.id} missing register/activate export`);
+      if (
+        process.env.OPENCLAW_PLUGIN_LOADER_DEBUG_EXPORTS === "1" &&
+        mod &&
+        typeof mod === "object"
+      ) {
+        const keys = Object.keys(mod as Record<string, unknown>);
+        const def = (mod as Record<string, unknown>).default;
+        logger.error(
+          `[plugins] ${record.id} missing register/activate export (debug: keys=[${keys.join(",")}] default=${typeof def})`,
+        );
+      } else {
+        logger.error(`[plugins] ${record.id} missing register/activate export`);
+      }
       pushPluginLoadError("plugin export missing register/activate");
       continue;
     }
@@ -1928,7 +1940,19 @@ export async function loadOpenClawPluginCliRegistry(
     }
 
     if (typeof register !== "function") {
-      logger.error(`[plugins] ${record.id} missing register/activate export`);
+      if (
+        process.env.OPENCLAW_PLUGIN_LOADER_DEBUG_EXPORTS === "1" &&
+        mod &&
+        typeof mod === "object"
+      ) {
+        const keys = Object.keys(mod as Record<string, unknown>);
+        const def = (mod as Record<string, unknown>).default;
+        logger.error(
+          `[plugins] ${record.id} missing register/activate export (debug: keys=[${keys.join(",")}] default=${typeof def})`,
+        );
+      } else {
+        logger.error(`[plugins] ${record.id} missing register/activate export`);
+      }
       pushPluginLoadError("plugin export missing register/activate");
       continue;
     }

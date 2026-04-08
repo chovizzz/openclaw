@@ -1,3 +1,7 @@
+import type {
+  BundledChannelEntryContract,
+  BundledChannelSetupEntryContract,
+} from "../plugin-sdk/channel-entry-contract.js";
 import type { OpenClawPluginDefinition } from "./types.js";
 
 /**
@@ -7,7 +11,7 @@ import type { OpenClawPluginDefinition } from "./types.js";
  */
 export function unwrapPluginModuleDefaultExport(moduleExport: unknown): unknown {
   let current: unknown = moduleExport;
-  for (let depth = 0; depth < 8; depth++) {
+  for (let depth = 0; depth < 16; depth++) {
     if (typeof current === "function") {
       return current;
     }
@@ -47,4 +51,46 @@ export function resolvePluginModuleExport(moduleExport: unknown): {
     return { definition: def, register };
   }
   return {};
+}
+
+/** Resolve bundled channel entry exports (same nested-default rules as plugin loader). */
+export function resolveBundledChannelEntryContract(
+  moduleExport: unknown,
+): BundledChannelEntryContract | null {
+  const resolved = unwrapPluginModuleDefaultExport(moduleExport);
+  if (!resolved || typeof resolved !== "object") {
+    return null;
+  }
+  const record = resolved as Partial<BundledChannelEntryContract>;
+  if (record.kind !== "bundled-channel-entry") {
+    return null;
+  }
+  if (
+    typeof record.id !== "string" ||
+    typeof record.name !== "string" ||
+    typeof record.description !== "string" ||
+    typeof record.register !== "function" ||
+    typeof record.loadChannelPlugin !== "function"
+  ) {
+    return null;
+  }
+  return record as BundledChannelEntryContract;
+}
+
+/** Resolve bundled channel setup entry exports (same nested-default rules as plugin loader). */
+export function resolveBundledChannelSetupEntryContract(
+  moduleExport: unknown,
+): BundledChannelSetupEntryContract | null {
+  const resolved = unwrapPluginModuleDefaultExport(moduleExport);
+  if (!resolved || typeof resolved !== "object") {
+    return null;
+  }
+  const record = resolved as Partial<BundledChannelSetupEntryContract>;
+  if (record.kind !== "bundled-channel-setup-entry") {
+    return null;
+  }
+  if (typeof record.loadSetupPlugin !== "function") {
+    return null;
+  }
+  return record as BundledChannelSetupEntryContract;
 }

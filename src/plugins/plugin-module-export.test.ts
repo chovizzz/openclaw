@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  resolveBundledChannelEntryContract,
   resolvePluginModuleExport,
   unwrapPluginModuleDefaultExport,
 } from "./plugin-module-export.js";
@@ -61,5 +62,32 @@ describe("resolvePluginModuleExport", () => {
     const r = resolvePluginModuleExport({});
     expect(r.register).toBeUndefined();
     expect(r.definition).toEqual({});
+  });
+});
+
+describe("resolveBundledChannelEntryContract", () => {
+  const makeContract = () => ({
+    kind: "bundled-channel-entry" as const,
+    id: "feishu",
+    name: "Feishu",
+    description: "d",
+    configSchema: {},
+    register: () => {},
+    loadChannelPlugin: () => ({}),
+  });
+
+  it("resolves nested default exports", () => {
+    const inner = makeContract();
+    const entry = resolveBundledChannelEntryContract({ default: { default: inner } });
+    expect(entry?.id).toBe("feishu");
+    expect(typeof entry?.register).toBe("function");
+  });
+
+  it("returns null when contract is missing fields", () => {
+    expect(
+      resolveBundledChannelEntryContract({
+        default: { kind: "bundled-channel-entry", id: "x" },
+      }),
+    ).toBeNull();
   });
 });
