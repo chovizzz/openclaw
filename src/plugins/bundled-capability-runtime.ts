@@ -12,6 +12,7 @@ import { createCapturedPluginRegistration } from "./captured-registration.js";
 import { discoverOpenClawPlugins } from "./discovery.js";
 import type { PluginLoadOptions } from "./loader.js";
 import { loadPluginManifestRegistry } from "./manifest-registry.js";
+import { resolvePluginModuleExport } from "./plugin-module-export.js";
 import { createEmptyPluginRegistry } from "./registry-empty.js";
 import type { PluginRecord, PluginRegistry } from "./registry.js";
 import {
@@ -20,7 +21,7 @@ import {
   shouldPreferNativeJiti,
   type PluginSdkResolutionPreference,
 } from "./sdk-alias.js";
-import type { OpenClawPluginDefinition, OpenClawPluginModule } from "./types.js";
+import type { OpenClawPluginModule } from "./types.js";
 
 const log = createSubsystemLogger("plugins");
 
@@ -70,31 +71,6 @@ export function buildBundledCapabilityRuntimeConfig(
     pluginIds,
     env,
   });
-}
-
-function resolvePluginModuleExport(moduleExport: unknown): {
-  definition?: OpenClawPluginDefinition;
-  register?: OpenClawPluginDefinition["register"];
-} {
-  const resolved =
-    moduleExport &&
-    typeof moduleExport === "object" &&
-    "default" in (moduleExport as Record<string, unknown>)
-      ? (moduleExport as { default: unknown }).default
-      : moduleExport;
-  if (typeof resolved === "function") {
-    return {
-      register: resolved as OpenClawPluginDefinition["register"],
-    };
-  }
-  if (resolved && typeof resolved === "object") {
-    const definition = resolved as OpenClawPluginDefinition;
-    return {
-      definition,
-      register: definition.register ?? definition.activate,
-    };
-  }
-  return {};
 }
 
 function createCapabilityPluginRecord(params: {

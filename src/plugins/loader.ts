@@ -42,6 +42,7 @@ import {
   restoreMemoryPluginState,
 } from "./memory-state.js";
 import { isPathInside, safeStatSync } from "./path-safety.js";
+import { resolvePluginModuleExport } from "./plugin-module-export.js";
 import { createPluginRegistry, type PluginRecord, type PluginRegistry } from "./registry.js";
 import { resolvePluginCacheInputs } from "./roots.js";
 import {
@@ -68,7 +69,6 @@ import {
 } from "./sdk-alias.js";
 import { hasKind, kindsEqual } from "./slots.js";
 import type {
-  OpenClawPluginDefinition,
   OpenClawPluginModule,
   PluginDiagnostic,
   PluginBundleFormat,
@@ -481,29 +481,6 @@ function validatePluginConfig(params: {
     return { ok: true, value: result.value as Record<string, unknown> | undefined };
   }
   return { ok: false, errors: result.errors.map((error) => error.text) };
-}
-
-function resolvePluginModuleExport(moduleExport: unknown): {
-  definition?: OpenClawPluginDefinition;
-  register?: OpenClawPluginDefinition["register"];
-} {
-  const resolved =
-    moduleExport &&
-    typeof moduleExport === "object" &&
-    "default" in (moduleExport as Record<string, unknown>)
-      ? (moduleExport as { default: unknown }).default
-      : moduleExport;
-  if (typeof resolved === "function") {
-    return {
-      register: resolved as OpenClawPluginDefinition["register"],
-    };
-  }
-  if (resolved && typeof resolved === "object") {
-    const def = resolved as OpenClawPluginDefinition;
-    const register = def.register ?? def.activate;
-    return { definition: def, register };
-  }
-  return {};
 }
 
 function resolveSetupChannelRegistration(moduleExport: unknown): {
