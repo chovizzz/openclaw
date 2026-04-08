@@ -1539,6 +1539,10 @@ export function loadOpenClawPlugins(options: PluginLoadOptions = {}): PluginRegi
     }
 
     if (typeof register !== "function") {
+      const hint =
+        `loaded ${safeSource} (origin=${candidate.origin}). ` +
+        `If overridden via plugins.load.paths or plugins.installs, remove or fix the path. ` +
+        `If both a source entry and sibling .js exist, try: OPENCLAW_BUNDLED_PLUGIN_PREFER_BUILT=1 openclaw status`;
       if (
         process.env.OPENCLAW_PLUGIN_LOADER_DEBUG_EXPORTS === "1" &&
         mod &&
@@ -1547,10 +1551,10 @@ export function loadOpenClawPlugins(options: PluginLoadOptions = {}): PluginRegi
         const keys = Object.keys(mod as Record<string, unknown>);
         const def = (mod as Record<string, unknown>).default;
         logger.error(
-          `[plugins] ${record.id} missing register/activate export (debug: keys=[${keys.join(",")}] default=${typeof def})`,
+          `[plugins] ${record.id} missing register/activate export (${hint}) [debug: keys=[${keys.join(",")}] default=${typeof def}]`,
         );
       } else {
-        logger.error(`[plugins] ${record.id} missing register/activate export`);
+        logger.error(`[plugins] ${record.id} missing register/activate export (${hint})`);
       }
       pushPluginLoadError("plugin export missing register/activate");
       continue;
@@ -1940,6 +1944,10 @@ export async function loadOpenClawPluginCliRegistry(
     }
 
     if (typeof register !== "function") {
+      const hint =
+        `loaded ${safeSource} (origin=${candidate.origin}). ` +
+        `If overridden via plugins.load.paths or plugins.installs, remove or fix the path. ` +
+        `If both a source entry and sibling .js exist, try: OPENCLAW_BUNDLED_PLUGIN_PREFER_BUILT=1 openclaw status`;
       if (
         process.env.OPENCLAW_PLUGIN_LOADER_DEBUG_EXPORTS === "1" &&
         mod &&
@@ -1948,10 +1956,10 @@ export async function loadOpenClawPluginCliRegistry(
         const keys = Object.keys(mod as Record<string, unknown>);
         const def = (mod as Record<string, unknown>).default;
         logger.error(
-          `[plugins] ${record.id} missing register/activate export (debug: keys=[${keys.join(",")}] default=${typeof def})`,
+          `[plugins] ${record.id} missing register/activate export (${hint}) [debug: keys=[${keys.join(",")}] default=${typeof def}]`,
         );
       } else {
-        logger.error(`[plugins] ${record.id} missing register/activate export`);
+        logger.error(`[plugins] ${record.id} missing register/activate export (${hint})`);
       }
       pushPluginLoadError("plugin export missing register/activate");
       continue;

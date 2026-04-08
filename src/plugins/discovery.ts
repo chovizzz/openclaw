@@ -507,7 +507,22 @@ function resolvePackageEntrySource(params: {
   if (!rejectHardlinks) {
     const builtCandidate = source.replace(/\.[^.]+$/u, ".js");
     if (builtCandidate !== source) {
-      candidates.push(builtCandidate);
+      const preferBuilt =
+        process.env.OPENCLAW_BUNDLED_PLUGIN_PREFER_BUILT === "1" ||
+        process.env.OPENCLAW_BUNDLED_PLUGIN_PREFER_BUILT === "true";
+      if (
+        preferBuilt &&
+        fs.existsSync(builtCandidate) &&
+        fs.existsSync(source) &&
+        /\.[cm]?[jt]s$/iu.test(source)
+      ) {
+        // Prefer Rolldown/tsdown output when both source and dist exist (fixes jiti-on-.ts
+        // export shapes that diverge from the bundled .js graph for channel plugins like feishu).
+        candidates.length = 0;
+        candidates.push(builtCandidate, source);
+      } else {
+        candidates.push(builtCandidate);
+      }
     }
   }
 
