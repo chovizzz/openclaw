@@ -619,6 +619,35 @@ function resolveSetupChannelRegistration(moduleExport: unknown): {
   };
 }
 
+/** Bundled channels use `defineBundledChannelSetupEntry` → `loadSetupPlugin`, not `{ plugin }`. */
+function resolveBundledChannelSetupEntryPlugin(moduleExport: unknown): ChannelPlugin | undefined {
+  let resolved =
+    moduleExport &&
+    typeof moduleExport === "object" &&
+    "default" in (moduleExport as Record<string, unknown>)
+      ? (moduleExport as { default: unknown }).default
+      : moduleExport;
+  if (
+    resolved &&
+    typeof resolved === "object" &&
+    "default" in (resolved as Record<string, unknown>) &&
+    typeof (resolved as { default: unknown }).default === "object"
+  ) {
+    resolved = (resolved as { default: unknown }).default;
+  }
+  if (!resolved || typeof resolved !== "object") {
+    return undefined;
+  }
+  const entry = resolved as { kind?: unknown; loadSetupPlugin?: unknown };
+  if (entry.kind !== "bundled-channel-setup-entry") {
+    return undefined;
+  }
+  if (typeof entry.loadSetupPlugin !== "function") {
+    return undefined;
+  }
+  return entry.loadSetupPlugin() as ChannelPlugin;
+}
+
 function shouldLoadChannelPluginInSetupRuntime(params: {
   manifestChannels: string[];
   setupSource?: string;
@@ -1572,10 +1601,11 @@ export function loadOpenClawPlugins(options: PluginLoadOptions = {}): PluginRegi
         manifestRecord.setupSource
       ) {
         const setupRegistration = resolveSetupChannelRegistration(mod);
-        if (setupRegistration.plugin) {
-          if (setupRegistration.plugin.id && setupRegistration.plugin.id !== record.id) {
+        const setupPlugin = setupRegistration.plugin ?? resolveBundledChannelSetupEntryPlugin(mod);
+        if (setupPlugin) {
+          if (setupPlugin.id && setupPlugin.id !== record.id) {
             pushPluginLoadError(
-              `plugin id mismatch (config uses "${record.id}", setup export uses "${setupRegistration.plugin.id}")`,
+              `plugin id mismatch (config uses "${record.id}", setup export uses "${setupPlugin.id}")`,
             );
             continue;
           }
@@ -1585,7 +1615,7 @@ export function loadOpenClawPlugins(options: PluginLoadOptions = {}): PluginRegi
             hookPolicy: entry?.hooks,
             registrationMode,
           });
-          api.registerChannel(setupRegistration.plugin);
+          api.registerChannel(setupPlugin);
           registry.plugins.push(record);
           seenIds.set(pluginId, candidate.origin);
           continue;

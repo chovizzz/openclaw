@@ -7,6 +7,8 @@ Docs: https://docs.openclaw.ai
 ### Changes
 
 - Gateway/config reload (local fork): optional `gateway.reload.browserProfiles` (`restart` default, `hot`) so `browser.profiles` edits can hot-apply without a full gateway process restart when `gateway.reload.mode` allows it.
+- Plugins/bundled channels: setup-runtime loading now accepts `defineBundledChannelSetupEntry` exports (`loadSetupPlugin`) so Feishu and other bundled channels no longer fail validation with “missing register/activate export”.
+- Dependencies: declare `acpx` at the package root so `acpx/runtime` resolves when the embedded ACPX extension loads from `dist` (fixes `Cannot find module 'acpx/runtime'` after install/build).
 
 ## 2026.4.8
 
