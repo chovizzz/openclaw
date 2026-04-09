@@ -24,6 +24,8 @@ const MANAGED_DEEP_SLEEP_CRON_NAME = "Memory Dreaming Promotion";
 const MANAGED_DEEP_SLEEP_CRON_TAG = "[managed-by=memory-core.short-term-promotion]";
 const DEEP_SLEEP_SYSTEM_EVENT_TEXT = "__openclaw_memory_core_short_term_promotion_dream__";
 const DREAM_DIARY_FILE_NAMES = ["DREAMS.md", "dreams.md"] as const;
+/** Avoid loading multi‑MB dream diaries into the Gateway process (OOM risk on JSON encode). */
+const MAX_DREAM_DIARY_BYTES = 512 * 1024;
 
 type DoctorMemoryDreamingPhasePayload = {
   enabled: boolean;
@@ -95,6 +97,10 @@ export type DoctorMemoryDreamDiaryPayload = {
   path: string;
   content?: string;
   updatedAtMs?: number;
+  /** True when `content` is only a prefix of the file (see `MAX_DREAM_DIARY_BYTES`). */
+  truncated?: boolean;
+  /** On-disk size in bytes when `truncated` is true. */
+  contentBytes?: number;
 };
 
 function resolveDreamingConfig(
@@ -525,11 +531,31 @@ async function readDreamDiary(
       continue;
     }
     try {
-      const content = await fs.readFile(filePath, "utf-8");
+      const byteSize = stat.size;
+      if (byteSize <= MAX_DREAM_DIARY_BYTES) {
+        const content = await fs.readFile(filePath, "utf-8");
+        return {
+          found: true,
+          path: name,
+          content,
+          updatedAtMs: Math.floor(stat.mtimeMs),
+        };
+      }
+      const toRead = Math.min(MAX_DREAM_DIARY_BYTES, byteSize);
+      const buf = Buffer.alloc(toRead);
+      const fh = await fs.open(filePath, "r");
+      try {
+        await fh.read(buf, 0, toRead, 0);
+      } finally {
+        await fh.close();
+      }
+      const content = buf.toString("utf-8");
       return {
         found: true,
         path: name,
         content,
+        truncated: true,
+        contentBytes: byteSize,
         updatedAtMs: Math.floor(stat.mtimeMs),
       };
     } catch {

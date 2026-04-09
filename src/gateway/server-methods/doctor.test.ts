@@ -701,4 +701,33 @@ describe("doctor.memory.dreamDiary", () => {
       await fs.rm(workspaceDir, { recursive: true, force: true });
     }
   });
+
+  it("truncates very large dream diary files to avoid gateway OOM", async () => {
+    const workspaceDir = await fs.mkdtemp(path.join(os.tmpdir(), "doctor-dream-diary-huge-"));
+    const diaryPath = path.join(workspaceDir, "DREAMS.md");
+    const oversized = 600 * 1024;
+    await fs.writeFile(diaryPath, Buffer.alloc(oversized, 0x61));
+    resolveAgentWorkspaceDir.mockReturnValue(workspaceDir);
+    const respond = vi.fn();
+
+    try {
+      await invokeDoctorMemoryDreamDiary(respond);
+      expect(respond).toHaveBeenCalledWith(
+        true,
+        expect.objectContaining({
+          agentId: "main",
+          found: true,
+          path: "DREAMS.md",
+          truncated: true,
+          contentBytes: oversized,
+          updatedAtMs: expect.any(Number),
+        }),
+        undefined,
+      );
+      const payload = respond.mock.calls[0]?.[1] as { content?: string };
+      expect(payload.content?.length).toBe(512 * 1024);
+    } finally {
+      await fs.rm(workspaceDir, { recursive: true, force: true });
+    }
+  });
 });
