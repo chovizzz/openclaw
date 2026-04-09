@@ -112,7 +112,17 @@ export async function getMemorySearchManager(params: {
   }
 
   try {
-    const { MemoryIndexManager } = await loadManagerRuntime();
+    const { MemoryIndexManager, borrowCachedFullMemoryIndexManagerForStatus } =
+      await loadManagerRuntime();
+    if (params.purpose === "status") {
+      const borrowed = borrowCachedFullMemoryIndexManagerForStatus({
+        cfg: params.cfg,
+        agentId: params.agentId,
+      });
+      if (borrowed) {
+        return { manager: borrowed };
+      }
+    }
     const manager = await MemoryIndexManager.get(params);
     return { manager };
   } catch (err) {

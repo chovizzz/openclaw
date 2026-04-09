@@ -1,1 +1,5 @@
-export { closeAllMemoryIndexManagers, MemoryIndexManager } from "./manager.js";
+export {
+  borrowCachedFullMemoryIndexManagerForStatus,
+  closeAllMemoryIndexManagers,
+  MemoryIndexManager,
+} from "./manager.js";

@@ -112,10 +112,13 @@ vi.mock("openclaw/plugin-sdk/memory-core-host-engine-qmd", () => ({
   checkQmdBinaryAvailability,
 }));
 
+const mockBorrowCachedFullForStatus = vi.hoisted(() => vi.fn(() => null));
+
 vi.mock("../../manager-runtime.js", () => ({
   MemoryIndexManager: {
     get: mockMemoryIndexGet,
   },
+  borrowCachedFullMemoryIndexManagerForStatus: mockBorrowCachedFullForStatus,
   closeAllMemoryIndexManagers: mockCloseAllMemoryIndexManagers,
 }));
 

@@ -74,6 +74,67 @@ export async function closeAllMemoryIndexManagers(): Promise<void> {
   });
 }
 
+/**
+ * When a full memory index is already cached, status probes (e.g. Dreams UI →
+ * `doctor.memory.status`) must not open a second sqlite handle and close it in
+ * the handler `finally` — that races the live index and can destabilize the
+ * gateway. Mirror the QMD `BorrowedMemoryManager` pattern for builtin indexes.
+ */
+class BorrowedBuiltinMemoryIndexManager implements MemorySearchManager {
+  constructor(private readonly inner: MemorySearchManager) {}
+
+  async search(
+    query: string,
+    opts?: { maxResults?: number; minScore?: number; sessionKey?: string },
+  ) {
+    return await this.inner.search(query, opts);
+  }
+
+  async readFile(params: { relPath: string; from?: number; lines?: number }) {
+    return await this.inner.readFile(params);
+  }
+
+  status() {
+    return this.inner.status();
+  }
+
+  async sync(params?: {
+    reason?: string;
+    force?: boolean;
+    sessionFiles?: string[];
+    progress?: (update: MemorySyncProgressUpdate) => void;
+  }) {
+    await this.inner.sync?.(params);
+  }
+
+  async probeEmbeddingAvailability(): Promise<MemoryEmbeddingProbeResult> {
+    return await this.inner.probeEmbeddingAvailability();
+  }
+
+  async probeVectorAvailability() {
+    return await this.inner.probeVectorAvailability();
+  }
+
+  async close() {}
+}
+
+export function borrowCachedFullMemoryIndexManagerForStatus(params: {
+  cfg: OpenClawConfig;
+  agentId: string;
+}): MemorySearchManager | null {
+  const settings = resolveMemorySearchConfig(params.cfg, params.agentId);
+  if (!settings) {
+    return null;
+  }
+  const workspaceDir = resolveAgentWorkspaceDir(params.cfg, params.agentId);
+  const fullKey = `${params.agentId}:${workspaceDir}:${JSON.stringify(settings)}:default`;
+  const fullCached = INDEX_CACHE.get(fullKey);
+  if (!fullCached) {
+    return null;
+  }
+  return new BorrowedBuiltinMemoryIndexManager(fullCached);
+}
+
 export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements MemorySearchManager {
   private readonly cacheKey: string;
   protected readonly cfg: OpenClawConfig;
