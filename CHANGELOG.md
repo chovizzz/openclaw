@@ -10,6 +10,10 @@ Docs: https://docs.openclaw.ai
 - Plugins/bundled channels: setup-runtime loading now accepts `defineBundledChannelSetupEntry` exports (`loadSetupPlugin`) so Feishu and other bundled channels no longer fail validation with “missing register/activate export”.
 - Dependencies: declare `acpx` at the package root so `acpx/runtime` resolves when the embedded ACPX extension loads from `dist` (fixes `Cannot find module 'acpx/runtime'` after install/build).
 
+### Fixes
+
+- Agents/context engines: run opt-in turn maintenance as idle-aware background work so the next foreground turn no longer waits on proactive maintenance. (#65233) thanks @100yenadmin
+
 ## 2026.4.8
 
 ### Fixes
