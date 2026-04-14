@@ -104,8 +104,14 @@ import { resolveSystemPromptOverride } from "../../system-prompt-override.js";
 import { buildSystemPromptParams } from "../../system-prompt-params.js";
 import { buildSystemPromptReport } from "../../system-prompt-report.js";
 import { sanitizeToolCallIdsForCloudCodeAssist } from "../../tool-call-id.js";
+import { UNKNOWN_TOOL_THRESHOLD } from "../../tool-loop-detection.js";
 import { resolveTranscriptPolicy } from "../../transcript-policy.js";
-import { normalizeUsage, type NormalizedUsage, type UsageLike } from "../../usage.js";
+import {
+  derivePromptTokens,
+  normalizeUsage,
+  type NormalizedUsage,
+  type UsageLike,
+} from "../../usage.js";
 import { DEFAULT_BOOTSTRAP_FILENAME } from "../../workspace.js";
 import { isRunnerAbortError } from "../abort.js";
 import { isCacheTtlEligibleProvider, readLastCacheTtlTimestamp } from "../cache-ttl.js";
@@ -898,6 +904,7 @@ export async function runEmbeddedAttempt(
           attempt: params,
           workspaceDir: effectiveWorkspace,
           agentDir,
+          tokenBudget: params.contextTokenBudget,
         }),
         runMaintenance: async (contextParams) =>
           await runContextEngineMaintenance({
@@ -2155,10 +2162,13 @@ export async function runEmbeddedAttempt(
 
         // Let the active context engine run its post-turn lifecycle.
         if (params.contextEngine) {
+          const runtimeCurrentTokenCount = derivePromptTokens(lastCallUsage);
           const afterTurnRuntimeContext = buildAfterTurnRuntimeContext({
             attempt: params,
             workspaceDir: effectiveWorkspace,
             agentDir,
+            tokenBudget: params.contextTokenBudget,
+            currentTokenCount: runtimeCurrentTokenCount,
             promptCache,
           });
           await finalizeAttemptContextEngineTurn({
