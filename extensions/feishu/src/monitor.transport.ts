@@ -58,7 +58,7 @@ function isFeishuWebhookSignatureValid(params: {
 }): boolean {
   const encryptKey = params.encryptKey?.trim();
   if (!encryptKey) {
-    return true;
+    return false;
   }
 
   const timestampHeader = params.headers["x-lark-request-timestamp"];
@@ -151,6 +151,10 @@ export async function monitorWebhook({
 }: MonitorTransportParams): Promise<void> {
   const log = runtime?.log ?? console.log;
   const error = runtime?.error ?? console.error;
+  const encryptKey = account.encryptKey?.trim();
+  if (!encryptKey) {
+    throw new Error(`Feishu account "${accountId}" webhook mode requires encryptKey`);
+  }
 
   const port = account.config.webhookPort ?? 3000;
   const path = account.config.webhookPath ?? "/feishu/events";
@@ -203,7 +207,7 @@ export async function monitorWebhook({
           !isFeishuWebhookSignatureValid({
             headers: req.headers,
             rawBody,
-            encryptKey: account.encryptKey,
+            encryptKey,
           })
         ) {
           respondText(res, 401, "Invalid signature");
@@ -217,7 +221,7 @@ export async function monitorWebhook({
         }
 
         const { isChallenge, challenge } = Lark.generateChallenge(payload, {
-          encryptKey: account.encryptKey ?? "",
+          encryptKey,
         });
         if (isChallenge) {
           res.statusCode = 200;
