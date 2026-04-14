@@ -13,6 +13,7 @@ Docs: https://docs.openclaw.ai
 ### Fixes
 
 - Agents/context engines: run opt-in turn maintenance as idle-aware background work so the next foreground turn no longer waits on proactive maintenance. (#65233) thanks @100yenadmin
+- Ollama/OpenAI-compat: send `stream_options.include_usage` for Ollama streaming completions so local Ollama runs report real usage instead of falling back to bogus prompt-token counts that trigger premature compaction. (#64568) Thanks @xchunzhao and @vincentkoc.
 - Agents/local models: clarify low-context preflight hints for self-hosted models, point config-backed caps at the relevant OpenClaw setting, and stop suggesting larger models when `agents.defaults.contextTokens` is the real limit. (#66236) Thanks @ImLukeF.
 - Agents/context engine: compact engine-owned sessions from the first tool-loop delta and preserve ingest fallback when `afterTurn` is absent, so long-running tool loops can stay bounded without dropping engine state. (#63555) Thanks @Bikkies.
 
