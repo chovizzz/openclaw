@@ -13,6 +13,7 @@ Docs: https://docs.openclaw.ai
 ### Fixes
 
 - Agents/context engines: run opt-in turn maintenance as idle-aware background work so the next foreground turn no longer waits on proactive maintenance. (#65233) thanks @100yenadmin
+- Agents/local models: clarify low-context preflight hints for self-hosted models, point config-backed caps at the relevant OpenClaw setting, and stop suggesting larger models when `agents.defaults.contextTokens` is the real limit. (#66236) Thanks @ImLukeF.
 
 ## 2026.4.8
 
