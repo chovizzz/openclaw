@@ -9,6 +9,7 @@ Docs: https://docs.openclaw.ai
 - Gateway/config reload (local fork): optional `gateway.reload.browserProfiles` (`restart` default, `hot`) so `browser.profiles` edits can hot-apply without a full gateway process restart when `gateway.reload.mode` allows it.
 - Plugins/bundled channels: setup-runtime loading now accepts `defineBundledChannelSetupEntry` exports (`loadSetupPlugin`) so Feishu and other bundled channels no longer fail validation with “missing register/activate export”.
 - Dependencies: declare `acpx` at the package root so `acpx/runtime` resolves when the embedded ACPX extension loads from `dist` (fixes `Cannot find module 'acpx/runtime'` after install/build).
+- Agents/local models: add `agents.defaults.localModelMode: "lean"` to drop heavyweight default tools like `browser`, `cron`, and `message`, reducing prompt size for weaker local-model setups without changing the normal path. Thanks @ImLukeF.
 
 ### Fixes
 

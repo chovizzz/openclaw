@@ -9,6 +9,8 @@ import type {
 import type { MemorySearchConfig } from "./types.tools.js";
 
 export type AgentContextInjection = "always" | "continuation-skip";
+export type EmbeddedPiExecutionContract = "default" | "strict-agentic";
+export type LocalModelMode = "default" | "lean";
 
 export type AgentModelEntryConfig = {
   alias?: string;
@@ -171,6 +173,12 @@ export type AgentDefaultsConfig = {
   bootstrapMaxChars?: number;
   /** Max total chars across all injected bootstrap files (default: 150000). */
   bootstrapTotalMaxChars?: number;
+  /**
+   * Optional local-model prompt profile:
+   * - default: keep the standard tool surface
+   * - lean: drop heavyweight non-essential tools for smaller or weaker models
+   */
+  localModelMode?: LocalModelMode;
   /**
    * Agent-visible bootstrap truncation warning mode:
    * - off: do not inject warning text
