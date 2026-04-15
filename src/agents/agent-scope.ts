@@ -20,14 +20,7 @@ import {
 } from "../shared/string-coerce.js";
 import { resolveUserPath } from "../utils.js";
 import { resolveEffectiveAgentSkillFilter } from "./skills/agent-filter.js";
-import { resolveDefaultAgentWorkspaceDir } from "./workspace.js";
-
-let log: ReturnType<typeof createSubsystemLogger> | null = null;
-
-function getLog(): ReturnType<typeof createSubsystemLogger> {
-  log ??= createSubsystemLogger("agent-scope");
-  return log;
-}
+export { resolveAgentContextLimits } from "./agent-scope-config.js";
 
 /** Strip null bytes from paths to prevent ENOTDIR errors. */
 function stripNullBytes(s: string): string {

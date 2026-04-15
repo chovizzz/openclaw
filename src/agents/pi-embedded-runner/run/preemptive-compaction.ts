@@ -44,6 +44,7 @@ export function shouldPreemptivelyCompactBeforePrompt(params: {
   prompt: string;
   contextTokenBudget: number;
   reserveTokens: number;
+  toolResultMaxChars?: number;
 }): {
   route: PreemptiveCompactionRoute;
   shouldCompact: boolean;
@@ -69,6 +70,7 @@ export function shouldPreemptivelyCompactBeforePrompt(params: {
   const toolResultPotential = estimateToolResultReductionPotential({
     messages: params.messages,
     contextWindowTokens: params.contextTokenBudget,
+    maxCharsOverride: params.toolResultMaxChars,
   });
   const overflowChars = overflowTokens * ESTIMATED_CHARS_PER_TOKEN;
   const truncationBufferChars = TRUNCATION_ROUTE_BUFFER_TOKENS * ESTIMATED_CHARS_PER_TOKEN;
