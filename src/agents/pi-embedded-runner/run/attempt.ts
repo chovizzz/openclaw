@@ -392,13 +392,13 @@ function summarizeSessionContext(messages: AgentMessage[]): {
 }
 
 export function resolveUnknownToolGuardThreshold(loopDetection?: {
-  enabled?: boolean;
   unknownToolThreshold?: number;
-}): number | undefined {
-  if (loopDetection?.enabled !== true) {
-    return undefined;
+}): number {
+  const raw = loopDetection?.unknownToolThreshold;
+  if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) {
+    return Math.floor(raw);
   }
-  return loopDetection.unknownToolThreshold ?? UNKNOWN_TOOL_THRESHOLD;
+  return UNKNOWN_TOOL_THRESHOLD;
 }
 
 export async function runEmbeddedAttempt(
