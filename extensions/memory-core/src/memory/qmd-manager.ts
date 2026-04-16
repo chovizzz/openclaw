@@ -54,6 +54,22 @@ import {
 import { asRecord } from "../dreaming-shared.js";
 import { resolveQmdCollectionPatternFlags, type QmdCollectionPatternFlag } from "./qmd-compat.js";
 
+function isDefaultMemoryPath(relPath: string): boolean {
+  const normalized = relPath.trim().replace(/^\.\//, "").replace(/\\/g, "/");
+  if (!normalized) {
+    return false;
+  }
+  if (
+    normalized === "MEMORY.md" ||
+    normalized === "memory.md" ||
+    normalized === "DREAMS.md" ||
+    normalized === "dreams.md"
+  ) {
+    return true;
+  }
+  return normalized.startsWith("memory/");
+}
+
 type SqliteDatabase = import("node:sqlite").DatabaseSync;
 
 const log = createSubsystemLogger("memory");

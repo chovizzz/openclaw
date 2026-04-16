@@ -1,3 +1,4 @@
+import fsSync from "node:fs";
 import fs from "node:fs/promises";
 import { hasConfiguredModelFallbacks, resolveSessionAgentId } from "../../agents/agent-scope.js";
 import { lookupContextTokens, resolveContextTokensForModel } from "../../agents/context.js";
@@ -420,7 +421,7 @@ export async function runReplyAgent(params: {
         transcriptCandidates.add(resolveSessionTranscriptPath(prevSessionId, agentId));
         for (const candidate of transcriptCandidates) {
           try {
-            fs.unlinkSync(candidate);
+            fsSync.unlinkSync(candidate);
           } catch {
             // Best-effort cleanup.
           }

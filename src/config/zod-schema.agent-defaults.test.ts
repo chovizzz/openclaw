@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { AgentDefaultsSchema } from "./zod-schema.agent-defaults.js";
+import { AgentEntrySchema } from "./zod-schema.agent-runtime.js";
 
 describe("agent defaults schema", () => {
   it("accepts subagent archiveAfterMinutes=0 to disable archiving", () => {

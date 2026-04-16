@@ -131,12 +131,7 @@ async function buildWebchatAudioOnlyAssistantMessage(
     onLocalAudioAccessDenied?: (message: string) => void;
   },
 ): Promise<{ content: Array<Record<string, unknown>>; transcriptText: string } | null> {
-  const audioBlocks = await buildWebchatAudioContentBlocksFromReplyPayloads(payloads, {
-    localRoots: options?.localRoots,
-    onLocalAudioAccessDenied: (err) => {
-      options?.onLocalAudioAccessDenied?.(formatForLog(err));
-    },
-  });
+  const audioBlocks = await buildWebchatAudioContentBlocksFromReplyPayloads(payloads);
   if (audioBlocks.length === 0) {
     return null;
   }

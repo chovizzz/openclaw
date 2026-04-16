@@ -3409,6 +3409,7 @@ describe("QmdMemoryManager", () => {
 
     const { manager } = await createManager();
 
+    const relPath = "window.md";
     const result = await manager.readFile({ relPath, from: 10, lines: 3 });
     expect(result).toEqual({
       path: relPath,

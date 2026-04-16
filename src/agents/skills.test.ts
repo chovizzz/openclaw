@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { withPathResolutionEnv } from "../test-utils/env.js";
 import {
   clearRuntimeConfigSnapshot,
   setRuntimeConfigSnapshot,
@@ -29,6 +30,10 @@ const resolveTestSkillDirs = (workspaceDir: string) => ({
 
 const makeWorkspace = async () => await fixtureSuite.createCaseDir("workspace");
 const apiKeyField = ["api", "Key"].join("");
+
+function withWorkspaceHome<T>(workspaceDir: string, cb: () => T): T {
+  return withPathResolutionEnv(workspaceDir, { PATH: "" }, () => cb());
+}
 
 const withClearedEnv = <T>(
   keys: string[],

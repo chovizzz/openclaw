@@ -1007,7 +1007,7 @@ export async function runEmbeddedPiAgent(
                     maxCharsOverride: resolveLiveToolResultMaxChars({
                       contextWindowTokens: ctxInfo.tokens,
                       cfg: params.config,
-                      agentId: sessionAgentId,
+                      agentId: params.agentId,
                     }),
                     sessionId: params.sessionId,
                     sessionKey: params.sessionKey,
@@ -1037,7 +1037,7 @@ export async function runEmbeddedPiAgent(
               const toolResultMaxChars = resolveLiveToolResultMaxChars({
                 contextWindowTokens,
                 cfg: params.config,
-                agentId: sessionAgentId,
+                agentId: params.agentId,
               });
               const hasOversized = attempt.messagesSnapshot
                 ? sessionLikelyHasOversizedToolResults({

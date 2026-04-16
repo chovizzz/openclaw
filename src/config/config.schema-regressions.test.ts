@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { validateConfigObject } from "./config.js";
+import { IMessageConfigSchema } from "./zod-schema.providers-core.js";
 
 describe("config schema regressions", () => {
   it("accepts nested telegram groupPolicy overrides", () => {

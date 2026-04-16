@@ -75,6 +75,8 @@ export type AgentConfig = {
   agentDir?: string;
   /** Optional per-agent full system prompt replacement. */
   systemPromptOverride?: AgentDefaultsConfig["systemPromptOverride"];
+  /** Optional per-agent embedded harness policy override. */
+  embeddedHarness?: AgentEmbeddedHarnessConfig;
   model?: AgentModelConfig;
   /** Optional per-agent default thinking level (overrides agents.defaults.thinkingDefault). */
   thinkingDefault?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "adaptive";
@@ -104,6 +106,11 @@ export type AgentConfig = {
     model?: AgentModelConfig;
     /** Require explicit agentId in sessions_spawn (no default same-as-caller). */
     requireAgentId?: boolean;
+  };
+  /** Optional per-agent embedded Pi overrides. */
+  embeddedPi?: {
+    /** Optional per-agent execution contract override. */
+    executionContract?: EmbeddedPiExecutionContract;
   };
   /** Optional per-agent sandbox overrides. */
   sandbox?: AgentSandboxConfig;
