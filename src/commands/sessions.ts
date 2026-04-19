@@ -1,7 +1,7 @@
 import { lookupContextTokens } from "../agents/context.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../agents/defaults.js";
 import { loadConfig } from "../config/config.js";
-import { loadSessionStore, resolveFreshSessionTotalTokens } from "../config/sessions.js";
+import { loadSessionStore, resolveSessionTotalTokens } from "../config/sessions.js";
 import { classifySessionKey } from "../gateway/session-utils.js";
 import { info } from "../globals.js";
 import { parseAgentSessionKey } from "../routing/session-key.js";
@@ -157,7 +157,7 @@ export async function sessionsCommand(
         const model = resolveSessionDisplayModel(cfg, r, displayDefaults);
         return {
           ...r,
-          totalTokens: resolveFreshSessionTotalTokens(r) ?? null,
+          totalTokens: resolveSessionTotalTokens(r) ?? null,
           totalTokensFresh:
             typeof r.totalTokens === "number" ? r.totalTokensFresh !== false : false,
           contextTokens:
@@ -202,7 +202,7 @@ export async function sessionsCommand(
   for (const row of rows) {
     const model = resolveSessionDisplayModel(cfg, row, displayDefaults);
     const contextTokens = row.contextTokens ?? lookupContextTokens(model) ?? configContextTokens;
-    const total = resolveFreshSessionTotalTokens(row);
+    const total = resolveSessionTotalTokens(row);
 
     const line = [
       ...(showAgentColumn
