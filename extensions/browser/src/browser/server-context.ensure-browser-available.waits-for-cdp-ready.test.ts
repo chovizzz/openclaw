@@ -21,7 +21,7 @@ function setupEnsureBrowserAvailableHarness() {
   const ctx = createBrowserRouteContext({ getState: () => state });
   const profile = ctx.forProfile("openclaw");
 
-  return { launchOpenClawChrome, stopOpenClawChrome, isChromeCdpReady, profile };
+  return { launchOpenClawChrome, stopOpenClawChrome, isChromeCdpReady, profile, state };
 }
 
 afterEach(() => {
@@ -95,6 +95,52 @@ describe("browser server-context ensureBrowserAvailable", () => {
 
     expect(launchOpenClawChrome).toHaveBeenCalledTimes(2);
     expect(stopOpenClawChrome).not.toHaveBeenCalled();
+  });
+
+  it("cools down repeated managed Chrome launch failures across route contexts", async () => {
+    const { launchOpenClawChrome, stopOpenClawChrome, isChromeCdpReady, state } =
+      setupEnsureBrowserAvailableHarness();
+    isChromeCdpReady.mockResolvedValue(true);
+    launchOpenClawChrome.mockRejectedValue(new Error("Failed to start Chrome CDP"));
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const ctx = createBrowserRouteContext({ getState: () => state });
+      await expect(ctx.forProfile("openclaw").ensureBrowserAvailable()).rejects.toThrow(
+        "Failed to start Chrome CDP",
+      );
+    }
+
+    const cooledDownCtx = createBrowserRouteContext({ getState: () => state });
+    await expect(cooledDownCtx.forProfile("openclaw").ensureBrowserAvailable()).rejects.toThrow(
+      'Browser launch for profile "openclaw" is cooling down after 3 consecutive managed Chrome launch failures.',
+    );
+    await expect(cooledDownCtx.forProfile("openclaw").ensureBrowserAvailable()).rejects.toThrow(
+      "set browser.enabled=false if the browser tool is not needed",
+    );
+
+    expect(launchOpenClawChrome).toHaveBeenCalledTimes(3);
+    expect(stopOpenClawChrome).not.toHaveBeenCalled();
+  });
+
+  it("allows one managed Chrome launch attempt after the cooldown expires", async () => {
+    const { launchOpenClawChrome, isChromeCdpReady, state } = setupEnsureBrowserAvailableHarness();
+    isChromeCdpReady.mockResolvedValue(true);
+    launchOpenClawChrome.mockRejectedValue(new Error("Failed to start Chrome CDP"));
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const ctx = createBrowserRouteContext({ getState: () => state });
+      await expect(ctx.forProfile("openclaw").ensureBrowserAvailable()).rejects.toThrow(
+        "Failed to start Chrome CDP",
+      );
+    }
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    const retryCtx = createBrowserRouteContext({ getState: () => state });
+    await expect(retryCtx.forProfile("openclaw").ensureBrowserAvailable()).rejects.toThrow(
+      "Failed to start Chrome CDP",
+    );
+
+    expect(launchOpenClawChrome).toHaveBeenCalledTimes(4);
   });
 
   it("reuses a pre-existing loopback browser after an initial short probe miss", async () => {

@@ -52,6 +52,55 @@ type AvailabilityOps = {
   stopRunningBrowser: () => Promise<{ stopped: boolean }>;
 };
 
+const MANAGED_LAUNCH_FAILURE_THRESHOLD = 3;
+const MANAGED_LAUNCH_COOLDOWN_BASE_MS = 30_000;
+const MANAGED_LAUNCH_COOLDOWN_MAX_MS = 5 * 60_000;
+
+function normalizeFailureMessage(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err);
+  const trimmed = raw.trim();
+  return trimmed || "unknown browser launch failure";
+}
+
+function resetManagedLaunchFailure(profileState: ProfileRuntimeState): void {
+  profileState.managedLaunchFailure = undefined;
+}
+
+function recordManagedLaunchFailure(profileState: ProfileRuntimeState, err: unknown): void {
+  const previous = profileState.managedLaunchFailure;
+  const consecutiveFailures = (previous?.consecutiveFailures ?? 0) + 1;
+  const exponent = Math.max(0, consecutiveFailures - MANAGED_LAUNCH_FAILURE_THRESHOLD);
+  const cooldownMs =
+    consecutiveFailures >= MANAGED_LAUNCH_FAILURE_THRESHOLD
+      ? Math.min(MANAGED_LAUNCH_COOLDOWN_MAX_MS, MANAGED_LAUNCH_COOLDOWN_BASE_MS * 2 ** exponent)
+      : 0;
+  const now = Date.now();
+  profileState.managedLaunchFailure = {
+    consecutiveFailures,
+    lastFailureAt: now,
+    ...(cooldownMs > 0 ? { cooldownUntil: now + cooldownMs } : {}),
+    lastError: normalizeFailureMessage(err),
+  };
+}
+
+function assertManagedLaunchNotCoolingDown(profileName: string, profileState: ProfileRuntimeState) {
+  const failure = profileState.managedLaunchFailure;
+  if (!failure || failure.consecutiveFailures < MANAGED_LAUNCH_FAILURE_THRESHOLD) {
+    return;
+  }
+  const cooldownUntil = failure.cooldownUntil ?? 0;
+  const remainingMs = cooldownUntil - Date.now();
+  if (remainingMs <= 0) {
+    return;
+  }
+  const retrySeconds = Math.max(1, Math.ceil(remainingMs / 1000));
+  throw new BrowserProfileUnavailableError(
+    `Browser launch for profile "${profileName}" is cooling down after ${failure.consecutiveFailures} consecutive managed Chrome launch failures. ` +
+      `Retry in ${retrySeconds}s after fixing Chrome startup, or set browser.enabled=false if the browser tool is not needed. ` +
+      `Last error: ${failure.lastError}`,
+  );
+}
+
 export function createProfileAvailability({
   opts,
   profile,
@@ -143,6 +192,7 @@ export function createProfileAvailability({
     profileState.lastTargetId = null;
 
     const previousProfile = reconcile.previousProfile;
+    resetManagedLaunchFailure(profileState);
     if (profileState.running) {
       await stopOpenClawChrome(profileState.running).catch(() => {});
       setProfileRunning(null);
@@ -192,6 +242,19 @@ export function createProfileAvailability({
     throw new BrowserProfileUnavailableError(formatChromeMcpAttachFailure(lastError));
   };
 
+  const launchManagedChrome = async (
+    profileState: ProfileRuntimeState,
+    current: BrowserServerState,
+  ) => {
+    assertManagedLaunchNotCoolingDown(profile.name, profileState);
+    try {
+      return await launchOpenClawChrome(current.resolved, profile);
+    } catch (err) {
+      recordManagedLaunchFailure(profileState, err);
+      throw err;
+    }
+  };
+
   let inflightEnsureBrowserAvailable: Promise<void> | null = null;
 
   const ensureBrowserAvailableOnce = async (): Promise<void> => {
@@ -227,6 +290,7 @@ export function createProfileAvailability({
           (await isHttpReachable(PROFILE_ATTACH_RETRY_TIMEOUT_MS)) &&
           (await isReachable(PROFILE_ATTACH_RETRY_TIMEOUT_MS))
         ) {
+          resetManagedLaunchFailure(profileState);
           return;
         }
       }
@@ -237,13 +301,15 @@ export function createProfileAvailability({
             : `Browser attachOnly is enabled and profile "${profile.name}" is not running.`,
         );
       }
-      const launched = await launchOpenClawChrome(current.resolved, profile);
+      const launched = await launchManagedChrome(profileState, current);
       attachRunning(launched);
       try {
         await waitForCdpReadyAfterLaunch();
+        resetManagedLaunchFailure(profileState);
       } catch (err) {
         await stopOpenClawChrome(launched).catch(() => {});
         setProfileRunning(null);
+        recordManagedLaunchFailure(profileState, err);
         throw err;
       }
       return;
@@ -251,6 +317,7 @@ export function createProfileAvailability({
 
     // Port is reachable - check if we own it.
     if (await isReachable()) {
+      resetManagedLaunchFailure(profileState);
       return;
     }
 
@@ -284,14 +351,17 @@ export function createProfileAvailability({
     await stopOpenClawChrome(profileState.running);
     setProfileRunning(null);
 
-    const relaunched = await launchOpenClawChrome(current.resolved, profile);
+    const relaunched = await launchManagedChrome(profileState, current);
     attachRunning(relaunched);
 
     if (!(await isReachable(PROFILE_POST_RESTART_WS_TIMEOUT_MS))) {
-      throw new Error(
+      const err = new Error(
         `Chrome CDP websocket for profile "${profile.name}" is not reachable after restart.`,
       );
+      recordManagedLaunchFailure(profileState, err);
+      throw err;
     }
+    resetManagedLaunchFailure(profileState);
   };
 
   const ensureBrowserAvailable = async (): Promise<void> => {
@@ -311,6 +381,7 @@ export function createProfileAvailability({
       return { stopped };
     }
     const profileState = getProfileState();
+    resetManagedLaunchFailure(profileState);
     if (!profileState.running) {
       const idleStop = resolveIdleProfileStopOutcome(profile);
       if (idleStop.closePlaywright) {
