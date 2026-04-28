@@ -9,6 +9,6 @@ describe("feishu setup entry", () => {
     const { default: setupEntry } = await import("./setup-entry.js");
 
     expect(setupEntry.kind).toBe("bundled-channel-setup-entry");
-    expect(setupEntry.loadSetupPlugin({ installRuntimeDeps: false })?.id).toBe("feishu");
+    expect(setupEntry.loadSetupPlugin()?.id).toBe("feishu");
   });
 });
