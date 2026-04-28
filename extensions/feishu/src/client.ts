@@ -3,6 +3,10 @@ import * as Lark from "@larksuiteoapi/node-sdk";
 import { resolveAmbientNodeProxyAgent } from "openclaw/plugin-sdk/extension-shared";
 import type { FeishuConfig, FeishuDomain, ResolvedFeishuAccount } from "./types.js";
 
+const FEISHU_WS_CONFIG = {
+  PingInterval: 30,
+  PingTimeout: 3,
+} as const;
 type FeishuClientSdk = Pick<
   typeof Lark,
   | "AppType"
@@ -186,7 +190,10 @@ export async function createFeishuWSClient(account: ResolvedFeishuAccount): Prom
     appSecret,
     domain: resolveDomain(domain),
     loggerLevel: feishuClientSdk.LoggerLevel.info,
+    wsConfig: FEISHU_WS_CONFIG,
     ...(agent ? { agent } : {}),
+  } as ConstructorParameters<typeof feishuClientSdk.WSClient>[0] & {
+    wsConfig: typeof FEISHU_WS_CONFIG;
   });
 }
 
