@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import "../../test-support/browser-security-runtime.mock.js";
 import type { BrowserServerState } from "./server-context.js";
 
 const chromeMcpMock = vi.hoisted(() => ({
@@ -21,10 +20,6 @@ const chromeMcpMock = vi.hoisted(() => ({
 }));
 
 vi.mock("./chrome-mcp.js", () => chromeMcpMock);
-
-vi.mock("./chrome-mcp.runtime.js", () => ({
-  getChromeMcpModule: vi.fn(async () => chromeMcpMock),
-}));
 
 const { createBrowserRouteContext } = await import("./server-context.js");
 const chromeMcp = chromeMcpMock;
@@ -49,12 +44,6 @@ function makeState(): BrowserServerState {
       noSandbox: false,
       attachOnly: false,
       defaultProfile: "chrome-live",
-      tabCleanup: {
-        enabled: true,
-        idleMinutes: 120,
-        maxTabsPerSession: 8,
-        sweepMinutes: 5,
-      },
       profiles: {
         "chrome-live": {
           cdpPort: 18801,
