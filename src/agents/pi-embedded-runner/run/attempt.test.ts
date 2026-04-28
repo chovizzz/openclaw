@@ -404,12 +404,12 @@ describe("resolveUnknownToolGuardThreshold", () => {
     // The unknown-tool guard has no false-positive surface — the tool is
     // objectively not registered — so it is always on regardless of the
     // opt-in genericRepeat/pingPong/pollNoProgress detectors.
-    expect(resolveUnknownToolGuardThreshold({ enabled: false })).toBe(10);
-    expect(resolveUnknownToolGuardThreshold({ enabled: false, unknownToolThreshold: 3 })).toBe(3);
+    expect(resolveUnknownToolGuardThreshold({})).toBe(10);
+    expect(resolveUnknownToolGuardThreshold({ unknownToolThreshold: 3 })).toBe(3);
   });
 
   it("uses the configured threshold override when provided", () => {
-    expect(resolveUnknownToolGuardThreshold({ enabled: true, unknownToolThreshold: 4 })).toBe(4);
+    expect(resolveUnknownToolGuardThreshold({ unknownToolThreshold: 4 })).toBe(4);
   });
 
   it("falls back to the default threshold when the override is non-positive", () => {
