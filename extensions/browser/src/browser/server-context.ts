@@ -76,8 +76,13 @@ function createProfileContext(
     getProfileState,
   });
 
-  const { ensureBrowserAvailable, isHttpReachable, isReachable, stopRunningBrowser } =
-    createProfileAvailability({
+  const {
+    ensureBrowserAvailable,
+    isHttpReachable,
+    isTransportAvailable,
+    isReachable,
+    stopRunningBrowser,
+  } = createProfileAvailability({
       opts,
       profile,
       state,
@@ -106,6 +111,7 @@ function createProfileContext(
     ensureBrowserAvailable,
     ensureTabAvailable,
     isHttpReachable,
+    isTransportAvailable,
     isReachable,
     listTabs,
     openTab,
@@ -246,6 +252,7 @@ export function createBrowserRouteContext(opts: ContextOptions): BrowserRouteCon
     ensureBrowserAvailable: () => getDefaultContext().ensureBrowserAvailable(),
     ensureTabAvailable: (targetId) => getDefaultContext().ensureTabAvailable(targetId),
     isHttpReachable: (timeoutMs) => getDefaultContext().isHttpReachable(timeoutMs),
+    isTransportAvailable: (timeoutMs) => getDefaultContext().isTransportAvailable(timeoutMs),
     isReachable: (timeoutMs) => getDefaultContext().isReachable(timeoutMs),
     listTabs: () => getDefaultContext().listTabs(),
     openTab: (url) => getDefaultContext().openTab(url),

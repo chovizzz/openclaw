@@ -8,6 +8,10 @@ import { resolveProfileContext } from "./agent.shared.js";
 import type { BrowserRequest, BrowserResponse, BrowserRouteRegistrar } from "./types.js";
 import { getProfileContext, jsonError, toStringOrEmpty } from "./utils.js";
 
+const STATUS_CDP_HTTP_TIMEOUT_MS = 300;
+const STATUS_CDP_TRANSPORT_TIMEOUT_MS = 600;
+const STATUS_CHROME_MCP_TRANSPORT_TIMEOUT_MS = 5_000;
+
 function handleBrowserRouteError(res: BrowserResponse, err: unknown) {
   const mapped = toBrowserErrorResponse(err);
   if (mapped) {
@@ -74,13 +78,20 @@ export function registerBrowserBasicRoutes(app: BrowserRouteRegistrar, ctx: Brow
     }
 
     try {
-      const [cdpHttp, cdpReady] = await Promise.all([
-        profileCtx.isHttpReachable(300),
-        profileCtx.isReachable(600),
-      ]);
+      const capabilities = getBrowserProfileCapabilities(profileCtx.profile);
+      const [cdpHttp, cdpReady] = capabilities.usesChromeMcp
+        ? await (async () => {
+            const ready = await profileCtx.isTransportAvailable(
+              STATUS_CHROME_MCP_TRANSPORT_TIMEOUT_MS,
+            );
+            return [ready, ready] as const;
+          })()
+        : await Promise.all([
+            profileCtx.isHttpReachable(STATUS_CDP_HTTP_TIMEOUT_MS),
+            profileCtx.isTransportAvailable(STATUS_CDP_TRANSPORT_TIMEOUT_MS),
+          ]);
 
       const profileState = current.profiles.get(profileCtx.profile.name);
-      const capabilities = getBrowserProfileCapabilities(profileCtx.profile);
       let detectedBrowser: string | null = null;
       let detectedExecutablePath: string | null = null;
       let detectError: string | null = null;

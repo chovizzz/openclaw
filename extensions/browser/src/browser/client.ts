@@ -25,6 +25,10 @@ export type BrowserStatus = {
   attachOnly: boolean;
 };
 
+const BROWSER_STATUS_REQUEST_TIMEOUT_MS = 7_500;
+const BROWSER_DOCTOR_REQUEST_TIMEOUT_MS = 7_500;
+const BROWSER_DEEP_DOCTOR_REQUEST_TIMEOUT_MS = 10_000;
+
 export type ProfileStatus = {
   name: string;
   transport?: BrowserTransport;
@@ -115,7 +119,7 @@ export async function browserStatus(
     timeoutMs:
       typeof opts?.timeoutMs === "number" && Number.isFinite(opts.timeoutMs)
         ? Math.max(1, Math.floor(opts.timeoutMs))
-        : 1500,
+        : BROWSER_STATUS_REQUEST_TIMEOUT_MS,
   });
 }
 

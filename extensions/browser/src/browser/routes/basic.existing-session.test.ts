@@ -8,7 +8,11 @@ vi.mock("../chrome-mcp.js", () => ({
 const { BrowserProfileUnavailableError } = await import("../errors.js");
 const { registerBrowserBasicRoutes } = await import("./basic.js");
 
-function createExistingSessionProfileState(params?: { isHttpReachable?: () => Promise<boolean> }) {
+function createExistingSessionProfileState(params?: {
+  isHttpReachable?: () => Promise<boolean>;
+  isTransportAvailable?: () => Promise<boolean>;
+  isReachable?: () => Promise<boolean>;
+}) {
   return {
     resolved: {
       enabled: true,
@@ -29,7 +33,8 @@ function createExistingSessionProfileState(params?: { isHttpReachable?: () => Pr
           attachOnly: true,
         },
         isHttpReachable: params?.isHttpReachable ?? (async () => true),
-        isReachable: async () => true,
+        isTransportAvailable: params?.isTransportAvailable ?? (async () => true),
+        isReachable: params?.isReachable ?? (async () => true),
       }) as never,
   };
 }
@@ -81,6 +86,28 @@ describe("basic browser routes", () => {
       cdpUrl: null,
       userDataDir: "/tmp/brave-profile",
       pid: 4321,
+    });
+  });
+
+  it("probes Chrome MCP transport only once for status", async () => {
+    const isHttpReachable = vi.fn(async () => true);
+    const isTransportAvailable = vi.fn(async () => true);
+
+    const response = await callBasicRouteWithState({
+      state: createExistingSessionProfileState({
+        isHttpReachable,
+        isTransportAvailable,
+      }),
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(isTransportAvailable).toHaveBeenCalledTimes(1);
+    expect(isTransportAvailable).toHaveBeenCalledWith(5_000);
+    expect(isHttpReachable).not.toHaveBeenCalled();
+    expect(response.body).toMatchObject({
+      cdpHttp: true,
+      cdpReady: true,
+      running: true,
     });
   });
 });

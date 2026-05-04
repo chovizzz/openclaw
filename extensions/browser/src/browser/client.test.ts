@@ -280,6 +280,15 @@ describe("browser client", () => {
     ).resolves.toMatchObject({ ok: true, path: "/tmp/a.png" });
 
     expect(calls.some((c) => c.url.endsWith("/tabs"))).toBe(true);
+    const status = calls.find((c) => {
+      try {
+        const pathname = new URL(c.url).pathname;
+        return pathname === "/" || pathname === "";
+      } catch {
+        return false;
+      }
+    });
+    expect(status?.init?.timeoutMs).toBe(7_500);
     const open = calls.find((c) => c.url.endsWith("/tabs/open"));
     expect(open?.init?.method).toBe("POST");
 
