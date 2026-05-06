@@ -114,6 +114,104 @@ describe("maybeRepairLegacyCronStore", () => {
     );
   });
 
+  it("repairs malformed persisted cron ids before list rendering sees them", async () => {
+    const storePath = await makeTempStorePath();
+    await writeCronStore(storePath, [
+      createLegacyCronJob({
+        id: 42,
+        jobId: undefined,
+        notify: false,
+      }),
+      createLegacyCronJob({
+        id: undefined,
+        jobId: undefined,
+        name: "Missing id",
+        notify: false,
+      }),
+    ]);
+
+    await maybeRepairLegacyCronStore({
+      cfg: createCronConfig(storePath),
+      options: {},
+      prompter: makePrompter(true),
+    });
+
+    const persisted = JSON.parse(await fs.readFile(storePath, "utf-8")) as {
+      jobs: Array<Record<string, unknown>>;
+    };
+    expect(persisted.jobs[0]?.id).toBe("42");
+    expect(typeof persisted.jobs[1]?.id).toBe("string");
+    expect(String(persisted.jobs[1]?.id)).toMatch(/^cron-/);
+    expect(noteMock).toHaveBeenCalledWith(
+      expect.stringContaining("stores `id` as a non-string value"),
+      "Cron",
+    );
+    expect(noteMock).toHaveBeenCalledWith(
+      expect.stringContaining("missing a canonical string `id`"),
+      "Cron",
+    );
+  });
+
+  it("repairs invalid persisted cron payload model sentinels", async () => {
+    const storePath = await makeTempStorePath();
+    await writeCronStore(storePath, [
+      {
+        id: "bad-model-default",
+        name: "Bad model default",
+        enabled: true,
+        createdAtMs: Date.parse("2026-02-01T00:00:00.000Z"),
+        updatedAtMs: Date.parse("2026-02-02T00:00:00.000Z"),
+        schedule: { kind: "every", everyMs: 60_000, anchorMs: 1 },
+        sessionTarget: "isolated",
+        wakeMode: "now",
+        payload: {
+          kind: "agentTurn",
+          message: "Status",
+          model: "default",
+        },
+        delivery: { mode: "announce" },
+        state: {},
+      },
+      {
+        id: "bad-model-null",
+        name: "Bad model null",
+        enabled: true,
+        createdAtMs: Date.parse("2026-02-01T00:00:00.000Z"),
+        updatedAtMs: Date.parse("2026-02-02T00:00:00.000Z"),
+        schedule: { kind: "every", everyMs: 60_000, anchorMs: 1 },
+        sessionTarget: "isolated",
+        wakeMode: "now",
+        payload: {
+          kind: "agentTurn",
+          message: "Status",
+          model: "null",
+        },
+        delivery: { mode: "announce" },
+        state: {},
+      },
+    ]);
+
+    await maybeRepairLegacyCronStore({
+      cfg: createCronConfig(storePath),
+      options: {},
+      prompter: makePrompter(true),
+    });
+
+    const persisted = JSON.parse(await fs.readFile(storePath, "utf-8")) as {
+      jobs: Array<Record<string, unknown>>;
+    };
+    for (const job of persisted.jobs) {
+      expect((job.payload as Record<string, unknown>).model).toBeUndefined();
+    }
+    expect(noteMock).toHaveBeenCalledWith(
+      expect.stringContaining("2 jobs store an invalid cron payload model inheritance sentinel"),
+      "Cron",
+    );
+    expect(noteMock).toHaveBeenCalledWith(
+      expect.stringContaining("Cron store normalized"),
+      "Doctor changes",
+    );
+  });
   it("warns instead of replacing announce delivery for notify fallback jobs", async () => {
     const storePath = await makeTempStorePath();
     await fs.mkdir(path.dirname(storePath), { recursive: true });
