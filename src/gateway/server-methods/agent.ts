@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import { listAgentIds } from "../../agents/agent-scope.js";
 import type { AgentInternalEvent } from "../../agents/internal-events.js";
 import {
@@ -13,6 +14,10 @@ import {
   resolveAgentIdFromSessionKey,
   resolveExplicitAgentSessionKey,
   resolveAgentMainSessionKey,
+  resolveRotatedGeneratedSessionFilePath,
+  resolveSessionLifecycleTimestamps,
+  resolveSessionResetPolicy,
+  resolveSessionResetType,
   type SessionEntry,
   updateSessionStore,
 } from "../../config/sessions.js";
@@ -34,6 +39,7 @@ import {
 } from "../../shared/string-coerce.js";
 import { createRunningTaskRun } from "../../tasks/task-executor.js";
 import {
+  mergeDeliveryContext,
   normalizeDeliveryContext,
   normalizeSessionDeliveryFields,
 } from "../../utils/delivery-context.js";
@@ -563,6 +569,36 @@ export const agentHandlers: GatewayRequestHandlers = {
       resolvedGroupChannel = resolvedGroupChannel || inheritedGroup?.groupChannel;
       resolvedGroupSpace = resolvedGroupSpace || inheritedGroup?.groupSpace;
       const deliveryFields = normalizeSessionDeliveryFields(entry);
+      // When the session has no delivery context yet (e.g. a freshly-spawned subagent
+      // with deliver: false), seed it from the request's channel/to/threadId params.
+      // Without this, subagent sessions end up with a channel-only deliveryContext
+      // and no `to`/`threadId`, which causes announce delivery to either target the
+      // wrong channel (when the parent's lastTo drifts) or fail entirely.
+      const requestDeliveryHint = normalizeDeliveryContext({
+        channel: request.channel?.trim(),
+        to: request.to?.trim(),
+        accountId: request.accountId?.trim(),
+        // Pass threadId directly — normalizeDeliveryContext handles both
+        // string and numeric threadIds (e.g., Matrix uses integers).
+        threadId: request.threadId,
+      });
+      const effectiveDelivery = mergeDeliveryContext(
+        deliveryFields.deliveryContext,
+        requestDeliveryHint,
+      );
+      const effectiveDeliveryFields = normalizeSessionDeliveryFields({
+        deliveryContext: effectiveDelivery,
+      });
+      const rotatedGeneratedSessionFile =
+        storePath && isNewSession && entry?.sessionId
+          ? resolveRotatedGeneratedSessionFilePath({
+              previousSessionId: entry.sessionId,
+              nextSessionId: sessionId,
+              previousSessionFile: entry.sessionFile,
+              sessionsDir: path.dirname(storePath),
+              agentId: resolveAgentIdFromSessionKey(canonicalKey),
+            })
+          : undefined;
       const nextEntryPatch: SessionEntry = {
         sessionId,
         updatedAt: now,
@@ -590,6 +626,7 @@ export const agentHandlers: GatewayRequestHandlers = {
         space: resolvedGroupSpace ?? entry?.space,
         cliSessionIds: entry?.cliSessionIds,
         claudeCliSessionId: entry?.claudeCliSessionId,
+        ...(rotatedGeneratedSessionFile ? { sessionFile: rotatedGeneratedSessionFile } : {}),
       };
       sessionEntry = mergeSessionEntry(entry, nextEntryPatch);
       const sendPolicy = resolveSendPolicy({
