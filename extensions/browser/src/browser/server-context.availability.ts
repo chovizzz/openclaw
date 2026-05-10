@@ -47,7 +47,7 @@ type AvailabilityDeps = {
 type AvailabilityOps = {
   isHttpReachable: (timeoutMs?: number) => Promise<boolean>;
   isTransportAvailable: (timeoutMs?: number) => Promise<boolean>;
-  isReachable: (timeoutMs?: number) => Promise<boolean>;
+  isReachable: (timeoutMs?: number, options?: { ephemeral?: boolean }) => Promise<boolean>;
   ensureBrowserAvailable: () => Promise<void>;
   stopRunningBrowser: () => Promise<{ stopped: boolean }>;
 };
@@ -117,10 +117,16 @@ export function createProfileAvailability({
       remoteHandshakeTimeoutMs: state().resolved.remoteCdpHandshakeTimeoutMs,
     });
 
-  const isReachable = async (timeoutMs?: number) => {
+  const isReachable = async (timeoutMs?: number, options?: { ephemeral?: boolean }) => {
     if (capabilities.usesChromeMcp) {
-      // listChromeMcpTabs creates the session if needed — no separate ensureChromeMcpAvailable call required
-      await listChromeMcpTabs(profile.name, profile.userDataDir);
+      const callOptions: { timeoutMs?: number; ephemeral?: boolean } = {};
+      if (timeoutMs != null) {
+        callOptions.timeoutMs = timeoutMs;
+      }
+      if (options?.ephemeral) {
+        callOptions.ephemeral = true;
+      }
+      await listChromeMcpTabs(profile.name, profile.userDataDir, callOptions);
       return true;
     }
     const { httpTimeoutMs, wsTimeoutMs } = resolveTimeouts(timeoutMs);
