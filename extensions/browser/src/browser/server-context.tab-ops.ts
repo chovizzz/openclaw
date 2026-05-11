@@ -1,3 +1,4 @@
+import { isSelectableCdpBrowserTarget } from "./cdp-target-filter.js";
 import { CDP_JSON_NEW_TIMEOUT_MS } from "./cdp-timeouts.js";
 import { fetchJson, fetchOk, normalizeCdpHttpBaseForJsonEndpoints } from "./cdp.helpers.js";
 import { appendCdpPath, createTargetViaCdp, normalizeCdpWsUrl } from "./cdp.js";
@@ -75,7 +76,7 @@ export function createProfileTabOps({
       const listPagesViaPlaywright = (mod as Partial<PwAiModule> | null)?.listPagesViaPlaywright;
       if (typeof listPagesViaPlaywright === "function") {
         const pages = await listPagesViaPlaywright({ cdpUrl: profile.cdpUrl });
-        return pages.map((p) => ({
+        return pages.filter(isSelectableCdpBrowserTarget).map((p) => ({
           targetId: p.targetId,
           title: p.title,
           url: p.url,
@@ -101,7 +102,7 @@ export function createProfileTabOps({
         wsUrl: normalizeWsUrl(t.webSocketDebuggerUrl, profile.cdpUrl),
         type: t.type,
       }))
-      .filter((t) => Boolean(t.targetId));
+      .filter((t) => Boolean(t.targetId) && isSelectableCdpBrowserTarget(t));
   };
 
   const enforceManagedTabLimit = async (keepTargetId: string): Promise<void> => {

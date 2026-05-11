@@ -12,6 +12,7 @@ import { chromium } from "playwright-core";
 import { formatErrorMessage } from "../infra/errors.js";
 import { SsrFBlockedError, type SsrFPolicy } from "../infra/net/ssrf.js";
 import { withNoProxyForCdpUrl } from "./cdp-proxy-bypass.js";
+import { isSelectableCdpBrowserTarget } from "./cdp-target-filter.js";
 import {
   appendCdpPath,
   fetchJson,
@@ -1030,10 +1031,14 @@ export async function listPagesViaPlaywright(opts: { cdpUrl: string }): Promise<
     }
     const tid = await pageTargetId(page).catch(() => null);
     if (tid && !isBlockedTarget(opts.cdpUrl, tid)) {
+      const url = page.url();
+      if (!isSelectableCdpBrowserTarget({ url })) {
+        continue;
+      }
       results.push({
         targetId: tid,
         title: await page.title().catch(() => ""),
-        url: page.url(),
+        url,
         type: "page",
       });
     }
