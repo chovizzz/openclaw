@@ -10,9 +10,29 @@ import { getProfileContext, jsonError, toStringOrEmpty } from "./utils.js";
 
 const STATUS_CDP_HTTP_TIMEOUT_MS = 300;
 const STATUS_CDP_TRANSPORT_TIMEOUT_MS = 600;
+const STATUS_CHROME_MCP_TOTAL_TIMEOUT_MS = 7_000;
 const STATUS_CHROME_MCP_TRANSPORT_TIMEOUT_MS = 5_000;
-const STATUS_CHROME_MCP_PAGE_TIMEOUT_MS = 5_000;
-const STATUS_CHROME_MCP_PAGE_TIMEOUT_MS = 5_000;
+
+function remainingChromeMcpStatusTimeoutMs(startedAtMs: number): number {
+  return Math.max(1, STATUS_CHROME_MCP_TOTAL_TIMEOUT_MS - (Date.now() - startedAtMs));
+}
+
+async function probeChromeMcpPageReady(profileCtx: ProfileContext, timeoutMs: number) {
+  const abort = new AbortController();
+  const timer = setTimeout(() => {
+    abort.abort(new Error(`Chrome MCP page-readiness probe timed out after ${timeoutMs}ms.`));
+  }, timeoutMs);
+  try {
+    return await profileCtx.isReachable(timeoutMs, {
+      ephemeral: true,
+      signal: abort.signal,
+    });
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 function handleBrowserRouteError(res: BrowserResponse, err: unknown) {
   const mapped = toBrowserErrorResponse(err);
@@ -83,20 +103,17 @@ export function registerBrowserBasicRoutes(app: BrowserRouteRegistrar, ctx: Brow
       const capabilities = getBrowserProfileCapabilities(profileCtx.profile);
       const [cdpHttp, cdpReady, pageReady] = capabilities.usesChromeMcp
         ? await (async () => {
+            const statusStartedAtMs = Date.now();
             const transportReady = await profileCtx.isTransportAvailable(
               STATUS_CHROME_MCP_TRANSPORT_TIMEOUT_MS,
             );
             if (!transportReady) {
               return [false, false, false] as const;
             }
-            let pageReachable = false;
-            try {
-              pageReachable = await profileCtx.isReachable(STATUS_CHROME_MCP_PAGE_TIMEOUT_MS, {
-                ephemeral: true,
-              });
-            } catch {
-              pageReachable = false;
-            }
+            const pageReachable = await probeChromeMcpPageReady(
+              profileCtx,
+              remainingChromeMcpStatusTimeoutMs(statusStartedAtMs),
+            );
             return [transportReady, transportReady, pageReachable] as const;
           })()
         : await (async () => {

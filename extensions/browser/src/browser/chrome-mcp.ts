@@ -348,30 +348,97 @@ async function waitForChromeMcpReady(
   session: ChromeMcpSession,
   profileName: string,
   timeoutMs?: number,
+  signal?: AbortSignal,
 ): Promise<void> {
-  if (!timeoutMs || timeoutMs <= 0) {
+  if (signal?.aborted) {
+    throw signal.reason ?? new Error("aborted");
+  }
+  if ((!timeoutMs || timeoutMs <= 0) && !signal) {
     await session.ready;
     return;
   }
 
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let abortListener: (() => void) | undefined;
   try {
-    await Promise.race([
-      session.ready,
-      new Promise<never>((_, reject) => {
-        timer = setTimeout(() => {
-          reject(
-            new BrowserProfileUnavailableError(
-              `Chrome MCP existing-session attach for profile "${profileName}" timed out after ${timeoutMs}ms.`,
-            ),
-          );
-        }, timeoutMs);
-      }),
-    ]);
+    const racers: Array<Promise<void> | Promise<never>> = [session.ready];
+    if (timeoutMs && timeoutMs > 0) {
+      racers.push(
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            reject(
+              new BrowserProfileUnavailableError(
+                `Chrome MCP existing-session attach for profile "${profileName}" timed out after ${timeoutMs}ms.`,
+              ),
+            );
+          }, timeoutMs);
+        }),
+      );
+    }
+    if (signal) {
+      racers.push(
+        new Promise<never>((_, reject) => {
+          abortListener = () => reject(signal.reason ?? new Error("aborted"));
+          signal.addEventListener("abort", abortListener, { once: true });
+        }),
+      );
+    }
+    await Promise.race(racers);
   } finally {
     if (timer) {
       clearTimeout(timer);
     }
+    if (signal && abortListener) {
+      signal.removeEventListener("abort", abortListener);
+    }
+  }
+}
+
+async function waitForChromeMcpPendingSession(
+  pending: Promise<ChromeMcpSession>,
+  signal?: AbortSignal,
+): Promise<ChromeMcpSession> {
+  if (signal?.aborted) {
+    throw signal.reason ?? new Error("aborted");
+  }
+  if (!signal) {
+    return await pending;
+  }
+
+  let abortListener: (() => void) | undefined;
+  try {
+    return await Promise.race([
+      pending,
+      new Promise<never>((_, reject) => {
+        abortListener = () => reject(signal.reason ?? new Error("aborted"));
+        signal.addEventListener("abort", abortListener, { once: true });
+      }),
+    ]);
+  } finally {
+    if (abortListener) {
+      signal.removeEventListener("abort", abortListener);
+    }
+  }
+}
+
+async function createChromeMcpSession(
+  profileName: string,
+  userDataDir?: string,
+  signal?: AbortSignal,
+): Promise<ChromeMcpSession> {
+  const created = (sessionFactory ?? createRealSession)(profileName, userDataDir);
+  try {
+    const session = await waitForChromeMcpPendingSession(created, signal);
+    if (signal?.aborted) {
+      await session.client.close().catch(() => {});
+      throw signal.reason ?? new Error("aborted");
+    }
+    return session;
+  } catch (err) {
+    if (signal?.aborted) {
+      void created.then((session) => session.client.close()).catch(() => {});
+    }
+    throw err;
   }
 }
 
@@ -379,6 +446,7 @@ async function getSession(
   profileName: string,
   userDataDir?: string,
   timeoutMs?: number,
+  signal?: AbortSignal,
 ): Promise<ChromeMcpSession> {
   const cacheKey = buildChromeMcpSessionCacheKey(profileName, userDataDir);
   await closeChromeMcpSessionsForProfile(profileName, cacheKey);
@@ -392,7 +460,7 @@ async function getSession(
     let pending = pendingSessions.get(cacheKey);
     if (!pending) {
       pending = (async () => {
-        const created = await (sessionFactory ?? createRealSession)(profileName, userDataDir);
+        const created = await createChromeMcpSession(profileName, userDataDir, signal);
         if (pendingSessions.get(cacheKey) === pending) {
           sessions.set(cacheKey, created);
         } else {
@@ -411,7 +479,7 @@ async function getSession(
     }
   }
   try {
-    await waitForChromeMcpReady(session, profileName, timeoutMs);
+    await waitForChromeMcpReady(session, profileName, timeoutMs, signal);
     return session;
   } catch (err) {
     const current = sessions.get(cacheKey);
@@ -426,6 +494,7 @@ async function getExistingSession(
   cacheKey: string,
   profileName: string,
   timeoutMs?: number,
+  signal?: AbortSignal,
 ): Promise<ChromeMcpSession | null> {
   let session = sessions.get(cacheKey);
   if (session && session.transport.pid === null) {
@@ -434,7 +503,7 @@ async function getExistingSession(
   }
   if (session) {
     try {
-      await waitForChromeMcpReady(session, profileName, timeoutMs);
+      await waitForChromeMcpReady(session, profileName, timeoutMs, signal);
       return session;
     } catch (err) {
       const current = sessions.get(cacheKey);
@@ -450,9 +519,9 @@ async function getExistingSession(
     return null;
   }
 
-  session = await pending;
+  session = await waitForChromeMcpPendingSession(pending, signal);
   try {
-    await waitForChromeMcpReady(session, profileName, timeoutMs);
+    await waitForChromeMcpReady(session, profileName, timeoutMs, signal);
     return session;
   } catch (err) {
     const current = sessions.get(cacheKey);
@@ -467,10 +536,11 @@ async function createEphemeralSession(
   profileName: string,
   userDataDir?: string,
   timeoutMs?: number,
+  signal?: AbortSignal,
 ): Promise<ChromeMcpSession> {
-  const session = await (sessionFactory ?? createRealSession)(profileName, userDataDir);
+  const session = await createChromeMcpSession(profileName, userDataDir, signal);
   try {
-    await waitForChromeMcpReady(session, profileName, timeoutMs);
+    await waitForChromeMcpReady(session, profileName, timeoutMs, signal);
     return session;
   } catch (err) {
     await session.client.close().catch(() => {});
@@ -486,7 +556,7 @@ async function leaseSession(
   const cacheKey = buildChromeMcpSessionCacheKey(profileName, userDataDir);
   if (!options.ephemeral) {
     return {
-      session: await getSession(profileName, userDataDir, options.timeoutMs),
+      session: await getSession(profileName, userDataDir, options.timeoutMs, options.signal),
       cacheKey,
       temporary: false,
     };
@@ -494,7 +564,12 @@ async function leaseSession(
 
   // Status probes should avoid seeding the shared attach session cache, but they can safely
   // reuse a real cached session if one already exists.
-  const existingSession = await getExistingSession(cacheKey, profileName, options.timeoutMs);
+  const existingSession = await getExistingSession(
+    cacheKey,
+    profileName,
+    options.timeoutMs,
+    options.signal,
+  );
   if (existingSession) {
     return {
       session: existingSession,
@@ -504,7 +579,12 @@ async function leaseSession(
   }
 
   return {
-    session: await createEphemeralSession(profileName, userDataDir, options.timeoutMs),
+    session: await createEphemeralSession(
+      profileName,
+      userDataDir,
+      options.timeoutMs,
+      options.signal,
+    ),
     cacheKey,
     temporary: true,
   };

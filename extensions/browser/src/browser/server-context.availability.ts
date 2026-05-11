@@ -47,7 +47,10 @@ type AvailabilityDeps = {
 type AvailabilityOps = {
   isHttpReachable: (timeoutMs?: number) => Promise<boolean>;
   isTransportAvailable: (timeoutMs?: number) => Promise<boolean>;
-  isReachable: (timeoutMs?: number, options?: { ephemeral?: boolean }) => Promise<boolean>;
+  isReachable: (
+    timeoutMs?: number,
+    options?: { ephemeral?: boolean; signal?: AbortSignal },
+  ) => Promise<boolean>;
   ensureBrowserAvailable: () => Promise<void>;
   stopRunningBrowser: () => Promise<{ stopped: boolean }>;
 };
@@ -117,14 +120,20 @@ export function createProfileAvailability({
       remoteHandshakeTimeoutMs: state().resolved.remoteCdpHandshakeTimeoutMs,
     });
 
-  const isReachable = async (timeoutMs?: number, options?: { ephemeral?: boolean }) => {
+  const isReachable = async (
+    timeoutMs?: number,
+    options?: { ephemeral?: boolean; signal?: AbortSignal },
+  ) => {
     if (capabilities.usesChromeMcp) {
-      const callOptions: { timeoutMs?: number; ephemeral?: boolean } = {};
+      const callOptions: { timeoutMs?: number; ephemeral?: boolean; signal?: AbortSignal } = {};
       if (timeoutMs != null) {
         callOptions.timeoutMs = timeoutMs;
       }
       if (options?.ephemeral) {
         callOptions.ephemeral = true;
+      }
+      if (options?.signal) {
+        callOptions.signal = options.signal;
       }
       await listChromeMcpTabs(profile.name, profile.userDataDir, callOptions);
       return true;
