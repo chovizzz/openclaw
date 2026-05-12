@@ -192,7 +192,6 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
   const tableMode = core.channel.text.resolveMarkdownTableMode({ cfg, channel: "feishu" });
   const renderMode = account.config?.renderMode ?? "auto";
   const streamingEnabled = account.config?.streaming !== false && renderMode !== "raw";
-  const coreBlockStreamingEnabled = account.config?.blockStreaming === true;
   const reasoningPreviewEnabled = streamingEnabled && params.allowReasoningPreview === true;
 
   let streaming: FeishuStreamingSession | null = null;
@@ -426,22 +425,6 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
         const text = reply.text;
         const hasText = reply.hasText;
         const hasMedia = reply.hasMedia;
-<<<<<<< HEAD
-=======
-        const hasVoiceMedia =
-          hasMedia &&
-          reply.mediaUrls.some((mediaUrl) =>
-            shouldSuppressFeishuTextForVoiceMedia({
-              mediaUrl,
-              ...(payload.audioAsVoice === true ? { audioAsVoice: true } : {}),
-            }),
-          );
-        const useCard =
-          hasText &&
-          (renderMode === "card" ||
-            (info?.kind === "block" && coreBlockStreamingEnabled && renderMode !== "raw") ||
-            (renderMode === "auto" && shouldUseCard(text)));
->>>>>>> 03e35b1d83 (fix(feishu): honor block streaming config)
         const skipTextForDuplicateFinal =
           info?.kind === "final" && hasText && deliveredFinalTexts.has(text);
         const shouldDeliverText = hasText && !skipTextForDuplicateFinal;
@@ -557,8 +540,7 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
     replyOptions: {
       ...replyOptions,
       onModelSelected: prefixContext.onModelSelected,
-      disableBlockStreaming:
-        typeof account.config?.blockStreaming === "boolean" ? !account.config.blockStreaming : true,
+      disableBlockStreaming: true,
       onPartialReply: streamingEnabled
         ? (payload: ReplyPayload) => {
             if (!payload.text) {
