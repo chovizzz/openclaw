@@ -38,9 +38,22 @@ import type { CronServiceState } from "./state.js";
 const STUCK_RUN_MS = 2 * 60 * 60 * 1000;
 const STAGGER_OFFSET_CACHE_MAX = 4096;
 const staggerOffsetCache = new Map<string, number>();
+const DEFAULT_ERROR_BACKOFF_SCHEDULE_MS = [30_000, 60_000, 5 * 60_000, 15 * 60_000, 60 * 60_000];
 
 function isFiniteTimestamp(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
+}
+
+function hasScheduledNextRunAtMs(value: unknown): value is number {
+  return isFiniteTimestamp(value);
+}
+
+function errorBackoffMs(
+  consecutiveErrors: number,
+  scheduleMs = DEFAULT_ERROR_BACKOFF_SCHEDULE_MS,
+): number {
+  const idx = Math.min(consecutiveErrors - 1, scheduleMs.length - 1);
+  return scheduleMs[Math.max(0, idx)];
 }
 
 function resolveStableCronOffsetMs(jobId: string, staggerMs: number) {

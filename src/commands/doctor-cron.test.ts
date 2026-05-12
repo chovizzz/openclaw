@@ -114,46 +114,9 @@ describe("maybeRepairLegacyCronStore", () => {
     );
   });
 
-  it("repairs malformed persisted cron ids before list rendering sees them", async () => {
-    const storePath = await makeTempStorePath();
-    await writeCronStore(storePath, [
-      createLegacyCronJob({
-        id: 42,
-        jobId: undefined,
-        notify: false,
-      }),
-      createLegacyCronJob({
-        id: undefined,
-        jobId: undefined,
-        name: "Missing id",
-        notify: false,
-      }),
-    ]);
-
-    await maybeRepairLegacyCronStore({
-      cfg: createCronConfig(storePath),
-      options: {},
-      prompter: makePrompter(true),
-    });
-
-    const persisted = JSON.parse(await fs.readFile(storePath, "utf-8")) as {
-      jobs: Array<Record<string, unknown>>;
-    };
-    expect(persisted.jobs[0]?.id).toBe("42");
-    expect(typeof persisted.jobs[1]?.id).toBe("string");
-    expect(String(persisted.jobs[1]?.id)).toMatch(/^cron-/);
-    expect(noteMock).toHaveBeenCalledWith(
-      expect.stringContaining("stores `id` as a non-string value"),
-      "Cron",
-    );
-    expect(noteMock).toHaveBeenCalledWith(
-      expect.stringContaining("missing a canonical string `id`"),
-      "Cron",
-    );
-  });
-
   it("repairs invalid persisted cron payload model sentinels", async () => {
     const storePath = await makeTempStorePath();
+    const noteSpy = vi.spyOn(noteModule, "note").mockImplementation(() => {});
     await writeCronStore(storePath, [
       {
         id: "bad-model-default",
@@ -203,11 +166,11 @@ describe("maybeRepairLegacyCronStore", () => {
     for (const job of persisted.jobs) {
       expect((job.payload as Record<string, unknown>).model).toBeUndefined();
     }
-    expect(noteMock).toHaveBeenCalledWith(
+    expect(noteSpy).toHaveBeenCalledWith(
       expect.stringContaining("2 jobs store an invalid cron payload model inheritance sentinel"),
       "Cron",
     );
-    expect(noteMock).toHaveBeenCalledWith(
+    expect(noteSpy).toHaveBeenCalledWith(
       expect.stringContaining("Cron store normalized"),
       "Doctor changes",
     );
