@@ -288,7 +288,9 @@ describe("browser client", () => {
         return false;
       }
     });
-    expect(status?.init?.timeoutMs).toBe(7_500);
+    expect((status?.init as (RequestInit & { timeoutMs?: number }) | undefined)?.timeoutMs).toBe(
+      7_500,
+    );
     const open = calls.find((c) => c.url.endsWith("/tabs/open"));
     expect(open?.init?.method).toBe("POST");
 

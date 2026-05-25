@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   clickChromeMcpElement,
   buildChromeMcpArgs,
+  ensureChromeMcpAvailable,
   evaluateChromeMcpScript,
   listChromeMcpTabs,
   openChromeMcpTab,
@@ -47,6 +48,16 @@ function createFakeSession(): ChromeMcpSession {
               "2: https://github.com/openclaw/openclaw/pull/45318",
               "3: https://example.com/ [selected]",
             ].join("\n"),
+          },
+        ],
+      };
+    }
+    if (name === "navigate_page") {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "## Pages\n3: https://example.com/ [selected]",
           },
         ],
       };
@@ -118,7 +129,36 @@ describe("chrome MCP page parsing", () => {
   });
 
   it("parses new_page text responses and returns the created tab", async () => {
-    const factory: ChromeMcpSessionFactory = async () => createFakeSession();
+    let includeThirdPage = false;
+    const factory: ChromeMcpSessionFactory = async () => {
+      const session = createFakeSession();
+      session.client.callTool = vi.fn(async ({ name }: ToolCall) => {
+        if (name === "new_page") {
+          includeThirdPage = true;
+          return {
+            content: [{ type: "text", text: "## Pages\n3: about:blank [selected]" }],
+          };
+        }
+        if (name === "navigate_page") {
+          return {
+            content: [{ type: "text", text: "## Pages\n3: https://example.com/ [selected]" }],
+          };
+        }
+        if (name === "list_pages") {
+          const lines = [
+            "## Pages",
+            "1: https://developer.chrome.com/blog/chrome-devtools-mcp-debug-your-browser-session [selected]",
+            "2: https://github.com/openclaw/openclaw/pull/45318",
+          ];
+          if (includeThirdPage) {
+            lines.push("3: https://example.com/ [selected]");
+          }
+          return { content: [{ type: "text", text: lines.join("\n") }] };
+        }
+        throw new Error(`unexpected tool ${name}`);
+      }) as typeof session.client.callTool;
+      return session;
+    };
     setChromeMcpSessionFactoryForTest(factory);
 
     const tab = await openChromeMcpTab("chrome-live", "https://example.com/");

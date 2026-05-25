@@ -64,7 +64,7 @@ describe("basic browser routes", () => {
   it("maps existing-session status failures to JSON browser errors", async () => {
     const response = await callBasicRouteWithState({
       state: createExistingSessionProfileState({
-        isHttpReachable: async () => {
+        isTransportAvailable: async () => {
           throw new BrowserProfileUnavailableError("attach failed");
         },
       }),
