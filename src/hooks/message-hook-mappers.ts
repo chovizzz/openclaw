@@ -58,6 +58,7 @@ export type CanonicalSentMessageHookContext = {
   channelId: string;
   accountId?: string;
   conversationId?: string;
+  sessionKey?: string;
   messageId?: string;
   isGroup?: boolean;
   groupId?: string;
@@ -142,6 +143,7 @@ export function buildCanonicalSentMessageHookContext(params: {
   channelId: string;
   accountId?: string;
   conversationId?: string;
+  sessionKey?: string;
   messageId?: string;
   isGroup?: boolean;
   groupId?: string;
@@ -154,6 +156,7 @@ export function buildCanonicalSentMessageHookContext(params: {
     channelId: params.channelId,
     accountId: params.accountId,
     conversationId: params.conversationId ?? params.to,
+    sessionKey: params.sessionKey,
     messageId: params.messageId,
     isGroup: params.isGroup,
     groupId: params.groupId,
@@ -167,6 +170,9 @@ export function toPluginMessageContext(
     channelId: canonical.channelId,
     accountId: canonical.accountId,
     conversationId: canonical.conversationId,
+    ...("sessionKey" in canonical && canonical.sessionKey
+      ? { sessionKey: canonical.sessionKey }
+      : {}),
   };
 }
 
