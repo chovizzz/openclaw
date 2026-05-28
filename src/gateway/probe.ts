@@ -31,6 +31,7 @@ export type GatewayProbeResult = {
 
 export const MIN_PROBE_TIMEOUT_MS = 250;
 export const MAX_TIMER_DELAY_MS = 2_147_483_647;
+const PROBE_CLIENT_STOP_TIMEOUT_MS = 1_000;
 
 export function clampProbeTimeoutMs(timeoutMs: number): number {
   return Math.min(MAX_TIMER_DELAY_MS, Math.max(MIN_PROBE_TIMEOUT_MS, timeoutMs));
@@ -97,8 +98,14 @@ export async function probeGateway(opts: {
       }
       settled = true;
       clearProbeTimer();
-      client.stop();
-      resolve({ url: opts.url, ...result });
+      void (async () => {
+        try {
+          await client.stopAndWait({ timeoutMs: PROBE_CLIENT_STOP_TIMEOUT_MS });
+        } catch {
+          client.stop();
+        }
+        resolve({ url: opts.url, ...result });
+      })();
     };
 
     const client = new GatewayClient({
