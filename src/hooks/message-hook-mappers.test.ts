@@ -39,6 +39,7 @@ function makeInboundCtx(overrides: Partial<FinalizedMsgContext> = {}): Finalized
     SenderE164: "+15551234567",
     MessageThreadId: 42,
     MediaPath: "/tmp/audio.ogg",
+    MediaUrl: "https://cdn.example.com/audio.ogg",
     MediaType: "audio/ogg",
     GroupSubject: "ops",
     GroupChannel: "ops-room",
@@ -132,7 +133,13 @@ describe("message hook mappers", () => {
   });
 
   it("maps canonical inbound context to plugin/internal received payloads", () => {
-    const canonical = deriveInboundMessageHookContext(makeInboundCtx());
+    const canonical = deriveInboundMessageHookContext(
+      makeInboundCtx({
+        MediaPaths: ["/tmp/audio.ogg", "/tmp/photo.jpg"],
+        MediaUrls: ["https://cdn.example.com/audio.ogg", "https://cdn.example.com/photo.jpg"],
+        MediaTypes: ["audio/ogg", "image/jpeg"],
+      }),
+    );
 
     expect(toPluginMessageContext(canonical)).toEqual({
       channelId: "demo-chat",
@@ -147,6 +154,12 @@ describe("message hook mappers", () => {
         messageId: "msg-1",
         senderName: "User One",
         threadId: 42,
+        mediaPath: "/tmp/audio.ogg",
+        mediaUrl: "https://cdn.example.com/audio.ogg",
+        mediaType: "audio/ogg",
+        mediaPaths: ["/tmp/audio.ogg", "/tmp/photo.jpg"],
+        mediaUrls: ["https://cdn.example.com/audio.ogg", "https://cdn.example.com/photo.jpg"],
+        mediaTypes: ["audio/ogg", "image/jpeg"],
       }),
     });
     expect(toInternalMessageReceivedContext(canonical)).toEqual({
