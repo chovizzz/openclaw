@@ -21,6 +21,7 @@ import {
   createBoundDeliveryRouter,
   getGlobalHookRunner,
   isEmbeddedPiRunActive,
+  isEmbeddedPiRunCompacting,
   loadConfig,
   loadSessionStore,
   queueEmbeddedPiMessage,
@@ -329,6 +330,62 @@ function buildAnnounceQueueKey(sessionKey: string, origin?: DeliveryContext): st
   return `${sessionKey}:acct:${accountId}`;
 }
 
+function resolveCompactionSteerRetryDelaysMs() {
+  return process.env.OPENCLAW_TEST_FAST === "1"
+    ? ([8, 16, 32, 64] as const)
+    : ([1_000, 2_000, 4_000, 8_000] as const);
+}
+
+async function queueEmbeddedPiMessageWithCompactionRetries(params: {
+  sessionId: string;
+  message: string;
+  deliveryTimeoutMs?: number;
+  signal?: AbortSignal;
+}): Promise<boolean> {
+  const compactionDeadlineMs =
+    typeof params.deliveryTimeoutMs === "number" && params.deliveryTimeoutMs > 0
+      ? Date.now() + params.deliveryTimeoutMs
+      : undefined;
+  const compactionRetryDelaysMs = resolveCompactionSteerRetryDelaysMs();
+  let compactionRetryIndex = 0;
+
+  for (;;) {
+    if (params.signal?.aborted) {
+      return false;
+    }
+    if (queueEmbeddedPiMessage(params.sessionId, params.message)) {
+      return true;
+    }
+    if (!isEmbeddedPiRunCompacting(params.sessionId)) {
+      return false;
+    }
+    const remainingDeliveryTimeoutMs =
+      compactionDeadlineMs === undefined ? undefined : compactionDeadlineMs - Date.now();
+    const canRetry =
+      remainingDeliveryTimeoutMs === undefined
+        ? compactionRetryIndex < compactionRetryDelaysMs.length
+        : remainingDeliveryTimeoutMs > 0;
+    if (!canRetry) {
+      return false;
+    }
+    const scheduledDelayMs =
+      compactionRetryDelaysMs[Math.min(compactionRetryIndex, compactionRetryDelaysMs.length - 1)] ??
+      compactionRetryDelaysMs[compactionRetryDelaysMs.length - 1]!;
+    const delayMs =
+      remainingDeliveryTimeoutMs === undefined
+        ? scheduledDelayMs
+        : Math.min(scheduledDelayMs, remainingDeliveryTimeoutMs);
+    if (delayMs <= 0 && remainingDeliveryTimeoutMs !== undefined) {
+      return false;
+    }
+    await waitForAnnounceRetryDelay(delayMs, params.signal);
+    if (params.signal?.aborted) {
+      return false;
+    }
+    compactionRetryIndex += 1;
+  }
+}
+
 async function maybeQueueSubagentAnnounce(params: {
   requesterSessionKey: string;
   announceId?: string;
@@ -361,7 +418,12 @@ async function maybeQueueSubagentAnnounce(params: {
 
   const shouldSteer = queueSettings.mode === "steer" || queueSettings.mode === "steer-backlog";
   if (shouldSteer) {
-    const steered = queueEmbeddedPiMessage(sessionId, params.steerMessage);
+    const steered = await queueEmbeddedPiMessageWithCompactionRetries({
+      sessionId,
+      message: params.steerMessage,
+      deliveryTimeoutMs: resolveSubagentAnnounceTimeoutMs(cfg),
+      signal: params.signal,
+    });
     if (steered) {
       return "steered";
     }
