@@ -98,6 +98,20 @@ function shouldRethrowAbort(err: unknown): boolean {
   return isFallbackAbortError(err) && !isTimeoutError(err);
 }
 
+function isTerminalAbort(signal: AbortSignal | undefined): boolean {
+  if (!signal?.aborted) {
+    return false;
+  }
+  const reason = signal.reason;
+  if (!(reason instanceof Error)) {
+    return false;
+  }
+  if (reason.name === "TimeoutError") {
+    return true;
+  }
+  return reason.name === "ClientDisconnectError";
+}
+
 function createModelCandidateCollector(allowlist: Set<string> | null | undefined): {
   candidates: ModelCandidate[];
   addExplicitCandidate: (candidate: ModelCandidate) => void;
@@ -165,6 +179,7 @@ async function runFallbackCandidate<T>(params: {
   provider: string;
   model: string;
   options?: ModelFallbackRunOptions;
+  abortSignal?: AbortSignal;
 }): Promise<{ ok: true; result: T } | { ok: false; error: unknown }> {
   try {
     const result = params.options
@@ -184,6 +199,9 @@ async function runFallbackCandidate<T>(params: {
     if (shouldRethrowAbort(err) && !normalizedFailover) {
       throw err;
     }
+    if (isTerminalAbort(params.abortSignal)) {
+      throw err;
+    }
     return { ok: false, error: normalizedFailover ?? err };
   }
 }
@@ -194,12 +212,14 @@ async function runFallbackAttempt<T>(params: {
   model: string;
   attempts: FallbackAttempt[];
   options?: ModelFallbackRunOptions;
+  abortSignal?: AbortSignal;
 }): Promise<{ success: ModelFallbackRunResult<T> } | { error: unknown }> {
   const runResult = await runFallbackCandidate({
     run: params.run,
     provider: params.provider,
     model: params.model,
     options: params.options,
+    abortSignal: params.abortSignal,
   });
   if (runResult.ok) {
     return {
@@ -210,6 +230,9 @@ async function runFallbackAttempt<T>(params: {
         attempts: params.attempts,
       }),
     };
+  }
+  if (isTerminalAbort(params.abortSignal)) {
+    throw runResult.error;
   }
   return { error: runResult.error };
 }
@@ -639,6 +662,7 @@ export async function runWithModelFallback<T>(params: {
   fallbacksOverride?: string[];
   run: ModelFallbackRunFn<T>;
   onError?: ModelFallbackErrorHandler;
+  abortSignal?: AbortSignal;
 }): Promise<ModelFallbackRunResult<T>> {
   const candidates = resolveFallbackCandidates({
     cfg: params.cfg,
@@ -778,6 +802,7 @@ export async function runWithModelFallback<T>(params: {
       ...candidate,
       attempts,
       options: runOptions,
+      abortSignal: params.abortSignal,
     });
     if ("success" in attemptRun) {
       if (i > 0 || attempts.length > 0 || attemptedDuringCooldown) {

@@ -14,6 +14,15 @@ export function isChatStopCommandText(text: string): boolean {
   return isAbortRequestText(text);
 }
 
+function createChatAbortSignalReason(stopReason: string | undefined): Error | undefined {
+  if (stopReason !== "timeout") {
+    return undefined;
+  }
+  const reason = new Error("chat run timed out");
+  reason.name = "TimeoutError";
+  return reason;
+}
+
 export function resolveChatRunExpiresAtMs(params: {
   now: number;
   timeoutMs: number;
@@ -93,7 +102,7 @@ export function abortChatRunById(
   const bufferedText = ops.chatRunBuffers.get(runId);
   const partialText = bufferedText && bufferedText.trim() ? bufferedText : undefined;
   ops.chatAbortedRuns.set(runId, Date.now());
-  active.controller.abort();
+  active.controller.abort(createChatAbortSignalReason(stopReason));
   ops.chatAbortControllers.delete(runId);
   ops.chatRunBuffers.delete(runId);
   ops.chatDeltaSentAt.delete(runId);

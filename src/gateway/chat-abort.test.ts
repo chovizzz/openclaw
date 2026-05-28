@@ -118,6 +118,20 @@ describe("abortChatRunById", () => {
     expect(payload.message).toBeUndefined();
   });
 
+  it("tags maintenance timeouts as timeout abort reasons", () => {
+    const runId = "run-timeout";
+    const sessionKey = "main";
+    const entry = createActiveEntry(sessionKey);
+    const ops = createOps({ runId, entry });
+
+    const result = abortChatRunById(ops, { runId, sessionKey, stopReason: "timeout" });
+
+    expect(result).toEqual({ aborted: true });
+    expect(entry.controller.signal.aborted).toBe(true);
+    expect(entry.controller.signal.reason).toBeInstanceOf(Error);
+    expect((entry.controller.signal.reason as Error).name).toBe("TimeoutError");
+  });
+
   it("preserves partial message even when abort listeners clear buffers synchronously", () => {
     const runId = "run-1";
     const sessionKey = "main";

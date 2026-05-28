@@ -171,6 +171,7 @@ export function createFollowupRunner(params: {
         activeSessionEntry?.systemPromptReport,
       );
       replyOperation.setPhase("running");
+      const runAbortSignal = replyOperation.abortSignal;
       try {
         const fallbackResult = await runWithModelFallback({
           cfg: queued.run.config,
@@ -178,6 +179,7 @@ export function createFollowupRunner(params: {
           model: queued.run.model,
           runId,
           agentDir: queued.run.agentDir,
+          abortSignal: runAbortSignal,
           fallbacksOverride: resolveRunModelFallbacksOverride({
             cfg: queued.run.config,
             agentId: queued.run.agentId,
@@ -232,6 +234,7 @@ export function createFollowupRunner(params: {
                 bashElevated: queued.run.bashElevated,
                 timeoutMs: queued.run.timeoutMs,
                 runId,
+                abortSignal: runAbortSignal,
                 allowTransientCooldownProbe: runOptions?.allowTransientCooldownProbe,
                 blockReplyBreak: queued.run.blockReplyBreak,
                 bootstrapPromptWarningSignaturesSeen,

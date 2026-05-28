@@ -705,9 +705,11 @@ export async function runAgentTurnWithFallback(params: {
           })
         : undefined;
       const onToolResult = params.opts?.onToolResult;
+      const runAbortSignal = params.replyOperation?.abortSignal ?? params.opts?.abortSignal;
       const fallbackResult = await runWithModelFallback({
         ...resolveModelFallbackOptions(params.followupRun.run),
         runId,
+        abortSignal: runAbortSignal,
         run: async (provider, model, runOptions) => {
           // Notify that model selection is complete (including after fallback).
           // This allows responsePrefix template interpolation with the actual model.
@@ -777,7 +779,7 @@ export async function runAgentTurnWithFallback(params: {
                   imageOrder: params.opts?.imageOrder,
                   messageProvider: params.followupRun.run.messageProvider,
                   agentAccountId: params.followupRun.run.agentAccountId,
-                  abortSignal: params.replyOperation?.abortSignal ?? params.opts?.abortSignal,
+                  abortSignal: runAbortSignal,
                   replyOperation: params.replyOperation,
                 });
                 bootstrapPromptWarningSignaturesSeen = resolveBootstrapWarningSignaturesSeen(
@@ -890,7 +892,7 @@ export async function runAgentTurnWithFallback(params: {
                 bootstrapContextRunKind: params.opts?.isHeartbeat ? "heartbeat" : "default",
                 images: params.opts?.images,
                 imageOrder: params.opts?.imageOrder,
-                abortSignal: params.replyOperation?.abortSignal ?? params.opts?.abortSignal,
+                abortSignal: runAbortSignal,
                 replyOperation: params.replyOperation,
                 blockReplyBreak: params.resolvedBlockStreamingBreak,
                 blockReplyChunking: params.blockReplyChunking,
