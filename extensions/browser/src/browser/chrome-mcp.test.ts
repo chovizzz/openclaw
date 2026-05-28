@@ -121,6 +121,7 @@ describe("chrome MCP page parsing", () => {
       "-y",
       "chrome-devtools-mcp@latest",
       "--autoConnect",
+      "--no-usage-statistics",
       "--experimentalStructuredContent",
       "--experimental-page-id-routing",
       "--userDataDir",
