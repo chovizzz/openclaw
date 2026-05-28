@@ -8,6 +8,7 @@ export {
   abortEmbeddedPiRun,
   compactEmbeddedPiSession,
   isEmbeddedPiRunActive,
+  isEmbeddedPiRunCompacting,
   isEmbeddedPiRunStreaming,
   queueEmbeddedPiMessage,
   resolveActiveEmbeddedRunSessionId,

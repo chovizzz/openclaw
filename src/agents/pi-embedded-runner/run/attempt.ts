@@ -1467,6 +1467,15 @@ export async function runEmbeddedAttempt(
         }
         abortCompaction();
         void activeSession.abort();
+        if (isTimeout) {
+          void sessionLock.release().catch((err) => {
+            if (!isProbeSession) {
+              log.warn(
+                `failed to release session lock on timeout abort: runId=${params.runId} sessionId=${params.sessionId} err=${String(err)}`,
+              );
+            }
+          });
+        }
       };
       idleTimeoutTrigger = (error) => {
         abortRun(true, error);

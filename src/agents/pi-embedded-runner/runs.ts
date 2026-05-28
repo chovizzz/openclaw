@@ -205,6 +205,11 @@ export function isEmbeddedPiRunStreaming(sessionId: string): boolean {
   return handle.isStreaming();
 }
 
+export function isEmbeddedPiRunCompacting(sessionId: string): boolean {
+  const handle = ACTIVE_EMBEDDED_RUNS.get(sessionId);
+  return handle?.isCompacting() ?? false;
+}
+
 export function resolveActiveEmbeddedRunSessionId(sessionKey: string): string | undefined {
   const normalizedSessionKey = sessionKey.trim();
   if (!normalizedSessionKey) {
