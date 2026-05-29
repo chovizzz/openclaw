@@ -551,6 +551,14 @@ export const GENERATED_BASE_CONFIG_SCHEMA: BaseConfigSchemaResponse = {
             description:
               "Timeout in milliseconds for post-connect CDP handshake readiness checks against remote browser targets. Raise this for slow-start remote browsers and lower to fail fast in automation loops.",
           },
+          requestTimeoutMs: {
+            type: "integer",
+            minimum: 0,
+            maximum: 9007199254740991,
+            title: "Browser Request Timeout (ms)",
+            description:
+              "Default outer timeout in milliseconds for browser tool operations on the local control path (status/tabs/act/snapshot/navigate). Raise this for slow external or attach-only browsers (e.g. anti-detect browsers on loopback CDP) that frequently hit 'timed out'. Per-call timeoutMs still overrides it.",
+          },
           color: {
             type: "string",
             title: "Browser Accent Color",

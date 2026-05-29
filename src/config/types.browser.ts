@@ -40,6 +40,14 @@ export type BrowserConfig = {
   remoteCdpTimeoutMs?: number;
   /** Remote CDP WebSocket handshake timeout (ms). Default: max(remoteCdpTimeoutMs * 2, 2000). */
   remoteCdpHandshakeTimeoutMs?: number;
+  /**
+   * Default outer timeout (ms) for browser tool operations against the local
+   * control path (status/tabs/act/snapshot/navigate). Raise this for slow
+   * external/attach-only browsers (e.g. anti-detect browsers on loopback CDP)
+   * that frequently hit "timed out". Per-call timeoutMs still overrides it.
+   * When unset, each operation keeps its built-in default.
+   */
+  requestTimeoutMs?: number;
   /** Accent color for the openclaw browser profile (hex). Default: #FF4500 */
   color?: string;
   /** Override the browser executable path (all platforms). */

@@ -378,6 +378,16 @@ const EXISTING_SESSION_MANAGE_ACTIONS = new Set([
   "close",
 ]);
 
+function resolveConfiguredBrowserRequestTimeoutMs(): number | undefined {
+  try {
+    const cfg = browserToolDeps.loadConfig();
+    const resolved = resolveBrowserConfig(cfg.browser, cfg);
+    return resolved.requestTimeoutMs;
+  } catch {
+    return undefined;
+  }
+}
+
 function usesExistingSessionManageFlow(params: { action: string; profileName?: string }) {
   if (!EXISTING_SESSION_MANAGE_ACTIONS.has(params.action)) {
     return false;
@@ -493,6 +503,7 @@ export function createBrowserTool(opts?: {
         : null;
       const toolTimeoutMs =
         requestedTimeoutMs ??
+        resolveConfiguredBrowserRequestTimeoutMs() ??
         (usesExistingSessionManageFlow({ action, profileName: profile })
           ? DEFAULT_EXISTING_SESSION_MANAGE_TIMEOUT_MS
           : undefined);
