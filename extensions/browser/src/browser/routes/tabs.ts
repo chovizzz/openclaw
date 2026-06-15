@@ -72,7 +72,7 @@ function resolveTabReachabilityTimeoutMs(
     return DEFAULT_TAB_REACHABILITY_TIMEOUT_MS;
   }
   return (
-    clampPositiveTimerTimeoutMs(ctx.state().resolved.actionTimeoutMs) ??
+    clampPositiveTimerTimeoutMs(ctx.state().resolved.requestTimeoutMs) ??
     DEFAULT_TAB_REACHABILITY_TIMEOUT_MS
   );
 }

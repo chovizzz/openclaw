@@ -49,6 +49,8 @@ export type FeishuMessageContext = {
   rootId?: string;
   parentId?: string;
   threadId?: string;
+  replyTargetMessageId?: string;
+  suppressReplyTarget?: boolean;
   content: string;
   contentType: string;
   /** Mention forward targets (excluding the bot itself) */

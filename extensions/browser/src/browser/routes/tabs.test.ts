@@ -49,12 +49,12 @@ function createProfileContext(overrides?: Partial<ReturnType<typeof baseProfileC
 
 function createRouteContext(
   profileCtx: ProfileContext,
-  options?: { actionTimeoutMs?: number },
+  options?: { requestTimeoutMs?: number },
 ) {
   return {
     state: () => ({
       resolved: {
-        actionTimeoutMs: options?.actionTimeoutMs ?? 45_000,
+        requestTimeoutMs: options?.requestTimeoutMs ?? 45_000,
         ssrfPolicy: undefined,
       },
     }),
@@ -85,14 +85,14 @@ async function callTabsRoute(params: {
   path: "/tabs" | "/tabs/action";
   body?: Record<string, unknown>;
   profileCtx: ProfileContext;
-  actionTimeoutMs?: number;
+  requestTimeoutMs?: number;
   signal?: AbortSignal;
 }) {
   const { app, getHandlers, postHandlers } = createBrowserRouteApp();
   registerBrowserTabRoutes(
     app,
     createRouteContext(params.profileCtx, {
-      actionTimeoutMs: params.actionTimeoutMs,
+      requestTimeoutMs: params.requestTimeoutMs,
     }) as never,
   );
   const handler =
@@ -176,7 +176,7 @@ describe("browser tab routes", () => {
       method: "get",
       path: "/tabs",
       profileCtx,
-      actionTimeoutMs: 0,
+      requestTimeoutMs: 0,
     });
     expect(zeroResponse.statusCode).toBe(200);
     expect(isReachable).toHaveBeenLastCalledWith(300);
@@ -185,7 +185,7 @@ describe("browser tab routes", () => {
       method: "get",
       path: "/tabs",
       profileCtx,
-      actionTimeoutMs: Number.MAX_SAFE_INTEGER,
+      requestTimeoutMs: Number.MAX_SAFE_INTEGER,
     });
     expect(hugeResponse.statusCode).toBe(200);
     expect(isReachable).toHaveBeenLastCalledWith(2_147_483_647);
