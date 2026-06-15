@@ -12,6 +12,7 @@ import {
   extractPlanningOnlyPlanDetails,
   isLikelyExecutionAckPrompt,
   resolveAckExecutionFastPathInstruction,
+  resolveIncompleteTurnPayloadText,
   resolvePlanningOnlyRetryInstruction,
 } from "./run/incomplete-turn.js";
 import type { EmbeddedRunAttemptResult } from "./run/types.js";
@@ -101,6 +102,59 @@ describe("runEmbeddedPiAgent incomplete-turn safety", () => {
     });
 
     expect(retryInstruction).toBeNull();
+  });
+
+  it("treats exact NO_REPLY assistant turns as intentional silence only when allowed", () => {
+    const attempt = makeAttemptResult({
+      assistantTexts: ["NO_REPLY"],
+      lastAssistant: {
+        stopReason: "toolUse",
+        provider: "openai",
+        model: "gpt-5.4",
+        content: [{ type: "text", text: "NO_REPLY" }],
+      } as unknown as EmbeddedRunAttemptResult["lastAssistant"],
+    });
+
+    expect(
+      resolveIncompleteTurnPayloadText({
+        allowEmptyAssistantReplyAsSilent: true,
+        payloadCount: 0,
+        aborted: false,
+        timedOut: false,
+        attempt,
+      }),
+    ).toBeNull();
+    expect(
+      resolveIncompleteTurnPayloadText({
+        allowEmptyAssistantReplyAsSilent: false,
+        payloadCount: 0,
+        aborted: false,
+        timedOut: false,
+        attempt,
+      }),
+    ).toBe("⚠️ Agent couldn't generate a response. Please try again.");
+  });
+
+  it("does not treat error NO_REPLY assistant turns as intentional silence", () => {
+    const attempt = makeAttemptResult({
+      assistantTexts: ["NO_REPLY"],
+      lastAssistant: {
+        stopReason: "error",
+        provider: "openai",
+        model: "gpt-5.4",
+        content: [{ type: "text", text: "NO_REPLY" }],
+      } as unknown as EmbeddedRunAttemptResult["lastAssistant"],
+    });
+
+    expect(
+      resolveIncompleteTurnPayloadText({
+        allowEmptyAssistantReplyAsSilent: true,
+        payloadCount: 0,
+        aborted: false,
+        timedOut: false,
+        attempt,
+      }),
+    ).toBe("⚠️ Agent couldn't generate a response. Please try again.");
   });
 
   it("detects short execution approval prompts", () => {

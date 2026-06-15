@@ -1473,6 +1473,7 @@ export async function runEmbeddedPiAgent(
           // Detect incomplete turns where prompt() resolved prematurely and the
           // runner would otherwise drop an empty reply.
           const incompleteTurnText = resolveIncompleteTurnPayloadText({
+            allowEmptyAssistantReplyAsSilent: params.allowEmptyAssistantReplyAsSilent,
             payloadCount: payloads.length,
             aborted,
             timedOut,

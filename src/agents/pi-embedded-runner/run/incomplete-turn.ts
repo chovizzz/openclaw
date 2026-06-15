@@ -1,4 +1,5 @@
 import { normalizeLowercaseStringOrEmpty } from "../../../shared/string-coerce.js";
+import { isSilentReplyPayloadText, SILENT_REPLY_TOKEN } from "../../../auto-reply/tokens.js";
 import { isLikelyMutatingToolName } from "../../tool-mutation.js";
 import type { EmbeddedRunAttemptResult } from "./types.js";
 
@@ -9,6 +10,7 @@ type ReplayMetadataAttempt = Pick<
 
 type IncompleteTurnAttempt = Pick<
   EmbeddedRunAttemptResult,
+  | "assistantTexts"
   | "clientToolCall"
   | "yieldDetected"
   | "didSendDeterministicApprovalPrompt"
@@ -100,6 +102,7 @@ export function buildAttemptReplayMetadata(
 }
 
 export function resolveIncompleteTurnPayloadText(params: {
+  allowEmptyAssistantReplyAsSilent?: boolean;
   payloadCount: number;
   aborted: boolean;
   timedOut: boolean;
@@ -118,6 +121,16 @@ export function resolveIncompleteTurnPayloadText(params: {
   }
 
   const stopReason = params.attempt.lastAssistant?.stopReason;
+  if (
+    params.allowEmptyAssistantReplyAsSilent &&
+    stopReason !== "error" &&
+    params.attempt.assistantTexts.length > 0 &&
+    params.attempt.assistantTexts.every((text) =>
+      isSilentReplyPayloadText(text, SILENT_REPLY_TOKEN),
+    )
+  ) {
+    return null;
+  }
   if (stopReason !== "toolUse" && stopReason !== "error") {
     return null;
   }

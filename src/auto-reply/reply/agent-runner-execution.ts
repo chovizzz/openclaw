@@ -877,6 +877,8 @@ export async function runAgentTurnWithFallback(params: {
                 ...runBaseParams,
                 prompt: params.commandBody,
                 extraSystemPrompt: params.followupRun.run.extraSystemPrompt,
+                allowEmptyAssistantReplyAsSilent:
+                  params.followupRun.run.allowEmptyAssistantReplyAsSilent,
                 toolResultFormat: (() => {
                   const channel = resolveMessageChannel(
                     params.sessionCtx.Surface,

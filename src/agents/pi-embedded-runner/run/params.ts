@@ -133,6 +133,11 @@ export type RunEmbeddedPiAgentParams = {
   enforceFinalTag?: boolean;
   silentExpected?: boolean;
   /**
+   * Treat exact silent assistant replies (for example NO_REPLY) as an intentional
+   * empty turn instead of an incomplete model response.
+   */
+  allowEmptyAssistantReplyAsSilent?: boolean;
+  /**
    * Allow a single run attempt even when all auth profiles are in cooldown,
    * but only for inferred transient cooldowns like `rate_limit` or `overloaded`.
    *
