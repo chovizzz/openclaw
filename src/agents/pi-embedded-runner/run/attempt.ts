@@ -58,7 +58,7 @@ import {
 } from "../../channel-tools.js";
 import { DEFAULT_CONTEXT_TOKENS } from "../../defaults.js";
 import { resolveOpenClawDocsPath } from "../../docs-path.js";
-import { isTimeoutError } from "../../failover-error.js";
+import { isSignalTimeoutReason } from "../../failover-error.js";
 import { resolveHeartbeatPromptForSystemPrompt } from "../../heartbeat-system-prompt.js";
 import { resolveImageSanitizationLimits } from "../../image-sanitization.js";
 import { buildModelAliasLines } from "../../model-alias-lines.js";
@@ -1639,7 +1639,7 @@ export async function runEmbeddedAttempt(
       let sessionIdUsed = activeSession.sessionId;
       const onAbort = () => {
         const reason = params.abortSignal ? getAbortReason(params.abortSignal) : undefined;
-        const timeout = reason ? isTimeoutError(reason) : false;
+        const timeout = reason ? isSignalTimeoutReason(reason) : false;
         if (
           shouldFlagCompactionTimeout({
             isTimeout: timeout,

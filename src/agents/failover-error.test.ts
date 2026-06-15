@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   coerceToFailoverError,
   describeFailoverError,
+  isSignalTimeoutReason,
   isTimeoutError,
   resolveFailoverReasonFromError,
   resolveFailoverStatus,
@@ -631,5 +632,32 @@ describe("failover-error", () => {
     const described = describeFailoverError(123);
     expect(described.message).toBe("123");
     expect(described.reason).toBeUndefined();
+  });
+});
+
+describe("isSignalTimeoutReason", () => {
+  it("returns false for plain AbortController.abort() DOMException (client disconnect)", () => {
+    const err = new DOMException("This operation was aborted", "AbortError");
+    expect(isSignalTimeoutReason(err)).toBe(false);
+  });
+
+  it("returns false for AbortError whose message matches ABORT_TIMEOUT_RE", () => {
+    const err = Object.assign(new Error("request aborted"), { name: "AbortError" });
+    expect(isSignalTimeoutReason(err)).toBe(false);
+  });
+
+  it("returns true for AbortSignal.timeout() DOMException", () => {
+    const err = new DOMException("signal timed out", "TimeoutError");
+    expect(isSignalTimeoutReason(err)).toBe(true);
+  });
+
+  it("returns true for makeTimeoutAbortReason()-style Error", () => {
+    const err = Object.assign(new Error("request timed out"), { name: "TimeoutError" });
+    expect(isSignalTimeoutReason(err)).toBe(true);
+  });
+
+  it("returns false for null and undefined", () => {
+    expect(isSignalTimeoutReason(null)).toBe(false);
+    expect(isSignalTimeoutReason(undefined)).toBe(false);
   });
 });
