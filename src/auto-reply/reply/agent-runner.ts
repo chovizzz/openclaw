@@ -592,6 +592,9 @@ export async function runReplyAgent(params: {
     // Drain any late tool/block deliveries before deciding there's "nothing to send".
     // Otherwise, a late typing trigger (e.g. from a tool callback) can outlive the run and
     // keep the typing indicator stuck.
+    if (runResult.didSendViaMessagingTool === true) {
+      await opts?.onObservedReplyDelivery?.();
+    }
     if (payloadArray.length === 0) {
       return finalizeWithFollowup(undefined, queueKey, runFollowupTurn);
     }

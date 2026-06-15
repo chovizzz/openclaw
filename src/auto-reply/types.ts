@@ -144,6 +144,8 @@ export type GetReplyOptions = {
   skillFilter?: string[];
   /** Mutable ref to track if a reply was sent (for Slack "first" threading mode). */
   hasRepliedRef?: { value: boolean };
+  /** Called when a suppressed/empty final reply path observes delivery through another path. */
+  onObservedReplyDelivery?: () => Promise<void> | void;
   /** Override agent timeout in seconds (0 = no timeout). Threads through to resolveAgentTimeoutMs. */
   timeoutOverrideSeconds?: number;
 };

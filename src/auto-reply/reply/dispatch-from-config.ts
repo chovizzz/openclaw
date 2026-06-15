@@ -191,6 +191,7 @@ const createShouldEmitVerboseProgress = (params: {
 export type DispatchFromConfigResult = {
   queuedFinal: boolean;
   counts: Record<ReplyDispatchKind, number>;
+  observedReplyDelivery?: boolean;
 };
 
 export async function dispatchReplyFromConfig(params: {
@@ -819,6 +820,14 @@ export async function dispatchReplyFromConfig(params: {
       originatingChannel,
       systemEvent: shouldRouteToOriginating,
     });
+    let observedReplyDelivery = false;
+    const markObservedReplyDelivery = async () => {
+      if (observedReplyDelivery) {
+        return;
+      }
+      observedReplyDelivery = true;
+      await params.replyOptions?.onObservedReplyDelivery?.();
+    };
 
     const replyResolver =
       params.replyResolver ?? (await loadGetReplyFromConfigRuntime()).getReplyFromConfig;
@@ -828,6 +837,7 @@ export async function dispatchReplyFromConfig(params: {
         ...params.replyOptions,
         typingPolicy: typing.typingPolicy,
         suppressTyping: typing.suppressTyping,
+        onObservedReplyDelivery: markObservedReplyDelivery,
         onToolResult: (payload: ReplyPayload) => {
           const run = async () => {
             const ttsPayload = await maybeApplyTtsToReplyPayload({
@@ -1045,7 +1055,11 @@ export async function dispatchReplyFromConfig(params: {
       pluginFallbackReason ? { reason: pluginFallbackReason } : undefined,
     );
     markIdle("message_completed");
-    return { queuedFinal, counts };
+    return {
+      queuedFinal,
+      counts,
+      ...(observedReplyDelivery ? { observedReplyDelivery } : {}),
+    };
   } catch (err) {
     recordProcessed("error", { error: String(err) });
     markIdle("message_error");

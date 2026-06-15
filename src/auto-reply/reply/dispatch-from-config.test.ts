@@ -973,6 +973,41 @@ describe("dispatchReplyFromConfig", () => {
     expect(routed?.payload?.text).toBeUndefined();
   });
 
+  it("returns observed reply delivery when the agent reports alternate delivery", async () => {
+    setNoAbort();
+    const cfg = emptyConfig;
+    const dispatcher = createDispatcher();
+    const onObservedReplyDelivery = vi.fn();
+    const ctx = buildTestCtx({
+      Provider: "telegram",
+      ChatType: "direct",
+    });
+
+    const replyResolver = async (
+      _ctx: MsgContext,
+      opts?: GetReplyOptions,
+      _cfg?: OpenClawConfig,
+    ) => {
+      await opts?.onObservedReplyDelivery?.();
+      return undefined;
+    };
+
+    const result = await dispatchReplyFromConfig({
+      ctx,
+      cfg,
+      dispatcher,
+      replyOptions: { onObservedReplyDelivery },
+      replyResolver,
+    });
+
+    expect(result).toEqual({
+      queuedFinal: false,
+      counts: { tool: 0, block: 0, final: 0 },
+      observedReplyDelivery: true,
+    });
+    expect(onObservedReplyDelivery).toHaveBeenCalledTimes(1);
+  });
+
   it("provides onToolResult in DM sessions", async () => {
     setNoAbort();
     mocks.routeReply.mockClear();
