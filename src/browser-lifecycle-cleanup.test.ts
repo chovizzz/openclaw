@@ -45,4 +45,16 @@ describe("cleanupBrowserSessionsForLifecycleEnd", () => {
 
     expect(onError).toHaveBeenCalledWith(error);
   });
+
+  it("skips cleanup when browser support is disabled", async () => {
+    const { cleanupBrowserSessionsForLifecycleEnd } =
+      await import("./browser-lifecycle-cleanup.js");
+
+    await cleanupBrowserSessionsForLifecycleEnd({
+      cfg: { browser: { enabled: false } },
+      sessionKeys: ["session-a"],
+    });
+
+    expect(closeTrackedBrowserTabsForSessions).not.toHaveBeenCalled();
+  });
 });

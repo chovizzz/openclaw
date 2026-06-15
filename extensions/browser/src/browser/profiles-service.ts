@@ -131,14 +131,13 @@ export function createBrowserProfilesService(ctx: BrowserRouteContext) {
       } catch (err) {
         throw new BrowserValidationError(formatErrorMessage(err));
       }
-      if (driver === "existing-session") {
-        throw new BrowserValidationError(
-          "driver=existing-session does not accept cdpUrl; it attaches via the Chrome MCP auto-connect flow",
-        );
-      }
       profileConfig = {
         cdpUrl: parsed.normalized,
         ...(driver ? { driver } : {}),
+        ...(driver === "existing-session" ? { attachOnly: true } : {}),
+        ...(driver === "existing-session" && normalizedUserDataDir
+          ? { userDataDir: normalizedUserDataDir }
+          : {}),
         color: profileColor,
       };
     } else {
@@ -190,7 +189,7 @@ export function createBrowserProfilesService(ctx: BrowserRouteContext) {
       profile: name,
       transport: capabilities.usesChromeMcp ? "chrome-mcp" : "cdp",
       cdpPort: capabilities.usesChromeMcp ? null : resolved.cdpPort,
-      cdpUrl: capabilities.usesChromeMcp ? null : resolved.cdpUrl,
+      cdpUrl: resolved.cdpUrl || null,
       userDataDir: resolved.userDataDir ?? null,
       color: resolved.color,
       isRemote: !resolved.cdpIsLoopback,

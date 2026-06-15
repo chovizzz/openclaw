@@ -184,6 +184,62 @@ function ensureDefaultUserBrowserProfile(
   return result;
 }
 
+function normalizeExistingSessionCdpUrl(
+  raw: string | undefined,
+  profileName: string,
+): { cdpUrl: string; cdpHost: string; cdpIsLoopback: boolean } | undefined {
+  const value = normalizeOptionalString(raw);
+  if (!value) {
+    return undefined;
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(value);
+  } catch {
+    throw new Error(`browser.profiles.${profileName}.cdpUrl must be a valid URL.`);
+  }
+
+  if (!["http:", "https:", "ws:", "wss:"].includes(parsed.protocol)) {
+    throw new Error(`browser.profiles.${profileName}.cdpUrl must use http, https, ws, or wss.`);
+  }
+
+  const normalized =
+    parsed.protocol === "http:" || parsed.protocol === "https:"
+      ? parsed.toString().replace(/\/$/, "")
+      : parsed.toString();
+  return {
+    cdpUrl: normalized,
+    cdpHost: parsed.hostname,
+    cdpIsLoopback: isLoopbackHost(parsed.hostname),
+  };
+}
+
+function applyLegacyCdpUrlToExistingSessionDefaultProfile(
+  profiles: Record<string, BrowserProfileConfig>,
+  defaultProfile: string,
+  legacyCdpUrl: string | undefined,
+): Record<string, BrowserProfileConfig> {
+  if (!legacyCdpUrl) {
+    return profiles;
+  }
+  const profile = profiles[defaultProfile];
+  if (
+    !profile ||
+    profile.driver !== "existing-session" ||
+    normalizeOptionalString(profile.cdpUrl)
+  ) {
+    return profiles;
+  }
+  return {
+    ...profiles,
+    [defaultProfile]: {
+      ...profile,
+      cdpUrl: legacyCdpUrl,
+    },
+  };
+}
+
 export function resolveBrowserConfig(
   cfg: BrowserConfig | undefined,
   rootConfig?: OpenClawConfig,
@@ -246,7 +302,7 @@ export function resolveBrowserConfig(
   const legacyCdpPort = rawCdpUrl ? cdpInfo.port : undefined;
   const isWsUrl = cdpInfo.parsed.protocol === "ws:" || cdpInfo.parsed.protocol === "wss:";
   const legacyCdpUrl = rawCdpUrl && isWsUrl ? cdpInfo.normalized : undefined;
-  const profiles = ensureDefaultUserBrowserProfile(
+  let profiles = ensureDefaultUserBrowserProfile(
     ensureDefaultProfile(
       cfg?.profiles,
       defaultColor,
@@ -264,6 +320,11 @@ export function resolveBrowserConfig(
       : profiles[DEFAULT_OPENCLAW_BROWSER_PROFILE_NAME]
         ? DEFAULT_OPENCLAW_BROWSER_PROFILE_NAME
         : "user");
+  profiles = applyLegacyCdpUrlToExistingSessionDefaultProfile(
+    profiles,
+    defaultProfile,
+    rawCdpUrl ? cdpInfo.normalized : undefined,
+  );
 
   const extraArgs = Array.isArray(cfg?.extraArgs)
     ? cfg.extraArgs.filter(
@@ -311,12 +372,13 @@ export function resolveProfile(
   const driver = profile.driver === "existing-session" ? "existing-session" : "openclaw";
 
   if (driver === "existing-session") {
+    const existingSessionCdp = normalizeExistingSessionCdpUrl(rawProfileUrl, profileName);
     return {
       name: profileName,
       cdpPort: 0,
-      cdpUrl: "",
-      cdpHost: "",
-      cdpIsLoopback: true,
+      cdpUrl: existingSessionCdp?.cdpUrl ?? "",
+      cdpHost: existingSessionCdp?.cdpHost ?? "",
+      cdpIsLoopback: existingSessionCdp?.cdpIsLoopback ?? true,
       userDataDir: resolveUserPath(profile.userDataDir?.trim() || "") || undefined,
       color: profile.color,
       driver,
