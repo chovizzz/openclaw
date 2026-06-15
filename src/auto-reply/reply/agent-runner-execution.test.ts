@@ -41,6 +41,7 @@ vi.mock("../../agents/pi-embedded-helpers.js", () => ({
   isContextOverflowError: () => false,
   isBillingErrorMessage: () => false,
   isLikelyContextOverflowError: () => false,
+  isOverloadedErrorMessage: (text: string) => /overloaded|capacity/i.test(text),
   isRateLimitErrorMessage: () => false,
   isTransientHttpError: () => false,
   sanitizeUserFacingText: (text?: string) => text ?? "",
@@ -956,6 +957,53 @@ describe("runAgentTurnWithFallback", () => {
       expect(result.payload.text).toBe(
         "⚠️ Something went wrong while processing your request. Please try again, or use /new to start a fresh session.",
       );
+    }
+  });
+
+  it("surfaces no-text mid-turn model capacity errors on external chat channels", async () => {
+    state.runEmbeddedPiAgentMock.mockResolvedValueOnce({
+      payloads: [{ text: "thinking", isReasoning: true }],
+      meta: {
+        error: {
+          kind: "server_overloaded",
+          message: "Selected model is at capacity. Please try a different model.",
+        },
+      },
+    });
+
+    const runAgentTurnWithFallback = await getRunAgentTurnWithFallback();
+    const result = await runAgentTurnWithFallback({
+      commandBody: "hello",
+      followupRun: createFollowupRun(),
+      sessionCtx: {
+        Provider: "whatsapp",
+        MessageSid: "msg",
+      } as unknown as TemplateContext,
+      opts: {},
+      typingSignals: createMockTypingSignaler(),
+      blockReplyPipeline: null,
+      blockStreamingEnabled: false,
+      resolvedBlockStreamingBreak: "message_end",
+      applyReplyToMode: (payload) => payload,
+      shouldEmitToolResult: () => true,
+      shouldEmitToolOutput: () => false,
+      pendingToolTasks: new Set(),
+      resetSessionAfterCompactionFailure: async () => false,
+      resetSessionAfterRoleOrderingConflict: async () => false,
+      isHeartbeat: false,
+      sessionKey: "main",
+      getActiveSessionEntry: () => undefined,
+      resolvedVerboseLevel: "off",
+    });
+
+    expect(result.kind).toBe("success");
+    if (result.kind === "success") {
+      expect(result.runResult.payloads).toEqual([
+        {
+          text: "⚠️ The AI service is temporarily overloaded. Please try again in a moment.",
+          isError: true,
+        },
+      ]);
     }
   });
 
