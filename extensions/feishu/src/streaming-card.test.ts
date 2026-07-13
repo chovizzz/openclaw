@@ -124,7 +124,6 @@ describe("FeishuStreamingSession", () => {
         messageId: "om_rejected_flush",
         sequence: 1,
         currentText: "hello",
-        sentText: "hello",
         hasNote: false,
       },
       lastUpdateTime: 1_500,
