@@ -4,6 +4,7 @@ import {
   normalizeOptionalString,
   normalizeOptionalThreadValue,
 } from "../../shared/string-coerce.js";
+import { resolveCronDeliveryPlan } from "../delivery-plan.js";
 import { parseAbsoluteTimeMs } from "../parse.js";
 import {
   coerceFiniteScheduleNumber,
@@ -738,7 +739,10 @@ export function applyJobPatch(
     job.payload = mergeCronPayload(job.payload, patch.payload);
   }
   if (patch.delivery) {
-    job.delivery = mergeCronDelivery(job.delivery, patch.delivery);
+    // Preserve the job's already-resolved implicit delivery mode so a partial
+    // patch (e.g. clearing bestEffort) cannot silently downgrade it to "none".
+    const implicitMode = resolveCronDeliveryPlan(job).mode;
+    job.delivery = mergeCronDelivery(job.delivery, patch.delivery, implicitMode);
   }
   if ("failureAlert" in patch) {
     job.failureAlert = mergeCronFailureAlert(job.failureAlert, patch.failureAlert);
@@ -845,9 +849,10 @@ function buildPayloadFromPatch(patch: CronPayloadPatch): CronPayload {
 function mergeCronDelivery(
   existing: CronDelivery | undefined,
   patch: CronDeliveryPatch,
+  implicitMode: CronDelivery["mode"],
 ): CronDelivery {
   const next: CronDelivery = {
-    mode: existing?.mode ?? "none",
+    mode: existing?.mode ?? implicitMode,
     channel: existing?.channel,
     to: existing?.to,
     threadId: existing?.threadId,

@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { resolveCronDeliveryPlan } from "../delivery-plan.js";
 import type { CronJob } from "../types.js";
 import { applyJobPatch } from "./jobs.js";
 
@@ -33,5 +34,14 @@ describe("applyJobPatch delivery merge", () => {
       to: "-1001234567890",
       threadId: "99",
     });
+  });
+
+  it("preserves implicit detached delivery when patching best-effort", () => {
+    const job = makeJob({ delivery: undefined });
+
+    applyJobPatch(job, { delivery: { bestEffort: false } } as Parameters<typeof applyJobPatch>[1]);
+
+    expect(job.delivery?.mode).toBe("announce");
+    expect(resolveCronDeliveryPlan(job).mode).toBe("announce");
   });
 });
