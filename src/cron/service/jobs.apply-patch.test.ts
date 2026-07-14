@@ -44,4 +44,17 @@ describe("applyJobPatch delivery merge", () => {
     expect(job.delivery?.mode).toBe("announce");
     expect(resolveCronDeliveryPlan(job).mode).toBe("announce");
   });
+
+  it("does not start announcing a main-session job when patching best-effort", () => {
+    const job = makeJob({
+      sessionTarget: "main",
+      payload: { kind: "systemEvent", text: "tick" },
+      delivery: undefined,
+    });
+
+    applyJobPatch(job, { delivery: { bestEffort: false } } as Parameters<typeof applyJobPatch>[1]);
+
+    expect(job.delivery?.mode).not.toBe("announce");
+    expect(resolveCronDeliveryPlan(job).mode).toBe("none");
+  });
 });
