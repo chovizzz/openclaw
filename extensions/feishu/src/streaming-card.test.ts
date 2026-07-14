@@ -137,6 +137,53 @@ describe("FeishuStreamingSession", () => {
     expect(updateBodies).toHaveLength(0);
   });
 
+  async function collectGuardedTimeouts(creds: {
+    appId: string;
+    appSecret: string;
+    httpTimeoutMs?: number;
+  }): Promise<(number | undefined)[]> {
+    mockFetches([]);
+    const session = new FeishuStreamingSession({} as never, creds);
+    setStreamingSessionInternals(session, {
+      state: {
+        cardId: "card_timeout",
+        messageId: "om_timeout",
+        sequence: 1,
+        currentText: "",
+        hasNote: false,
+      },
+    });
+
+    // Exercises the token request plus the content-update request.
+    await session.update("hello world.");
+    await session.close("done.");
+
+    return fetchWithSsrFGuardMock.mock.calls.map(
+      ([args]) => (args as { timeoutMs?: number }).timeoutMs,
+    );
+  }
+
+  it("applies the configured HTTP timeout to every guarded request", async () => {
+    const timeouts = await collectGuardedTimeouts({
+      appId: "app_timeout",
+      appSecret: "secret",
+      httpTimeoutMs: 45_000,
+    });
+
+    expect(timeouts.length).toBeGreaterThan(1);
+    expect(timeouts.every((value) => value === 45_000)).toBe(true);
+  });
+
+  it("falls back to the default HTTP timeout when none is configured", async () => {
+    const timeouts = await collectGuardedTimeouts({
+      appId: "app_default_timeout",
+      appSecret: "secret",
+    });
+
+    expect(timeouts.length).toBeGreaterThan(1);
+    expect(timeouts.every((value) => value === 30_000)).toBe(true);
+  });
+
   it("pushes natural-boundary updates immediately inside the throttle window", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(2_000);

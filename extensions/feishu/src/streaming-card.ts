@@ -4,15 +4,24 @@
 
 import type { Client } from "@larksuiteoapi/node-sdk";
 import { fetchWithSsrFGuard } from "openclaw/plugin-sdk/ssrf-runtime";
+import { FEISHU_HTTP_TIMEOUT_MS } from "./client.js";
 import { resolveFeishuCardTemplate, type CardHeaderConfig } from "./send.js";
 import type { FeishuDomain } from "./types.js";
 
 // All CardKit and token requests share a single deadline. Without this, a
 // server that accepts the TCP connection but stalls blocks the streaming-card
-// reply lane and pins a gateway request open indefinitely.
-const FEISHU_STREAMING_CARD_REQUEST_TIMEOUT_MS = 30_000;
+// reply lane and pins a gateway request open indefinitely. Honor the account's
+// configured Feishu HTTP timeout so operators can raise or lower it.
+type Credentials = {
+  appId: string;
+  appSecret: string;
+  domain?: FeishuDomain;
+  httpTimeoutMs?: number;
+};
 
-type Credentials = { appId: string; appSecret: string; domain?: FeishuDomain };
+function resolveRequestTimeoutMs(creds: Credentials): number {
+  return creds.httpTimeoutMs ?? FEISHU_HTTP_TIMEOUT_MS;
+}
 type CardState = {
   cardId: string;
   messageId: string;
@@ -89,7 +98,7 @@ async function getToken(creds: Credentials): Promise<string> {
     },
     policy: { allowedHostnames: resolveAllowedHostnames(creds.domain) },
     auditContext: "feishu.streaming-card.token",
-    timeoutMs: FEISHU_STREAMING_CARD_REQUEST_TIMEOUT_MS,
+    timeoutMs: resolveRequestTimeoutMs(creds),
   });
   if (!response.ok) {
     await release();
@@ -249,7 +258,7 @@ export class FeishuStreamingSession {
       },
       policy: { allowedHostnames: resolveAllowedHostnames(this.creds.domain) },
       auditContext: "feishu.streaming-card.create",
-      timeoutMs: FEISHU_STREAMING_CARD_REQUEST_TIMEOUT_MS,
+      timeoutMs: resolveRequestTimeoutMs(this.creds),
     });
     if (!createRes.ok) {
       await releaseCreate();
@@ -338,7 +347,7 @@ export class FeishuStreamingSession {
       },
       policy: { allowedHostnames: resolveAllowedHostnames(this.creds.domain) },
       auditContext: "feishu.streaming-card.update",
-      timeoutMs: FEISHU_STREAMING_CARD_REQUEST_TIMEOUT_MS,
+      timeoutMs: resolveRequestTimeoutMs(this.creds),
     })
       .then(async ({ release }) => {
         await release();
@@ -427,7 +436,7 @@ export class FeishuStreamingSession {
       },
       policy: { allowedHostnames: resolveAllowedHostnames(this.creds.domain) },
       auditContext: "feishu.streaming-card.note-update",
-      timeoutMs: FEISHU_STREAMING_CARD_REQUEST_TIMEOUT_MS,
+      timeoutMs: resolveRequestTimeoutMs(this.creds),
     })
       .then(async ({ release }) => {
         await release();
@@ -478,7 +487,7 @@ export class FeishuStreamingSession {
       },
       policy: { allowedHostnames: resolveAllowedHostnames(this.creds.domain) },
       auditContext: "feishu.streaming-card.close",
-      timeoutMs: FEISHU_STREAMING_CARD_REQUEST_TIMEOUT_MS,
+      timeoutMs: resolveRequestTimeoutMs(this.creds),
     })
       .then(async ({ release }) => {
         await release();

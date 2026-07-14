@@ -7,7 +7,7 @@ import {
 } from "openclaw/plugin-sdk/reply-payload";
 import { stripReasoningTagsFromText } from "openclaw/plugin-sdk/text-runtime";
 import { resolveFeishuRuntimeAccount } from "./accounts.js";
-import { createFeishuClient } from "./client.js";
+import { createFeishuClient, resolveConfiguredHttpTimeoutMs } from "./client.js";
 import { sendMediaFeishu } from "./media.js";
 import type { MentionTarget } from "./mention.js";
 import { buildMentionedCardContent } from "./mention.js";
@@ -297,7 +297,12 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
     streamingStartPromise = (async () => {
       const creds =
         account.appId && account.appSecret
-          ? { appId: account.appId, appSecret: account.appSecret, domain: account.domain }
+          ? {
+              appId: account.appId,
+              appSecret: account.appSecret,
+              domain: account.domain,
+              httpTimeoutMs: resolveConfiguredHttpTimeoutMs(account),
+            }
           : null;
       if (!creds) {
         return;

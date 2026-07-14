@@ -100,7 +100,7 @@ export type FeishuClientCredentials = {
   config?: Pick<FeishuConfig, "httpTimeoutMs">;
 };
 
-function resolveConfiguredHttpTimeoutMs(creds: FeishuClientCredentials): number {
+export function resolveConfiguredHttpTimeoutMs(creds: FeishuClientCredentials): number {
   const clampTimeout = (value: number): number => {
     const rounded = Math.floor(value);
     return Math.min(Math.max(rounded, 1), FEISHU_HTTP_TIMEOUT_MAX_MS);
