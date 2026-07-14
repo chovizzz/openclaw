@@ -4,7 +4,6 @@ import {
   createJob,
   recomputeNextRuns,
   recomputeNextRunsForMaintenance,
-  resolveJobPayloadTextForMain,
 } from "./service/jobs.js";
 import type { CronServiceState } from "./service/state.js";
 import { DEFAULT_TOP_OF_HOUR_STAGGER_MS } from "./stagger.js";
@@ -618,6 +617,59 @@ describe("cron stagger defaults", () => {
     if (job.schedule.kind === "cron") {
       expect(job.schedule.expr).toBe("0 */2 * * *");
       expect(job.schedule.staggerMs).toBe(120_000);
+    }
+  });
+
+  it("preserves existing cron metadata when editing only the expression", () => {
+    const now = Date.now();
+    const job: CronJob = {
+      id: "job-keep-metadata",
+      name: "job-keep-metadata",
+      enabled: true,
+      createdAtMs: now,
+      updatedAtMs: now,
+      schedule: { kind: "cron", expr: "0 * * * *", tz: "America/Phoenix", staggerMs: 120_000 },
+      sessionTarget: "main",
+      wakeMode: "now",
+      payload: { kind: "systemEvent", text: "tick" },
+      state: {},
+    };
+
+    applyJobPatch(job, {
+      schedule: { kind: "cron", expr: "0 */2 * * *" },
+    });
+
+    expect(job.schedule.kind).toBe("cron");
+    if (job.schedule.kind === "cron") {
+      expect(job.schedule.expr).toBe("0 */2 * * *");
+      expect(job.schedule.tz).toBe("America/Phoenix");
+      expect(job.schedule.staggerMs).toBe(120_000);
+    }
+  });
+
+  it("preserves existing cron timezone when editing expression and stagger", () => {
+    const now = Date.now();
+    const job: CronJob = {
+      id: "job-keep-tz-with-stagger",
+      name: "job-keep-tz-with-stagger",
+      enabled: true,
+      createdAtMs: now,
+      updatedAtMs: now,
+      schedule: { kind: "cron", expr: "0 * * * *", tz: "America/Phoenix" },
+      sessionTarget: "main",
+      wakeMode: "now",
+      payload: { kind: "systemEvent", text: "tick" },
+      state: {},
+    };
+
+    applyJobPatch(job, {
+      schedule: { kind: "cron", expr: "0 */2 * * *", staggerMs: 30_000 },
+    });
+
+    expect(job.schedule.kind).toBe("cron");
+    if (job.schedule.kind === "cron") {
+      expect(job.schedule.tz).toBe("America/Phoenix");
+      expect(job.schedule.staggerMs).toBe(30_000);
     }
   });
 
