@@ -74,6 +74,28 @@ export function applyExistingCronSchedulePatch(
   };
 }
 
+/**
+ * True when a `--cron` replacement omits `--tz` and therefore needs the stored
+ * job re-read so an expression-only edit cannot silently drop its timezone.
+ */
+export function needsStoredCronTz(next: CronSchedule): boolean {
+  return next.kind === "cron" && next.tz === undefined;
+}
+
+/** Carry the stored job's timezone into a `--cron` replacement that omitted `--tz`. */
+export function preserveStoredCronTz(
+  next: CronSchedule,
+  existingSchedule: CronSchedule | undefined,
+): CronSchedule {
+  if (next.kind !== "cron" || next.tz !== undefined) {
+    return next;
+  }
+  if (existingSchedule?.kind !== "cron" || existingSchedule.tz === undefined) {
+    return next;
+  }
+  return { ...next, tz: existingSchedule.tz };
+}
+
 function normalizeScheduleOptions(options: ScheduleOptionInput): NormalizedScheduleOptions {
   const staggerRaw = normalizeOptionalString(options.stagger) ?? "";
   const useExact = Boolean(options.exact);

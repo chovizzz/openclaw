@@ -10,6 +10,8 @@ import {
 import { addGatewayClientOptions, callGatewayFromCli } from "../gateway-rpc.js";
 import {
   applyExistingCronSchedulePatch,
+  needsStoredCronTz,
+  preserveStoredCronTz,
   resolveCronEditScheduleRequest,
 } from "./schedule-options.js";
 import { getCronChannelOptions, parseDurationMs, warnIfCronSchedulerDisabled } from "./shared.js";
@@ -159,9 +161,7 @@ export function registerCronEditCommand(cron: Command) {
             stagger: opts.stagger,
             tz: opts.tz,
           });
-          if (scheduleRequest.kind === "direct") {
-            patch.schedule = scheduleRequest.schedule;
-          } else if (scheduleRequest.kind === "patch-existing-cron") {
+          const loadExistingCronJob = async (): Promise<CronJob> => {
             const listed = (await callGatewayFromCli("cron.list", opts, {
               includeDisabled: true,
             })) as { jobs?: CronJob[] } | null;
@@ -169,6 +169,19 @@ export function registerCronEditCommand(cron: Command) {
             if (!existing) {
               throw new Error(`unknown cron job id: ${id}`);
             }
+            return existing;
+          };
+          if (scheduleRequest.kind === "direct") {
+            // Replacing the expression via --cron must not silently drop the job's
+            // timezone. Re-read it from the stored job unless --tz was passed.
+            patch.schedule = needsStoredCronTz(scheduleRequest.schedule)
+              ? preserveStoredCronTz(
+                  scheduleRequest.schedule,
+                  (await loadExistingCronJob()).schedule,
+                )
+              : scheduleRequest.schedule;
+          } else if (scheduleRequest.kind === "patch-existing-cron") {
+            const existing = await loadExistingCronJob();
             patch.schedule = applyExistingCronSchedulePatch(existing.schedule, scheduleRequest);
           }
 
