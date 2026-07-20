@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
+import type { FeishuMessageEvent } from "./bot.js";
 import {
   createDedupeCache,
   createPersistentDedupe,
@@ -200,4 +202,49 @@ export async function warmupDedupFromDisk(
   return persistentDedupe.warmup(namespace, (error) => {
     log?.(`feishu-dedup: warmup disk error: ${String(error)}`);
   });
+}
+
+function resolveFeishuSenderIdentity(event: FeishuMessageEvent): string | undefined {
+  const senderId = event.sender?.sender_id;
+  return (
+    senderId?.open_id?.trim() ||
+    senderId?.union_id?.trim() ||
+    senderId?.user_id?.trim() ||
+    undefined
+  );
+}
+
+/**
+ * Resolve the dedupe identity for an inbound Feishu event.
+ *
+ * Feishu can redeliver the same logical text message with a fresh `message_id`
+ * (retry/reconnect), defeating message_id-based dedupe (#46778). For text we key
+ * on a stable retry identity instead: same sender + chat + create_time + content
+ * is the same logical message. `create_time` is the message's own server
+ * timestamp and stays fixed across redeliveries, so a genuine repeat send (which
+ * gets a new create_time) keeps a distinct key and is never suppressed. Falls
+ * back to `message_id` when any field is missing, or for non-text messages
+ * (media dedupe and synthetic events already have stable/unique ids), so
+ * behavior is unchanged there.
+ *
+ * IMPORTANT: this is a pure function of the event. Call it only on the original
+ * inbound event, never on a debounce-merged event whose content was rewritten,
+ * or the hash will drift from the entry-gate claim.
+ */
+export function resolveFeishuDedupeId(event: FeishuMessageEvent): string {
+  const messageId = event.message.message_id?.trim() ?? "";
+  if (event.message.message_type?.trim() !== "text") {
+    return messageId;
+  }
+  const createTime = event.message.create_time?.trim();
+  const chatId = event.message.chat_id?.trim();
+  const senderId = resolveFeishuSenderIdentity(event);
+  if (!createTime || !chatId || !senderId) {
+    return messageId;
+  }
+  const contentHash = createHash("sha256")
+    .update(event.message.content ?? "", "utf8")
+    .digest("hex")
+    .slice(0, 32);
+  return JSON.stringify(["text-retry", senderId, chatId, createTime, contentHash]);
 }

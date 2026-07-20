@@ -18,6 +18,7 @@ import {
   hasProcessedFeishuMessage,
   recordProcessedFeishuMessage,
   releaseFeishuMessageProcessing,
+  resolveFeishuDedupeId,
   tryBeginFeishuMessageProcessing,
   warmupDedupFromDisk,
 } from "./dedup.js";
@@ -341,15 +342,17 @@ function dedupeFeishuDebounceEntriesByMessageId(
   const seen = new Set<string>();
   const deduped: FeishuMessageEvent[] = [];
   for (const entry of entries) {
-    const messageId = entry.message.message_id?.trim();
-    if (!messageId) {
+    // Dedupe by the stable dedupe identity so redeliveries of the same logical
+    // text message (fresh message_id each time) collapse within one batch.
+    const dedupeId = resolveFeishuDedupeId(entry).trim();
+    if (!dedupeId) {
       deduped.push(entry);
       continue;
     }
-    if (seen.has(messageId)) {
+    if (seen.has(dedupeId)) {
       continue;
     }
-    seen.add(messageId);
+    seen.add(dedupeId);
     deduped.push(entry);
   }
   return deduped;
@@ -410,12 +413,15 @@ function registerEventHandlers(
       error(`${params.errorMessage}: ${String(err)}`);
     }
   };
-  const dispatchFeishuMessage = async (event: FeishuMessageEvent) => {
+  const dispatchFeishuMessage = async (event: FeishuMessageEvent, dedupeId?: string) => {
     const chatId = event.message.chat_id?.trim() || "unknown";
     const task = () =>
       handleFeishuMessage({
         cfg,
         event,
+        // For merged/rewritten events the content hash would drift, so the
+        // stable dedupe id is passed explicitly rather than recomputed.
+        dedupeId: dedupeId ?? resolveFeishuDedupeId(event),
         botOpenId: botOpenIds.get(accountId),
         botName: botNames.get(accountId),
         runtime,
@@ -437,29 +443,29 @@ function registerEventHandlers(
   };
   const recordSuppressedMessageIds = async (
     entries: FeishuMessageEvent[],
-    dispatchMessageId?: string,
+    dispatchDedupeId?: string,
   ) => {
-    const keepMessageId = dispatchMessageId?.trim();
+    const keepDedupeId = dispatchDedupeId?.trim();
     const suppressedIds = new Set(
       entries
-        .map((entry) => entry.message.message_id?.trim())
-        .filter((id): id is string => Boolean(id) && (!keepMessageId || id !== keepMessageId)),
+        .map((entry) => resolveFeishuDedupeId(entry).trim())
+        .filter((id): id is string => Boolean(id) && (!keepDedupeId || id !== keepDedupeId)),
     );
     if (suppressedIds.size === 0) {
       return;
     }
-    for (const messageId of suppressedIds) {
+    for (const dedupeId of suppressedIds) {
       try {
-        await recordProcessedFeishuMessage(messageId, accountId, log);
+        await recordProcessedFeishuMessage(dedupeId, accountId, log);
       } catch (err) {
         error(
-          `feishu[${accountId}]: failed to record merged dedupe id ${messageId}: ${String(err)}`,
+          `feishu[${accountId}]: failed to record merged dedupe id ${dedupeId}: ${String(err)}`,
         );
       }
     }
   };
   const isMessageAlreadyProcessed = async (entry: FeishuMessageEvent): Promise<boolean> => {
-    return await hasProcessedFeishuMessage(entry.message.message_id, accountId, log);
+    return await hasProcessedFeishuMessage(resolveFeishuDedupeId(entry), accountId, log);
   };
   const inboundDebouncer = core.channel.debounce.createInboundDebouncer<FeishuMessageEvent>({
     debounceMs: inboundDebounceMs,
@@ -489,7 +495,7 @@ function registerEventHandlers(
         return;
       }
       if (entries.length === 1) {
-        await dispatchFeishuMessage(last);
+        await dispatchFeishuMessage(last, resolveFeishuDedupeId(last));
         return;
       }
       const dedupedEntries = dedupeFeishuDebounceEntriesByMessageId(entries);
@@ -503,7 +509,10 @@ function registerEventHandlers(
       if (!dispatchEntry) {
         return;
       }
-      await recordSuppressedMessageIds(dedupedEntries, dispatchEntry.message.message_id);
+      // Resolve the dispatch identity from the original entry before the merged
+      // event rewrites content, so the recorded/finalized key stays consistent.
+      const dispatchDedupeId = resolveFeishuDedupeId(dispatchEntry);
+      await recordSuppressedMessageIds(dedupedEntries, dispatchDedupeId);
       const combinedText = freshEntries
         .map((entry) => resolveDebounceText(entry))
         .filter(Boolean)
@@ -513,28 +522,34 @@ function registerEventHandlers(
         botOpenId: botOpenIds.get(accountId),
       });
       if (!combinedText.trim()) {
-        await dispatchFeishuMessage({
+        await dispatchFeishuMessage(
+          {
+            ...dispatchEntry,
+            message: {
+              ...dispatchEntry.message,
+              mentions: mergedMentions ?? dispatchEntry.message.mentions,
+            },
+          },
+          dispatchDedupeId,
+        );
+        return;
+      }
+      await dispatchFeishuMessage(
+        {
           ...dispatchEntry,
           message: {
             ...dispatchEntry.message,
+            message_type: "text",
+            content: JSON.stringify({ text: combinedText }),
             mentions: mergedMentions ?? dispatchEntry.message.mentions,
           },
-        });
-        return;
-      }
-      await dispatchFeishuMessage({
-        ...dispatchEntry,
-        message: {
-          ...dispatchEntry.message,
-          message_type: "text",
-          content: JSON.stringify({ text: combinedText }),
-          mentions: mergedMentions ?? dispatchEntry.message.mentions,
         },
-      });
+        dispatchDedupeId,
+      );
     },
     onError: (err, entries) => {
       for (const entry of entries) {
-        releaseFeishuMessageProcessing(entry.message.message_id, accountId);
+        releaseFeishuMessageProcessing(resolveFeishuDedupeId(entry), accountId);
       }
       error(`feishu[${accountId}]: inbound debounce flush failed: ${String(err)}`);
     },
@@ -548,7 +563,10 @@ function registerEventHandlers(
         return;
       }
       const messageId = event.message?.message_id?.trim();
-      if (!tryBeginFeishuMessageProcessing(messageId, accountId)) {
+      // Claim on the stable dedupe identity (text redeliveries reuse it across
+      // fresh message_ids); begin and both releases must use the same id.
+      const dedupeId = resolveFeishuDedupeId(event);
+      if (!tryBeginFeishuMessageProcessing(dedupeId, accountId)) {
         log(`feishu[${accountId}]: dropping duplicate event for message ${messageId}`);
         return;
       }
@@ -557,7 +575,7 @@ function registerEventHandlers(
       };
       if (fireAndForget) {
         void processMessage().catch((err) => {
-          releaseFeishuMessageProcessing(messageId, accountId);
+          releaseFeishuMessageProcessing(dedupeId, accountId);
           error(`feishu[${accountId}]: error handling message: ${String(err)}`);
         });
         return;
@@ -565,7 +583,7 @@ function registerEventHandlers(
       try {
         await processMessage();
       } catch (err) {
-        releaseFeishuMessageProcessing(messageId, accountId);
+        releaseFeishuMessageProcessing(dedupeId, accountId);
         error(`feishu[${accountId}]: error handling message: ${String(err)}`);
       }
     },

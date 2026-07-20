@@ -346,6 +346,12 @@ export async function handleFeishuMessage(params: {
   chatHistories?: Map<string, HistoryEntry[]>;
   accountId?: string;
   processingClaimHeld?: boolean;
+  /**
+   * Stable dedupe identity for text redeliveries. Only the dedupe finalization
+   * uses it; every other message_id use stays the real Feishu transport id.
+   * Defaults to the real message_id for direct/synthetic callers.
+   */
+  dedupeId?: string;
 }): Promise<void> {
   const {
     cfg,
@@ -366,9 +372,13 @@ export async function handleFeishuMessage(params: {
   const error = runtime?.error ?? console.error;
 
   const messageId = event.message.message_id;
+  // Finalize dedupe on the stable identity so the 24h record matches the
+  // in-flight claim taken at ingress; keep the real message_id for everything
+  // else (reactions, reply targeting, logs).
+  const dedupeId = params.dedupeId ?? messageId;
   if (
     !(await finalizeFeishuMessageProcessing({
-      messageId,
+      messageId: dedupeId,
       namespace: account.accountId,
       log,
       claimHeld: processingClaimHeld,

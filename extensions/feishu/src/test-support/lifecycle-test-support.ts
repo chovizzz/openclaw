@@ -269,6 +269,19 @@ export function createResolvedFeishuLifecycleAccount(params: {
   } as unknown as ResolvedFeishuAccount;
 }
 
+// Derive a distinct create_time per logical message so synthetic events do not
+// collide on the stable text-retry dedupe identity (sender+chat+create_time+
+// content) across independent test cases. Deterministic in messageId, so a test
+// that replays the SAME event object still keeps an identical create_time and
+// dedupes as a genuine redelivery.
+function deriveCreateTimeForMessageId(messageId: string): string {
+  let offset = 0;
+  for (let index = 0; index < messageId.length; index += 1) {
+    offset = (offset * 31 + messageId.charCodeAt(index)) % 1_000_000_000;
+  }
+  return String(1_710_000_000_000 + offset);
+}
+
 export function createFeishuTextMessageEvent(params: {
   messageId: string;
   chatId: string;
@@ -277,6 +290,7 @@ export function createFeishuTextMessageEvent(params: {
   senderOpenId?: string;
   rootId?: string;
   threadId?: string;
+  createTime?: string;
 }) {
   return {
     sender: {
@@ -291,7 +305,7 @@ export function createFeishuTextMessageEvent(params: {
       chat_type: params.chatType ?? "group",
       message_type: "text",
       content: JSON.stringify({ text: params.text }),
-      create_time: "1710000000000",
+      create_time: params.createTime ?? deriveCreateTimeForMessageId(params.messageId),
     },
   };
 }
