@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { importFreshModule } from "../../../test/helpers/import-fresh.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import { defaultRuntime } from "../../runtime.js";
@@ -8,6 +8,7 @@ import {
   resetRecentQueuedMessageIdDedupe,
   scheduleFollowupDrain,
 } from "./queue.js";
+import { getExistingFollowupQueue } from "./queue/state.js";
 
 function createDeferred<T>() {
   let resolve!: (value: T) => void;
@@ -276,6 +277,58 @@ describe("followup queue deduplication", () => {
       settings,
     );
     expect(second).toBe(true);
+  });
+
+  it("does not leave an empty registry entry when rejecting a redelivery after the queue drained", async () => {
+    const key = `test-dedup-registry-leak-${Date.now()}`;
+    const calls: FollowupRun[] = [];
+    const done = createDeferred<void>();
+    const runFollowup = async (run: FollowupRun) => {
+      calls.push(run);
+      done.resolve();
+    };
+    const settings: QueueSettings = {
+      mode: "collect",
+      debounceMs: 0,
+      cap: 50,
+      dropPolicy: "summarize",
+    };
+
+    expect(
+      enqueueFollowupRun(
+        key,
+        createRun({
+          prompt: "original",
+          messageId: "leak-1",
+          originatingChannel: "discord",
+          originatingTo: "channel:123",
+        }),
+        settings,
+      ),
+    ).toBe(true);
+    scheduleFollowupDrain(key, runFollowup);
+    await done.promise;
+    // Let the drain finish and self-delete the now-empty queue from the registry.
+    await vi.waitFor(() => {
+      expect(getExistingFollowupQueue(key)).toBeUndefined();
+    });
+    expect(calls).toHaveLength(1);
+
+    // A provider redelivery of the same message must be rejected without
+    // recreating a registry entry that nothing would ever delete again.
+    expect(
+      enqueueFollowupRun(
+        key,
+        createRun({
+          prompt: "original (redelivery)",
+          messageId: "leak-1",
+          originatingChannel: "discord",
+          originatingTo: "channel:123",
+        }),
+        settings,
+      ),
+    ).toBe(false);
+    expect(getExistingFollowupQueue(key)).toBeUndefined();
   });
 
   it("deduplicates exact prompt when routing matches and no message id", async () => {

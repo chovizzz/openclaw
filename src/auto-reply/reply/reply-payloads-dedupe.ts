@@ -2,6 +2,7 @@ import { isMessagingToolDuplicate } from "../../agents/pi-embedded-helpers.js";
 import type { MessagingToolSend } from "../../agents/pi-embedded-runner.js";
 import { getChannelPlugin, normalizeChannelId } from "../../channels/plugins/index.js";
 import { normalizeTargetForProvider } from "../../infra/outbound/target-normalization.js";
+import { hasReplyPayloadContent } from "../../interactive/payload.js";
 import { normalizeOptionalAccountId } from "../../routing/account-id.js";
 import {
   normalizeLowercaseStringOrEmpty,
@@ -9,6 +10,16 @@ import {
 } from "../../shared/string-coerce.js";
 import type { ReplyPayload } from "../types.js";
 
+/**
+ * Removes payloads whose text a messaging tool already sent.
+ *
+ * A duplicate text is not on its own a reason to drop the whole payload: the
+ * same payload can still carry media, interactive controls, or channel-specific
+ * content that was never delivered. Dropping it there silently loses that
+ * content, so a text duplicate is only removed when nothing else is left to
+ * send. Run this after media dedupe so already-sent media is not mistaken for
+ * unsent content.
+ */
 export function filterMessagingToolDuplicates(params: {
   payloads: ReplyPayload[];
   sentTexts: string[];
@@ -17,7 +28,11 @@ export function filterMessagingToolDuplicates(params: {
   if (sentTexts.length === 0) {
     return payloads;
   }
-  return payloads.filter((payload) => !isMessagingToolDuplicate(payload.text ?? "", sentTexts));
+  return payloads.filter(
+    (payload) =>
+      !isMessagingToolDuplicate(payload.text ?? "", sentTexts) ||
+      hasReplyPayloadContent({ ...payload, text: undefined }),
+  );
 }
 
 export function filterMessagingToolMediaDuplicates(params: {

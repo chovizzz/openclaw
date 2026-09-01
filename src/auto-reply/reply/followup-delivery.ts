@@ -56,13 +56,16 @@ export function resolveFollowupDeliveryPayloads(params: {
     replyToMode,
     replyToChannel,
   });
-  const dedupedPayloads = filterMessagingToolDuplicates({
-    payloads: replyTaggedPayloads,
-    sentTexts: params.sentTexts ?? [],
-  });
+  // Media dedupe first: the text dedupe below keeps a text-duplicate payload
+  // alive only when it still carries unsent content, so already-sent media must
+  // be stripped before that check runs.
   const mediaFilteredPayloads = filterMessagingToolMediaDuplicates({
-    payloads: dedupedPayloads,
+    payloads: replyTaggedPayloads,
     sentMediaUrls: params.sentMediaUrls ?? [],
+  });
+  const dedupedPayloads = filterMessagingToolDuplicates({
+    payloads: mediaFilteredPayloads,
+    sentTexts: params.sentTexts ?? [],
   });
   const suppressMessagingToolReplies = shouldSuppressMessagingToolReplies({
     messageProvider: replyToChannel,
@@ -74,5 +77,5 @@ export function resolveFollowupDeliveryPayloads(params: {
       originatingAccountId: params.originatingAccountId,
     }),
   });
-  return suppressMessagingToolReplies ? [] : mediaFilteredPayloads;
+  return suppressMessagingToolReplies ? [] : dedupedPayloads;
 }

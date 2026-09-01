@@ -22,10 +22,11 @@ export function createBlockReplyCoalescer(params: {
   const flushOnEnqueue = config.flushOnEnqueue === true;
 
   let bufferText = "";
-  let bufferReplyToId: ReplyPayload["replyToId"];
-  let bufferAudioAsVoice: ReplyPayload["audioAsVoice"];
-  let bufferIsReasoning: ReplyPayload["isReasoning"];
-  let bufferIsCompactionNotice: ReplyPayload["isCompactionNotice"];
+  // Keep the whole originating payload instead of copying a field allowlist:
+  // rebuilding the payload from named fields silently dropped everything else
+  // (explicit `replyToCurrent` / `replyToTag` routing, interactive/channel data),
+  // so a coalesced block lost the routing the agent asked for.
+  let bufferedPayload: ReplyPayload | undefined;
   let idleTimer: NodeJS.Timeout | undefined;
 
   const clearIdleTimer = () => {
@@ -38,10 +39,7 @@ export function createBlockReplyCoalescer(params: {
 
   const resetBuffer = () => {
     bufferText = "";
-    bufferReplyToId = undefined;
-    bufferAudioAsVoice = undefined;
-    bufferIsReasoning = undefined;
-    bufferIsCompactionNotice = undefined;
+    bufferedPayload = undefined;
   };
 
   const scheduleIdleFlush = () => {
@@ -60,19 +58,23 @@ export function createBlockReplyCoalescer(params: {
       resetBuffer();
       return;
     }
-    if (!bufferText) {
+    if (!bufferText || !bufferedPayload) {
       return;
     }
     if (!options?.force && !flushOnEnqueue && bufferText.length < minChars) {
       scheduleIdleFlush();
       return;
     }
+    // The buffer only ever holds text-only payloads (anything with media flushes
+    // straight through in `enqueue`), so media keys are cleared explicitly: a
+    // malformed payload whose media looks empty to `hasMedia` (for example a
+    // whitespace-only `mediaUrls` entry shadowing `mediaUrl`) must not leak its
+    // media into the coalesced text block.
     const payload: ReplyPayload = {
+      ...bufferedPayload,
       text: bufferText,
-      replyToId: bufferReplyToId,
-      audioAsVoice: bufferAudioAsVoice,
-      isReasoning: bufferIsReasoning,
-      isCompactionNotice: bufferIsCompactionNotice,
+      mediaUrl: undefined,
+      mediaUrls: undefined,
     };
     resetBuffer();
     await onFlush(payload);
@@ -101,10 +103,7 @@ export function createBlockReplyCoalescer(params: {
       if (bufferText) {
         void flush({ force: true });
       }
-      bufferReplyToId = payload.replyToId;
-      bufferAudioAsVoice = payload.audioAsVoice;
-      bufferIsReasoning = payload.isReasoning;
-      bufferIsCompactionNotice = payload.isCompactionNotice;
+      bufferedPayload = payload;
       bufferText = text;
       void flush({ force: true });
       return;
@@ -113,34 +112,31 @@ export function createBlockReplyCoalescer(params: {
     const replyToConflict = Boolean(
       bufferText &&
       payload.replyToId &&
-      (!bufferReplyToId || bufferReplyToId !== payload.replyToId),
+      (!bufferedPayload?.replyToId || bufferedPayload.replyToId !== payload.replyToId),
     );
     const visibilityConflict =
       bufferText &&
-      (bufferIsReasoning !== payload.isReasoning ||
-        bufferIsCompactionNotice !== payload.isCompactionNotice);
+      bufferedPayload &&
+      (bufferedPayload.isReasoning !== payload.isReasoning ||
+        bufferedPayload.isCompactionNotice !== payload.isCompactionNotice);
     if (
       bufferText &&
-      (replyToConflict || bufferAudioAsVoice !== payload.audioAsVoice || visibilityConflict)
+      (replyToConflict ||
+        bufferedPayload?.audioAsVoice !== payload.audioAsVoice ||
+        visibilityConflict)
     ) {
       void flush({ force: true });
     }
 
     if (!bufferText) {
-      bufferReplyToId = payload.replyToId;
-      bufferAudioAsVoice = payload.audioAsVoice;
-      bufferIsReasoning = payload.isReasoning;
-      bufferIsCompactionNotice = payload.isCompactionNotice;
+      bufferedPayload = payload;
     }
 
     const nextText = bufferText ? `${bufferText}${joiner}${text}` : text;
     if (nextText.length > maxChars) {
       if (bufferText) {
         void flush({ force: true });
-        bufferReplyToId = payload.replyToId;
-        bufferAudioAsVoice = payload.audioAsVoice;
-        bufferIsReasoning = payload.isReasoning;
-        bufferIsCompactionNotice = payload.isCompactionNotice;
+        bufferedPayload = payload;
         if (text.length >= maxChars) {
           void onFlush(payload);
           return;

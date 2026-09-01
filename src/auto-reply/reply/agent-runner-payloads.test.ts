@@ -103,7 +103,7 @@ describe("buildReplyPayloads media filter integration", () => {
     });
   });
 
-  it("applies media filter after text filter", async () => {
+  it("applies text filter after media filter", async () => {
     const { replyPayloads } = await buildReplyPayloads({
       ...baseParams,
       payloads: [{ text: "hello world!", mediaUrl: "file:///tmp/photo.jpg" }],
@@ -111,7 +111,8 @@ describe("buildReplyPayloads media filter integration", () => {
       messagingToolSentMediaUrls: ["file:///tmp/photo.jpg"],
     });
 
-    // Text filter removes the payload entirely (text matched), so nothing remains.
+    // Media filter strips the already-sent media first, leaving nothing unsent
+    // behind the duplicate text, so the text filter removes the payload.
     expect(replyPayloads).toHaveLength(0);
   });
 
@@ -262,5 +263,83 @@ describe("buildReplyPayloads media filter integration", () => {
 
     expect(replyPayloads).toHaveLength(1);
     expect(replyPayloads[0]?.text).toBe("hello world!");
+  });
+});
+
+describe("buildReplyPayloads sent-text dedupe preserves unsent content", () => {
+  // Regression: a text duplicate used to drop the entire payload, silently
+  // losing media / interactive controls / channel data that was never sent.
+  it("keeps unsent media when only the legacy media URL was already sent", async () => {
+    const { replyPayloads } = await buildReplyPayloads({
+      ...baseParams,
+      payloads: [
+        {
+          text: "already sent",
+          mediaUrl: "file:///tmp/sent.ogg",
+          mediaUrls: ["file:///tmp/unsent-a.ogg", "file:///tmp/unsent-b.ogg"],
+          audioAsVoice: true,
+        },
+      ],
+      messagingToolSentTexts: ["already sent"],
+      messagingToolSentMediaUrls: ["file:///tmp/sent.ogg"],
+    });
+
+    expect(replyPayloads).toHaveLength(1);
+    expect(replyPayloads[0]).toMatchObject({
+      text: "already sent",
+      mediaUrls: ["file:///tmp/unsent-a.ogg", "file:///tmp/unsent-b.ogg"],
+      audioAsVoice: true,
+    });
+    expect(replyPayloads[0]?.mediaUrl).toBeUndefined();
+  });
+
+  it("keeps unsent interactive controls when only the reply text was sent", async () => {
+    const { replyPayloads } = await buildReplyPayloads({
+      ...baseParams,
+      payloads: [
+        {
+          text: "already sent",
+          interactive: {
+            blocks: [{ type: "buttons", buttons: [{ label: "Retry", value: "retry" }] } as const],
+          },
+        },
+      ],
+      messagingToolSentTexts: ["already sent"],
+    });
+
+    expect(replyPayloads).toHaveLength(1);
+    expect(replyPayloads[0]?.interactive?.blocks).toHaveLength(1);
+  });
+
+  it("keeps unsent channel-specific content when only the reply text was sent", async () => {
+    const { replyPayloads } = await buildReplyPayloads({
+      ...baseParams,
+      payloads: [{ text: "already sent", channelData: { telegram: { buttons: [] } } }],
+      messagingToolSentTexts: ["already sent"],
+    });
+
+    expect(replyPayloads).toHaveLength(1);
+    expect(replyPayloads[0]?.channelData).toEqual({ telegram: { buttons: [] } });
+  });
+
+  it("still drops a text-only duplicate that has no unsent content left", async () => {
+    const { replyPayloads } = await buildReplyPayloads({
+      ...baseParams,
+      payloads: [{ text: "already sent" }],
+      messagingToolSentTexts: ["already sent"],
+    });
+
+    expect(replyPayloads).toHaveLength(0);
+  });
+
+  it("drops a duplicate whose only media was also already sent", async () => {
+    const { replyPayloads } = await buildReplyPayloads({
+      ...baseParams,
+      payloads: [{ text: "already sent", mediaUrl: "file:///tmp/sent.ogg" }],
+      messagingToolSentTexts: ["already sent"],
+      messagingToolSentMediaUrls: ["file:///tmp/sent.ogg"],
+    });
+
+    expect(replyPayloads).toHaveLength(0);
   });
 });

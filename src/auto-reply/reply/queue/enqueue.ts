@@ -65,11 +65,15 @@ export function enqueueFollowupRun(
   runFollowup?: (run: FollowupRun) => Promise<void>,
   restartIfIdle = true,
 ): boolean {
-  const queue = getFollowupQueue(key, settings);
+  // Peek before getFollowupQueue: rejecting a redelivery after the original
+  // queue drained and self-deleted must not recreate an empty registry entry,
+  // which nothing would ever delete again (entries are only removed when a
+  // drain finishes, and a queue with no items never drains).
   const recentMessageIdKey = dedupeMode !== "none" ? buildRecentMessageIdKey(run, key) : undefined;
   if (recentMessageIdKey && RECENT_QUEUE_MESSAGE_IDS.peek(recentMessageIdKey)) {
     return false;
   }
+  const queue = getFollowupQueue(key, settings);
 
   const dedupe =
     dedupeMode === "none"

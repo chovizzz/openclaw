@@ -199,32 +199,33 @@ export async function buildReplyPayloads(params: {
         normalizeMediaPaths: params.normalizeMediaPaths,
       })
     : (params.messagingToolSentMediaUrls ?? []);
-  const dedupedPayloads = dedupeMessagingToolPayloads
-    ? (dedupeRuntime ?? (await loadReplyPayloadsDedupeRuntime())).filterMessagingToolDuplicates({
-        payloads: silentFilteredPayloads,
-        sentTexts: messagingToolSentTexts,
-      })
-    : silentFilteredPayloads;
+  // Media dedupe runs first so the text dedupe below sees only content that is
+  // genuinely still unsent; otherwise an already-sent media URL would look like
+  // unsent content and keep a fully duplicate payload alive.
   const mediaFilteredPayloads = dedupeMessagingToolPayloads
     ? (
         dedupeRuntime ?? (await loadReplyPayloadsDedupeRuntime())
       ).filterMessagingToolMediaDuplicates({
-        payloads: dedupedPayloads,
+        payloads: silentFilteredPayloads,
         sentMediaUrls: messagingToolSentMediaUrls,
       })
-    : dedupedPayloads;
+    : silentFilteredPayloads;
+  const dedupedPayloads = dedupeMessagingToolPayloads
+    ? (dedupeRuntime ?? (await loadReplyPayloadsDedupeRuntime())).filterMessagingToolDuplicates({
+        payloads: mediaFilteredPayloads,
+        sentTexts: messagingToolSentTexts,
+      })
+    : mediaFilteredPayloads;
   // Filter out payloads already sent via pipeline or directly during tool flush.
   const filteredPayloads = shouldDropFinalPayloads
     ? []
     : params.blockStreamingEnabled
-      ? mediaFilteredPayloads.filter(
-          (payload) => !params.blockReplyPipeline?.hasSentPayload(payload),
-        )
+      ? dedupedPayloads.filter((payload) => !params.blockReplyPipeline?.hasSentPayload(payload))
       : params.directlySentBlockKeys?.size
-        ? mediaFilteredPayloads.filter(
+        ? dedupedPayloads.filter(
             (payload) => !params.directlySentBlockKeys!.has(createBlockReplyContentKey(payload)),
           )
-        : mediaFilteredPayloads;
+        : dedupedPayloads;
   const replyPayloads = suppressMessagingToolReplies ? [] : filteredPayloads;
 
   return {

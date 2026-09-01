@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import type { ReplyPayload } from "../types.js";
 import {
   createBlockReplyContentKey,
   createBlockReplyPayloadKey,
@@ -75,5 +76,50 @@ describe("createBlockReplyPipeline dedup with threading", () => {
     // Final payload with no replyToId should be recognized as already sent
     expect(pipeline.hasSentPayload({ text: "response text" })).toBe(true);
     expect(pipeline.hasSentPayload({ text: "response text", replyToId: "other-id" })).toBe(true);
+  });
+});
+
+describe("createBlockReplyPipeline coalescing routing", () => {
+  it.each([
+    { name: "reply-to-current", routing: { replyToCurrent: true } },
+    { name: "explicit-tag", routing: { replyToTag: true } },
+  ] as const)("preserves explicit $name routing through coalescing", async ({ routing }) => {
+    const sent: ReplyPayload[] = [];
+    const pipeline = createBlockReplyPipeline({
+      onBlockReply: async (payload) => {
+        sent.push(payload);
+      },
+      timeoutMs: 5000,
+      coalescing: { minChars: 1, maxChars: 200, idleMs: 0, joiner: " " },
+    });
+
+    // Regression: the coalescer used to rebuild its flushed payload from a small
+    // field allowlist, so explicit routing flags never survived a coalesced block.
+    pipeline.enqueue({ text: "Explicit answer", replyToId: "100", ...routing });
+    await pipeline.flush({ force: true });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({ text: "Explicit answer", replyToId: "100", ...routing });
+  });
+
+  it("preserves channel-specific payload data through coalescing", async () => {
+    const sent: ReplyPayload[] = [];
+    const pipeline = createBlockReplyPipeline({
+      onBlockReply: async (payload) => {
+        sent.push(payload);
+      },
+      timeoutMs: 5000,
+      coalescing: { minChars: 1, maxChars: 200, idleMs: 0, joiner: " " },
+    });
+
+    pipeline.enqueue({ text: "part one", channelData: { threadTs: "1.0" } });
+    pipeline.enqueue({ text: "part two", channelData: { threadTs: "1.0" } });
+    await pipeline.flush({ force: true });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      text: "part one part two",
+      channelData: { threadTs: "1.0" },
+    });
   });
 });

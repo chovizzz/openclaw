@@ -92,6 +92,35 @@ describe("fallback-state", () => {
     expect(resolved.reasonSummary).toContain("Claude Max usage limit reached");
   });
 
+  it.each([
+    "ThrottlingException: Your request was denied due to exceeding the account quotas for Amazon Bedrock.",
+    "ThrottlingException: Too many concurrent requests",
+  ])(
+    "preserves throttle-flavored transient details over the generic rate-limit label (%j)",
+    (error) => {
+      const resolved = resolveDemoFallbackTransition({
+        attempts: [{ ...baseAttempt, error }],
+      });
+
+      // Regression: the transient-detail hint must match the whole throttle word
+      // family (throttle/throttled/throttling/ThrottlingException). A bare
+      // `throttl\b` only matched the non-existent stem "throttl", so real
+      // provider messages fell through and the detailed preview collapsed into
+      // the generic "rate limit" label.
+      expect(resolved.reasonSummary).toContain("ThrottlingException");
+      expect(resolved.reasonSummary).not.toBe("rate limit");
+    },
+  );
+
+  it("still collapses to the reason label when a transient reason lacks any transient-detail hint", () => {
+    // Guards against over-matching: the fix must not let hint-free text through.
+    const resolved = resolveDemoFallbackTransition({
+      attempts: [{ ...baseAttempt, error: "Unauthorized: invalid API key" }],
+    });
+
+    expect(resolved.reasonSummary).toBe("rate limit");
+  });
+
   it("refreshes reason when fallback remains active with same model pair", () => {
     const resolved = resolveDemoFallbackTransition({
       attempts: [{ ...baseAttempt, reason: "timeout" }],
