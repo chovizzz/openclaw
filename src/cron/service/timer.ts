@@ -57,6 +57,7 @@ type TimedCronRunOutcome = CronRunOutcome &
     taskRunId?: string;
     delivered?: boolean;
     deliveryAttempted?: boolean;
+    deliveryError?: string;
     startedAt: number;
     endedAt: number;
   };
@@ -387,6 +388,7 @@ export function applyJobResult(
     status: CronRunStatus;
     error?: string;
     delivered?: boolean;
+    deliveryError?: string;
     startedAt: number;
     endedAt: number;
   },
@@ -418,8 +420,10 @@ export function applyJobResult(
   job.state.lastDelivered = result.delivered;
   const deliveryStatus = resolveDeliveryStatus({ job, delivered: result.delivered });
   job.state.lastDeliveryStatus = deliveryStatus;
+  // A suppressed delivery stays status:"ok" with no run error, so prefer the
+  // diagnostic the dispatch retained before falling back to the run error.
   job.state.lastDeliveryError =
-    deliveryStatus === "not-delivered" && result.error ? result.error : undefined;
+    deliveryStatus === "not-delivered" ? (result.deliveryError ?? result.error) : undefined;
   job.updatedAtMs = result.endedAt;
 
   // Track consecutive errors for backoff / auto-disable.
@@ -1038,6 +1042,7 @@ async function runStartupCatchupCandidate(
       error: result.error,
       summary: result.summary,
       delivered: result.delivered,
+      deliveryError: result.deliveryError,
       sessionId: result.sessionId,
       sessionKey: result.sessionKey,
       model: result.model,
@@ -1114,7 +1119,8 @@ export async function executeJobCore(
   job: CronJob,
   abortSignal?: AbortSignal,
 ): Promise<
-  CronRunOutcome & CronRunTelemetry & { delivered?: boolean; deliveryAttempted?: boolean }
+  CronRunOutcome &
+    CronRunTelemetry & { delivered?: boolean; deliveryAttempted?: boolean; deliveryError?: string }
 > {
   const resolveAbortError = () => ({
     status: "error" as const,
@@ -1158,7 +1164,8 @@ async function executeMainSessionCronJob(
   abortSignal: AbortSignal | undefined,
   waitWithAbort: (ms: number) => Promise<void>,
 ): Promise<
-  CronRunOutcome & CronRunTelemetry & { delivered?: boolean; deliveryAttempted?: boolean }
+  CronRunOutcome &
+    CronRunTelemetry & { delivered?: boolean; deliveryAttempted?: boolean; deliveryError?: string }
 > {
   const text = resolveJobPayloadTextForMain(job);
   if (!text) {
@@ -1252,7 +1259,8 @@ async function executeDetachedCronJob(
   abortSignal: AbortSignal | undefined,
   resolveAbortError: () => { status: "error"; error: string },
 ): Promise<
-  CronRunOutcome & CronRunTelemetry & { delivered?: boolean; deliveryAttempted?: boolean }
+  CronRunOutcome &
+    CronRunTelemetry & { delivered?: boolean; deliveryAttempted?: boolean; deliveryError?: string }
 > {
   if (job.payload.kind !== "agentTurn") {
     return { status: "skipped", error: "isolated job requires payload.kind=agentTurn" };
@@ -1277,6 +1285,7 @@ async function executeDetachedCronJob(
     summary: res.summary,
     delivered: res.delivered,
     deliveryAttempted: res.deliveryAttempted,
+    deliveryError: res.deliveryError,
     sessionId: res.sessionId,
     sessionKey: res.sessionKey,
     model: res.model,
@@ -1307,6 +1316,7 @@ export async function executeJob(
   let coreResult: {
     status: CronRunStatus;
     delivered?: boolean;
+    deliveryError?: string;
   } & CronRunOutcome &
     CronRunTelemetry;
   try {
@@ -1320,6 +1330,7 @@ export async function executeJob(
     status: coreResult.status,
     error: coreResult.error,
     delivered: coreResult.delivered,
+    deliveryError: coreResult.deliveryError,
     startedAt,
     endedAt,
   });

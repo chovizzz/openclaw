@@ -87,6 +87,11 @@ export type RunCronAgentTurnResult = {
    * cannot guarantee a final delivery ack synchronously.
    */
   deliveryAttempted?: boolean;
+  /**
+   * Diagnostic for why cron delivery did not complete, retained even when the
+   * run itself stays `status: "ok"` (for example suppressed stale deliveries).
+   */
+  deliveryError?: string;
 } & CronRunOutcome &
   CronRunTelemetry;
 
@@ -580,7 +585,11 @@ async function finalizeCronRun(params: {
     payloads,
     runLevelError: finalRunResult.meta?.error,
   });
-  const resolveRunOutcome = (result?: { delivered?: boolean; deliveryAttempted?: boolean }) =>
+  const resolveRunOutcome = (result?: {
+    delivered?: boolean;
+    deliveryAttempted?: boolean;
+    deliveryError?: string;
+  }) =>
     prepared.withRunSession({
       status: hasFatalErrorPayload ? "error" : "ok",
       ...(hasFatalErrorPayload
@@ -590,6 +599,7 @@ async function finalizeCronRun(params: {
       outputText,
       delivered: result?.delivered,
       deliveryAttempted: result?.deliveryAttempted,
+      deliveryError: result?.deliveryError,
       ...telemetry,
     });
 
@@ -646,6 +656,7 @@ async function finalizeCronRun(params: {
     return resolveRunOutcome({
       delivered: deliveryResult.result.delivered,
       deliveryAttempted: resultWithDeliveryMeta.deliveryAttempted,
+      deliveryError: deliveryResult.result.deliveryError ?? deliveryResult.deliveryError,
     });
   }
   summary = deliveryResult.summary;
@@ -653,6 +664,7 @@ async function finalizeCronRun(params: {
   return resolveRunOutcome({
     delivered: deliveryResult.delivered,
     deliveryAttempted: deliveryResult.deliveryAttempted,
+    deliveryError: deliveryResult.deliveryError,
   });
 }
 

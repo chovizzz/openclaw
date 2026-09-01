@@ -1027,6 +1027,75 @@ describe("cron service timer regressions", () => {
     }
   });
 
+  it("surfaces a retained delivery diagnostic on an ok run with no run error (#129408)", () => {
+    const startedAt = Date.parse("2026-03-02T12:00:00.000Z");
+    const endedAt = startedAt + 50;
+    const state = createCronServiceState({
+      cronEnabled: true,
+      storePath: "/tmp/cron-129408-stale-delivery.json",
+      log: noopLogger,
+      nowMs: () => endedAt,
+      enqueueSystemEvent: vi.fn(),
+      requestHeartbeatNow: vi.fn(),
+      runIsolatedAgentJob: createDefaultIsolatedRunner(),
+    });
+    const job = createIsolatedRegressionJob({
+      id: "stale-delivery-diagnostic-129408",
+      name: "stale-delivery-diagnostic-129408",
+      scheduledAt: startedAt,
+      schedule: { kind: "cron", expr: "0 7 * * *", tz: "UTC" },
+      payload: { kind: "agentTurn", message: "ping" },
+      state: { nextRunAtMs: startedAt - 1_000, runningAtMs: startedAt - 500 },
+    });
+
+    // A suppressed stale delivery finishes status:"ok" with no run-level error,
+    // so the diagnostic can only reach job state through `deliveryError`.
+    applyJobResult(state, job, {
+      status: "ok",
+      delivered: false,
+      deliveryError: "skipping stale delivery scheduled at 2026-03-02T11:00:00.000Z",
+      startedAt,
+      endedAt,
+    });
+
+    expect(job.state.lastStatus).toBe("ok");
+    expect(job.state.lastDelivered).toBe(false);
+    expect(job.state.lastDeliveryStatus).toBe("not-delivered");
+    expect(job.state.lastDeliveryError).toBe(
+      "skipping stale delivery scheduled at 2026-03-02T11:00:00.000Z",
+    );
+  });
+
+  it("clears the delivery diagnostic once a run delivers (#129408)", () => {
+    const startedAt = Date.parse("2026-03-02T12:00:00.000Z");
+    const endedAt = startedAt + 50;
+    const state = createCronServiceState({
+      cronEnabled: true,
+      storePath: "/tmp/cron-129408-delivered.json",
+      log: noopLogger,
+      nowMs: () => endedAt,
+      enqueueSystemEvent: vi.fn(),
+      requestHeartbeatNow: vi.fn(),
+      runIsolatedAgentJob: createDefaultIsolatedRunner(),
+    });
+    const job = createIsolatedRegressionJob({
+      id: "delivered-clears-diagnostic-129408",
+      name: "delivered-clears-diagnostic-129408",
+      scheduledAt: startedAt,
+      schedule: { kind: "cron", expr: "0 7 * * *", tz: "UTC" },
+      payload: { kind: "agentTurn", message: "ping" },
+      state: {
+        nextRunAtMs: startedAt - 1_000,
+        runningAtMs: startedAt - 500,
+        lastDeliveryError: "stale from a previous run",
+      },
+    });
+
+    applyJobResult(state, job, { status: "ok", delivered: true, startedAt, endedAt });
+
+    expect(job.state.lastDeliveryError).toBeUndefined();
+  });
+
   it("keeps state updates when cron next-run computation throws after a successful run (#30905)", () => {
     const startedAt = Date.parse("2026-03-02T12:00:00.000Z");
     const endedAt = startedAt + 50;

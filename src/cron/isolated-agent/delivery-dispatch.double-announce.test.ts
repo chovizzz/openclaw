@@ -382,13 +382,18 @@ describe("dispatchCronDelivery — double-announce guard", () => {
 
     const state = await dispatchCronDelivery(params);
 
+    const deliveryError = expect.stringContaining(
+      "scheduled at 2026-03-18T13:59:59.999Z, started 180m late",
+    );
     expect(state.result).toEqual(
       expect.objectContaining({
         status: "ok",
         delivered: false,
         deliveryAttempted: true,
+        deliveryError,
       }),
     );
+    expect(state.deliveryError).toEqual(deliveryError);
     expect(deliverOutboundPayloads).not.toHaveBeenCalled();
     expect(
       shouldEnqueueCronMainSummary({
@@ -479,6 +484,45 @@ describe("dispatchCronDelivery — double-announce guard", () => {
     expect(state.deliveryAttempted).toBe(true);
     expect(state.delivered).toBe(true);
     expect(deliverOutboundPayloads).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports a successful best-effort retry as delivered without retaining the earlier error", async () => {
+    vi.stubEnv("OPENCLAW_TEST_FAST", "1");
+    vi.mocked(countActiveDescendantRuns).mockReturnValue(0);
+    vi.mocked(isLikelyInterimCronMessage).mockReturnValue(false);
+    let attempt = 0;
+    vi.mocked(deliverOutboundPayloads).mockImplementation(async (callParams) => {
+      attempt += 1;
+      if (attempt === 1) {
+        const failedPayload = Array.isArray(callParams.payloads)
+          ? callParams.payloads[0]
+          : undefined;
+        // Proven-not-sent per-payload failure, then the batch itself fails
+        // transiently so the cron retry loop replays the whole attempt.
+        callParams.onError?.(new Error("payload failed"), failedPayload as never);
+        throw new Error("ECONNRESET while sending");
+      }
+      return [{ ok: true } as never];
+    });
+
+    const params = makeBaseParams({ synthesizedText: "Retry me once." }) as Record<string, unknown>;
+    params.deliveryBestEffort = true;
+
+    const state = await dispatchCronDelivery(params as never);
+
+    expect(state.result).toBeUndefined();
+    expect(state.deliveryAttempted).toBe(true);
+    expect(state.delivered).toBe(true);
+    // onError must not populate deliveryError (upstream #131419 removed that).
+    expect(state.deliveryError).toBeUndefined();
+    expect(deliverOutboundPayloads).toHaveBeenCalledTimes(2);
+
+    // A retry that followed a possibly-partial attempt stays out of the
+    // completed-delivery cache, so a replay re-sends instead of being
+    // short-circuited to delivered.
+    const replay = await dispatchCronDelivery(params as never);
+    expect(replay.delivered).toBe(true);
+    expect(deliverOutboundPayloads).toHaveBeenCalledTimes(3);
   });
 
   it("keeps direct announce delivery idempotent across replay for the same run session", async () => {

@@ -100,6 +100,12 @@ export type CronServiceDeps = {
        * if the final per-message ack status is uncertain.
        */
       deliveryAttempted?: boolean;
+      /**
+       * Diagnostic for why delivery did not complete, retained even when the
+       * run itself stays `status: "ok"` (for example a suppressed stale
+       * delivery). Surfaced through job state, finished events, and run logs.
+       */
+      deliveryError?: string;
     } & CronRunOutcome &
       CronRunTelemetry
   >;

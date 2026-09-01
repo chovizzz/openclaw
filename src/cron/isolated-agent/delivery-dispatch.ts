@@ -90,6 +90,8 @@ export type DispatchCronDeliveryState = {
   result?: RunCronAgentTurnResult;
   delivered: boolean;
   deliveryAttempted: boolean;
+  /** Retained diagnostic for a delivery that was attempted but not completed. */
+  deliveryError?: string;
   summary?: string;
   outputText?: string;
   synthesizedText?: string;
@@ -367,6 +369,9 @@ export async function dispatchCronDelivery(
   // remains the only source of delivered state.
   let delivered = skipMessagingToolDelivery;
   let deliveryAttempted = skipMessagingToolDelivery;
+  // Retained across the dispatch so a suppressed delivery keeps its diagnostic
+  // on the run result instead of only writing it to the log.
+  let deliveryError: string | undefined;
   const failDeliveryTarget = (error: string) =>
     params.withRunSession({
       status: "error",
@@ -463,15 +468,15 @@ export async function dispatchCronDelivery(
           job: params.job,
           runStartedAt: params.runStartedAt,
         });
-        logWarn(
-          `[cron:${params.job.id}] skipping stale delivery scheduled at ${new Date(scheduledAtMs).toISOString()}, started ${Math.round(startDelayMs / 60_000)}m late, current age ${Math.round((nowMs - scheduledAtMs) / 60_000)}m`,
-        );
+        deliveryError = `skipping stale delivery scheduled at ${new Date(scheduledAtMs).toISOString()}, started ${Math.round(startDelayMs / 60_000)}m late, current age ${Math.round((nowMs - scheduledAtMs) / 60_000)}m`;
+        logWarn(`[cron:${params.job.id}] ${deliveryError}`);
         return params.withRunSession({
           status: "ok",
           summary,
           outputText,
           deliveryAttempted,
           delivered: false,
+          deliveryError,
           ...params.telemetry,
         });
       }
@@ -488,20 +493,31 @@ export async function dispatchCronDelivery(
         sessionKey: params.agentSessionKey,
       });
 
-      // Track bestEffort partial failures so we can log them and avoid
-      // marking the job as delivered when payloads were silently dropped.
+      // The final attempt's batch outcome owns `delivered`: a per-payload
+      // bestEffort error from an attempt that the transient retry loop later
+      // replays successfully must not keep the job marked as undelivered
+      // (upstream #131419).
       let hadPartialFailure = false;
+      // Sticky across retries. Upstream proves an attempt was never dispatched
+      // via a per-payload outcome callback; this tree has no such seam, so a
+      // replayed attempt may have partially reached the recipient. Keep those
+      // runs out of the completed-delivery cache even when the final attempt
+      // succeeded, so a later replay cannot be short-circuited to delivered.
+      let anyAttemptHadPartialFailure = false;
       const onError = params.deliveryBestEffort
         ? (err: unknown, _payload: unknown) => {
             hadPartialFailure = true;
+            anyAttemptHadPartialFailure = true;
             logError(
               `[cron:${params.job.id}] delivery payload failed (bestEffort): ${formatErrorMessage(err)}`,
             );
           }
         : undefined;
 
-      const runDelivery = async () =>
-        await deliverOutboundPayloads({
+      const runDelivery = async () => {
+        // Reset per attempt so a retry starts from a clean outcome.
+        hadPartialFailure = false;
+        return await deliverOutboundPayloads({
           cfg: params.cfgWithAgentDefaults,
           channel: delivery.channel,
           to: delivery.to,
@@ -521,6 +537,7 @@ export async function dispatchCronDelivery(
           // See: https://github.com/openclaw/openclaw/issues/40545
           skipQueue: true,
         });
+      };
       const deliveryResults = options?.retryTransient
         ? await retryTransientDirectCronDelivery({
             jobId: params.job.id,
@@ -543,7 +560,7 @@ export async function dispatchCronDelivery(
           synthesizedText,
         });
       }
-      if (delivered) {
+      if (delivered && !anyAttemptHadPartialFailure) {
         rememberCompletedDirectCronDelivery(deliveryIdempotencyKey, deliveryResults);
       }
       return null;
@@ -676,6 +693,7 @@ export async function dispatchCronDelivery(
           result: failDeliveryTarget(params.resolvedDelivery.error.message),
           delivered,
           deliveryAttempted,
+          deliveryError,
           summary,
           outputText,
           synthesizedText,
@@ -693,6 +711,7 @@ export async function dispatchCronDelivery(
         }),
         delivered,
         deliveryAttempted,
+        deliveryError,
         summary,
         outputText,
         synthesizedText,
@@ -712,6 +731,7 @@ export async function dispatchCronDelivery(
           result: directResult,
           delivered,
           deliveryAttempted,
+          deliveryError,
           summary,
           outputText,
           synthesizedText,
@@ -725,6 +745,7 @@ export async function dispatchCronDelivery(
           result: finalizedTextResult,
           delivered,
           deliveryAttempted,
+          deliveryError,
           summary,
           outputText,
           synthesizedText,
@@ -737,6 +758,7 @@ export async function dispatchCronDelivery(
   return {
     delivered,
     deliveryAttempted,
+    deliveryError,
     summary,
     outputText,
     synthesizedText,
