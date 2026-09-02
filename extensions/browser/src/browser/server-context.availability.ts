@@ -45,8 +45,8 @@ type AvailabilityDeps = {
 };
 
 type AvailabilityOps = {
-  isHttpReachable: (timeoutMs?: number) => Promise<boolean>;
-  isTransportAvailable: (timeoutMs?: number) => Promise<boolean>;
+  isHttpReachable: (timeoutMs?: number, signal?: AbortSignal) => Promise<boolean>;
+  isTransportAvailable: (timeoutMs?: number, signal?: AbortSignal) => Promise<boolean>;
   isReachable: (
     timeoutMs?: number,
     options?: { ephemeral?: boolean; signal?: AbortSignal },
@@ -104,6 +104,35 @@ function assertManagedLaunchNotCoolingDown(profileName: string, profileState: Pr
   );
 }
 
+/**
+ * CDP reachability probes own their own request timeouts and cannot be aborted
+ * at the socket level, so race them against the caller's signal. Without this a
+ * canceled status request would still wait out the full probe budget.
+ */
+async function raceCallerAbort<T>(run: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) {
+    return await run();
+  }
+  // Take the thunk rather than a started promise so an already-canceled caller
+  // never issues the probe at all.
+  signal.throwIfAborted();
+  const cleanup = new AbortController();
+  try {
+    return await Promise.race([
+      run(),
+      new Promise<never>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(signal.reason), {
+          once: true,
+          signal: cleanup.signal,
+        });
+      }),
+    ]);
+  } finally {
+    // Detach the abort listener so a completed probe does not leak it.
+    cleanup.abort();
+  }
+}
+
 export function createProfileAvailability({
   opts,
   profile,
@@ -147,23 +176,36 @@ export function createProfileAvailability({
     );
   };
 
-  const isTransportAvailable = async (timeoutMs?: number) => {
+  const isTransportAvailable = async (timeoutMs?: number, signal?: AbortSignal) => {
     if (capabilities.usesChromeMcp) {
-      await ensureChromeMcpAvailable(profile.name, profile.userDataDir, {
-        ephemeral: true,
-        timeoutMs,
-      });
+      // Do not thread the caller's signal into the shared Chrome MCP attach: a
+      // canceled status request would make chrome-mcp evict a still-starting
+      // shared session from its cache without closing it, orphaning the
+      // transport and breaking existing-session reuse for other callers. Race
+      // the wait instead so only this request stops waiting.
+      await raceCallerAbort(
+        async () =>
+          await ensureChromeMcpAvailable(profile.name, profile.userDataDir, {
+            ephemeral: true,
+            timeoutMs,
+          }),
+        signal,
+      );
       return true;
     }
-    return await isReachable(timeoutMs);
+    return await raceCallerAbort(async () => await isReachable(timeoutMs), signal);
   };
 
-  const isHttpReachable = async (timeoutMs?: number) => {
+  const isHttpReachable = async (timeoutMs?: number, signal?: AbortSignal) => {
     if (capabilities.usesChromeMcp) {
-      return await isTransportAvailable(timeoutMs);
+      return await isTransportAvailable(timeoutMs, signal);
     }
     const { httpTimeoutMs } = resolveTimeouts(timeoutMs);
-    return await isChromeReachable(profile.cdpUrl, httpTimeoutMs, state().resolved.ssrfPolicy);
+    return await raceCallerAbort(
+      async () =>
+        await isChromeReachable(profile.cdpUrl, httpTimeoutMs, state().resolved.ssrfPolicy),
+      signal,
+    );
   };
 
   const attachRunning = (running: NonNullable<ProfileRuntimeState["running"]>) => {

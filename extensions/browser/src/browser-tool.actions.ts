@@ -344,8 +344,23 @@ export async function executeActAction(params: {
   baseUrl?: string;
   profile?: string;
   proxyRequest: BrowserProxyRequest | null;
+  /**
+   * Invoked with the target the server actually closed so callers can release
+   * session ownership. A close routed through `act` must not leave the tab
+   * tracked, the same way an explicit `close` action does not.
+   */
+  onTabClose?: (targetId: string | undefined) => void;
 }): Promise<AgentToolResult<unknown>> {
   const { request, baseUrl, profile, proxyRequest } = params;
+  const finishActResult = (result: unknown) => {
+    if (request.kind === "close") {
+      params.onTabClose?.(
+        readStringValue((result as { targetId?: unknown } | null)?.targetId) ??
+          readStringValue((request as { targetId?: unknown }).targetId),
+      );
+    }
+    return jsonResult(result);
+  };
   try {
     const result = proxyRequest
       ? await proxyRequest({
@@ -357,7 +372,7 @@ export async function executeActAction(params: {
       : await browserToolActionDeps.browserAct(baseUrl, request, {
           profile,
         });
-    return jsonResult(result);
+    return finishActResult(result);
   } catch (err) {
     if (isChromeStaleTargetError(profile, err)) {
       const retryRequest = stripTargetIdFromActRequest(request);
@@ -384,7 +399,7 @@ export async function executeActAction(params: {
             : await browserToolActionDeps.browserAct(baseUrl, retryRequest, {
                 profile,
               });
-          return jsonResult(retryResult);
+          return finishActResult(retryResult);
         } catch {
           // Fall through to explicit stale-target guidance.
         }

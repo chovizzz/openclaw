@@ -4,7 +4,7 @@ import { createCliRuntimeCapture } from "../../test-support.js";
 import * as browserCliSharedModule from "./browser-cli-shared.js";
 import * as cliCoreApiModule from "./core-api.js";
 
-const { defaultRuntime: runtime, resetRuntimeCapture } = createCliRuntimeCapture();
+const { defaultRuntime: runtime, runtimeErrors, resetRuntimeCapture } = createCliRuntimeCapture();
 
 const gatewayMocks = vi.hoisted(() => ({
   callGatewayFromCli: vi.fn(async () => ({
@@ -67,8 +67,13 @@ type SnapshotDefaultsCase = {
 
 describe("browser cli snapshot defaults", () => {
   const runBrowserInspect = async (args: string[], withJson = false) => {
-    const program = new Command();
-    const browser = program.command("browser").option("--json", "JSON output", false);
+    const program = new Command().enablePositionalOptions();
+    // Mirror the real CLI: the parent carries a *default* --timeout, which must
+    // not be treated as an explicit request.
+    const browser = program
+      .command("browser")
+      .option("--json", "JSON output", false)
+      .option("--timeout <ms>", "Timeout in ms", "30000");
     registerBrowserInspectCommands(browser, () => ({}));
     await program.parseAsync(withJson ? ["browser", "--json", ...args] : ["browser", ...args], {
       from: "user",
@@ -77,6 +82,13 @@ describe("browser cli snapshot defaults", () => {
     const [, params] = sharedMocks.callBrowserRequest.mock.calls.at(-1) ?? [];
     return params as { path?: string; query?: Record<string, unknown> } | undefined;
   };
+
+  const lastInspectCall = () =>
+    (sharedMocks.callBrowserRequest.mock.calls.at(-1) ?? []) as unknown as [
+      { timeout?: string } | undefined,
+      { query?: Record<string, unknown>; body?: Record<string, unknown> } | undefined,
+      { timeoutMs?: number } | undefined,
+    ];
 
   const runSnapshot = async (args: string[]) => await runBrowserInspect(["snapshot", ...args]);
 
@@ -141,6 +153,97 @@ describe("browser cli snapshot defaults", () => {
       format: "ai",
       mode: "efficient",
     });
+  });
+
+  it.each([
+    {
+      name: "screenshot without an explicit timeout",
+      args: ["screenshot"],
+      owner: "body" as const,
+      ownerTimeoutMs: undefined,
+      gatewayTimeoutMs: 20_000,
+    },
+    {
+      name: "screenshot with a parent timeout",
+      args: ["--timeout", "60000", "screenshot"],
+      owner: "body" as const,
+      ownerTimeoutMs: 60_000,
+      gatewayTimeoutMs: 60_000,
+    },
+    {
+      name: "screenshot with a subcommand timeout",
+      args: ["screenshot", "tab-42", "--timeout", "60000"],
+      owner: "body" as const,
+      ownerTimeoutMs: 60_000,
+      gatewayTimeoutMs: 60_000,
+      targetId: "tab-42",
+    },
+    {
+      name: "screenshot where the subcommand timeout wins",
+      args: ["--timeout", "60000", "screenshot", "--timeout", "90000"],
+      owner: "body" as const,
+      ownerTimeoutMs: 90_000,
+      gatewayTimeoutMs: 90_000,
+    },
+    {
+      name: "snapshot without an explicit timeout",
+      args: ["snapshot"],
+      owner: "query" as const,
+      ownerTimeoutMs: undefined,
+      gatewayTimeoutMs: 20_000,
+    },
+    {
+      name: "snapshot with a parent timeout",
+      args: ["--timeout", "60000", "snapshot"],
+      owner: "query" as const,
+      ownerTimeoutMs: 60_000,
+      gatewayTimeoutMs: 60_000,
+    },
+    {
+      name: "snapshot with a subcommand timeout",
+      args: ["snapshot", "--timeout", "60000"],
+      owner: "query" as const,
+      ownerTimeoutMs: 60_000,
+      gatewayTimeoutMs: 60_000,
+    },
+    {
+      name: "snapshot where the subcommand timeout wins",
+      args: ["--timeout", "60000", "snapshot", "--timeout", "90000"],
+      owner: "query" as const,
+      ownerTimeoutMs: 90_000,
+      gatewayTimeoutMs: 90_000,
+    },
+  ])("honors $name", async ({ args, owner, ownerTimeoutMs, gatewayTimeoutMs, targetId }) => {
+    await runBrowserInspect(args, true);
+
+    const [, request, extra] = lastInspectCall();
+    expect(extra?.timeoutMs).toBe(gatewayTimeoutMs);
+    const ownerPayload = owner === "query" ? request?.query : request?.body;
+    if (ownerTimeoutMs === undefined) {
+      expect(ownerPayload).not.toHaveProperty("timeoutMs");
+    } else {
+      expect(ownerPayload?.timeoutMs).toBe(ownerTimeoutMs);
+    }
+    if (targetId !== undefined) {
+      expect(request?.body?.targetId).toBe(targetId);
+    }
+  });
+
+  it.each([
+    { name: "zero", timeout: "0" },
+    { name: "negative", timeout: "-1" },
+    { name: "non-numeric", timeout: "abc" },
+    { name: "trailing unit", timeout: "12ms" },
+    { name: "fractional", timeout: "1.5" },
+    { name: "exponent notation", timeout: "1e3" },
+  ])("rejects a $name --timeout without issuing a request", async ({ timeout }) => {
+    // The CLI runtime's exit() throws, so the rejection is the exit path.
+    await expect(runBrowserInspect(["snapshot", "--timeout", timeout], true)).rejects.toThrow(
+      "__exit__:1",
+    );
+
+    expect(sharedMocks.callBrowserRequest).not.toHaveBeenCalled();
+    expect(runtimeErrors.join("\n")).toContain("--timeout expects a positive integer");
   });
 
   it("sends screenshot request with trimmed target id and jpeg type", async () => {

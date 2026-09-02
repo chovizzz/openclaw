@@ -436,7 +436,7 @@ export function createBrowserTool(opts?: {
       hostHint,
     ].join(" "),
     parameters: BrowserToolSchema,
-    execute: async (_toolCallId, args) => {
+    execute: async (_toolCallId, args, signal) => {
       const params = args as Record<string, unknown>;
       const action = readStringParam(params, "action", { required: true });
       const profile = readStringParam(params, "profile");
@@ -468,6 +468,10 @@ export function createBrowserTool(opts?: {
         target,
         sandboxBridgeUrl: opts?.sandboxBridgeUrl,
       });
+      // Node discovery goes through the gateway and cannot be aborted mid-flight
+      // yet, so stop as soon as it returns rather than driving the browser for a
+      // turn the agent already canceled.
+      signal?.throwIfAborted();
 
       const resolvedTarget = target === "node" ? undefined : target;
       const baseUrl = nodeTarget
@@ -647,6 +651,15 @@ export function createBrowserTool(opts?: {
                   body: { kind: "close" },
                   timeoutMs: toolTimeoutMs,
                 });
+            // The server resolves which tab was actually closed when no
+            // targetId was supplied, so untrack the id it reports rather than
+            // the (possibly absent) requested one.
+            browserToolDeps.untrackSessionBrowserTab({
+              sessionKey: opts?.agentSessionKey,
+              targetId: readStringValue((result as { targetId?: unknown }).targetId) ?? targetId,
+              baseUrl,
+              profile,
+            });
             return jsonResult(result);
           }
           if (targetId) {
@@ -661,7 +674,7 @@ export function createBrowserTool(opts?: {
               profile,
             });
           } else {
-            await browserToolDeps.browserAct(
+            const result = await browserToolDeps.browserAct(
               baseUrl,
               { kind: "close" },
               {
@@ -669,6 +682,14 @@ export function createBrowserTool(opts?: {
                 timeoutMs: toolTimeoutMs,
               },
             );
+            // Without an explicit targetId the server picks the current tab, so
+            // ownership must be released for the id it actually closed.
+            browserToolDeps.untrackSessionBrowserTab({
+              sessionKey: opts?.agentSessionKey,
+              targetId: readStringValue(result.targetId),
+              baseUrl,
+              profile,
+            });
           }
           return jsonResult({ ok: true });
         }
@@ -841,6 +862,14 @@ export function createBrowserTool(opts?: {
             baseUrl,
             profile,
             proxyRequest,
+            onTabClose: (closedTargetId) => {
+              browserToolDeps.untrackSessionBrowserTab({
+                sessionKey: opts?.agentSessionKey,
+                targetId: closedTargetId,
+                baseUrl,
+                profile,
+              });
+            },
           });
         }
         default:

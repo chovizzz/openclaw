@@ -83,12 +83,12 @@ function createProfileContext(
     isReachable,
     stopRunningBrowser,
   } = createProfileAvailability({
-      opts,
-      profile,
-      state,
-      getProfileState,
-      setProfileRunning,
-    });
+    opts,
+    profile,
+    state,
+    getProfileState,
+    setProfileRunning,
+  });
 
   const { ensureTabAvailable, focusTab, closeTab } = createProfileSelectionOps({
     profile,
@@ -251,8 +251,9 @@ export function createBrowserRouteContext(opts: ContextOptions): BrowserRouteCon
     // Legacy methods delegate to default profile
     ensureBrowserAvailable: () => getDefaultContext().ensureBrowserAvailable(),
     ensureTabAvailable: (targetId) => getDefaultContext().ensureTabAvailable(targetId),
-    isHttpReachable: (timeoutMs) => getDefaultContext().isHttpReachable(timeoutMs),
-    isTransportAvailable: (timeoutMs) => getDefaultContext().isTransportAvailable(timeoutMs),
+    isHttpReachable: (timeoutMs, signal) => getDefaultContext().isHttpReachable(timeoutMs, signal),
+    isTransportAvailable: (timeoutMs, signal) =>
+      getDefaultContext().isTransportAvailable(timeoutMs, signal),
     isReachable: (timeoutMs, options) => getDefaultContext().isReachable(timeoutMs, options),
     listTabs: () => getDefaultContext().listTabs(),
     openTab: (url) => getDefaultContext().openTab(url),

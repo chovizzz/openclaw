@@ -147,6 +147,110 @@ describe("runBrowserProxyCommand", () => {
     controlServiceMocks.startBrowserControlServiceFromConfig.mockResolvedValue(true);
   });
 
+  it("retries browser control startup after a rejected attempt", async () => {
+    controlServiceMocks.startBrowserControlServiceFromConfig.mockRejectedValueOnce(
+      new Error("browser startup failed"),
+    );
+    dispatcherMocks.dispatch.mockResolvedValue({ status: 200, body: { ok: true } });
+    const request = JSON.stringify({ method: "GET", path: "/snapshot" });
+
+    await expect(runBrowserProxyCommand(request)).rejects.toThrow("browser startup failed");
+    await expect(runBrowserProxyCommand(request)).resolves.toBe(
+      JSON.stringify({ result: { ok: true } }),
+    );
+
+    expect(controlServiceMocks.startBrowserControlServiceFromConfig).toHaveBeenCalledTimes(2);
+    expect(dispatcherMocks.dispatch).toHaveBeenCalledOnce();
+  });
+
+  it("retries browser control startup after the service returns disabled", async () => {
+    controlServiceMocks.startBrowserControlServiceFromConfig.mockResolvedValueOnce(false);
+    dispatcherMocks.dispatch.mockResolvedValue({ status: 200, body: { ok: true } });
+    const request = JSON.stringify({ method: "GET", path: "/snapshot" });
+
+    await expect(runBrowserProxyCommand(request)).rejects.toThrow("browser control disabled");
+    await expect(runBrowserProxyCommand(request)).resolves.toBe(
+      JSON.stringify({ result: { ok: true } }),
+    );
+
+    expect(controlServiceMocks.startBrowserControlServiceFromConfig).toHaveBeenCalledTimes(2);
+    expect(dispatcherMocks.dispatch).toHaveBeenCalledOnce();
+  });
+
+  it("shares a retried browser control startup across concurrent requests", async () => {
+    let rejectFailedStartup!: (reason?: unknown) => void;
+    const failedStartup = new Promise<boolean>((_resolve, reject) => {
+      rejectFailedStartup = reject;
+    });
+    let resolveSuccessfulStartup!: (value: boolean) => void;
+    const successfulStartup = new Promise<boolean>((resolve) => {
+      resolveSuccessfulStartup = resolve;
+    });
+    controlServiceMocks.startBrowserControlServiceFromConfig
+      .mockReturnValueOnce(failedStartup)
+      .mockReturnValueOnce(successfulStartup);
+    dispatcherMocks.dispatch.mockResolvedValue({ status: 200, body: { ok: true } });
+    const request = JSON.stringify({ method: "GET", path: "/snapshot" });
+
+    const failedRequests = Promise.allSettled([
+      runBrowserProxyCommand(request),
+      runBrowserProxyCommand(request),
+    ]);
+    expect(controlServiceMocks.startBrowserControlServiceFromConfig).toHaveBeenCalledOnce();
+    rejectFailedStartup(new Error("browser startup failed"));
+
+    await expect(failedRequests).resolves.toEqual([
+      { status: "rejected", reason: expect.any(Error) },
+      { status: "rejected", reason: expect.any(Error) },
+    ]);
+    expect(dispatcherMocks.dispatch).not.toHaveBeenCalled();
+
+    const retriedRequests = Promise.allSettled([
+      runBrowserProxyCommand(request),
+      runBrowserProxyCommand(request),
+    ]);
+    expect(controlServiceMocks.startBrowserControlServiceFromConfig).toHaveBeenCalledTimes(2);
+    resolveSuccessfulStartup(true);
+
+    await expect(retriedRequests).resolves.toEqual([
+      { status: "fulfilled", value: JSON.stringify({ result: { ok: true } }) },
+      { status: "fulfilled", value: JSON.stringify({ result: { ok: true } }) },
+    ]);
+    await expect(runBrowserProxyCommand(request)).resolves.toBe(
+      JSON.stringify({ result: { ok: true } }),
+    );
+    expect(controlServiceMocks.startBrowserControlServiceFromConfig).toHaveBeenCalledTimes(2);
+    expect(dispatcherMocks.dispatch).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps a newer shared startup when a superseded attempt fails later", async () => {
+    let rejectStaleStartup!: (reason?: unknown) => void;
+    const staleStartup = new Promise<boolean>((_resolve, reject) => {
+      rejectStaleStartup = reject;
+    });
+    controlServiceMocks.startBrowserControlServiceFromConfig
+      .mockReturnValueOnce(staleStartup)
+      .mockResolvedValueOnce(true);
+    dispatcherMocks.dispatch.mockResolvedValue({ status: 200, body: { ok: true } });
+    const request = JSON.stringify({ method: "GET", path: "/snapshot" });
+
+    const stale = expect(runBrowserProxyCommand(request)).rejects.toThrow("stale startup failed");
+    // Drop the stale startup from the module singleton, then start a fresh one.
+    resetBrowserProxyCommandStateForTests();
+    const fresh = runBrowserProxyCommand(request);
+    expect(controlServiceMocks.startBrowserControlServiceFromConfig).toHaveBeenCalledTimes(2);
+
+    rejectStaleStartup(new Error("stale startup failed"));
+    await stale;
+    await expect(fresh).resolves.toBe(JSON.stringify({ result: { ok: true } }));
+
+    // The superseded failure must not have cleared the newer shared startup.
+    await expect(runBrowserProxyCommand(request)).resolves.toBe(
+      JSON.stringify({ result: { ok: true } }),
+    );
+    expect(controlServiceMocks.startBrowserControlServiceFromConfig).toHaveBeenCalledTimes(2);
+  });
+
   it("adds profile and browser status details on ws-backed timeouts", async () => {
     vi.useFakeTimers();
     dispatcherMocks.dispatch

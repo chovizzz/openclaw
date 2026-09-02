@@ -30,7 +30,8 @@ const browserClientMocks = vi.hoisted(() => ({
 vi.mock("./browser/client.js", () => browserClientMocks);
 
 const browserActionsMocks = vi.hoisted(() => ({
-  browserAct: vi.fn(async () => ({ ok: true })),
+  // Widened so close-path tests can resolve a server-reported targetId.
+  browserAct: vi.fn(async (): Promise<{ ok: boolean; targetId?: string }> => ({ ok: true })),
   browserArmDialog: vi.fn(async () => ({ ok: true })),
   browserArmFileChooser: vi.fn(async () => ({ ok: true })),
   browserConsoleMessages: vi.fn(async () => ({
@@ -105,10 +106,13 @@ vi.mock("../../../src/agents/tools/nodes-utils.js", async () => {
 });
 
 const gatewayMocks = vi.hoisted(() => ({
-  callGatewayTool: vi.fn(async () => ({
-    ok: true,
-    payload: { result: { ok: true, running: true } },
-  })),
+  // Widened so proxy tests can shape arbitrary browser.request results.
+  callGatewayTool: vi.fn(
+    async (): Promise<{ ok: boolean; payload: { result: Record<string, unknown> } }> => ({
+      ok: true,
+      payload: { result: { ok: true, running: true } },
+    }),
+  ),
 }));
 vi.mock("../../../src/agents/tools/gateway.js", () => gatewayMocks);
 
@@ -558,6 +562,96 @@ describe("browser tool url alias support", () => {
     expect(sessionTabRegistryMocks.untrackSessionBrowserTab).toHaveBeenCalledWith({
       sessionKey: "agent:main:main",
       targetId: "tab-xyz",
+      baseUrl: undefined,
+      profile: undefined,
+    });
+  });
+
+  it("untracks a tab closed through act", async () => {
+    browserActionsMocks.browserAct.mockResolvedValueOnce({ ok: true, targetId: "tab-act-closed" });
+    const tool = createBrowserTool({ agentSessionKey: "agent:main:main" });
+    await tool.execute?.("call-1", { action: "act", kind: "close", targetId: "tab-requested" });
+
+    expect(sessionTabRegistryMocks.untrackSessionBrowserTab).toHaveBeenCalledWith({
+      sessionKey: "agent:main:main",
+      targetId: "tab-act-closed",
+      baseUrl: undefined,
+      profile: undefined,
+    });
+  });
+
+  it("does not untrack tabs for non-close act kinds", async () => {
+    browserActionsMocks.browserAct.mockResolvedValueOnce({ ok: true, targetId: "tab-1" });
+    const tool = createBrowserTool({ agentSessionKey: "agent:main:main" });
+    await tool.execute?.("call-1", { action: "act", kind: "click", ref: "f1e3" });
+
+    expect(sessionTabRegistryMocks.untrackSessionBrowserTab).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the requested target when a proxied close reports none", async () => {
+    mockSingleBrowserProxyNode();
+    gatewayMocks.callGatewayTool.mockResolvedValueOnce({
+      ok: true,
+      payload: { result: { ok: true } },
+    });
+    const tool = createBrowserTool({ agentSessionKey: "agent:main:main" });
+    await tool.execute?.("call-1", { action: "close", targetId: "tab-requested" });
+
+    expect(sessionTabRegistryMocks.untrackSessionBrowserTab).toHaveBeenCalledWith({
+      sessionKey: "agent:main:main",
+      targetId: "tab-requested",
+      baseUrl: undefined,
+      profile: undefined,
+    });
+  });
+
+  it("stops a canceled tool run after node discovery", async () => {
+    const controller = new AbortController();
+    const abortError = new Error("agent turn canceled");
+    nodesUtilsMocks.listNodes.mockImplementationOnce(async () => {
+      controller.abort(abortError);
+      return [];
+    });
+
+    await expect(
+      createBrowserTool().execute?.("call-1", { action: "status" }, controller.signal),
+    ).rejects.toBe(abortError);
+    expect(browserClientMocks.browserStatus).not.toHaveBeenCalled();
+    expect(gatewayMocks.callGatewayTool).not.toHaveBeenCalled();
+  });
+
+  it("untracks the server-resolved tab when close omits targetId", async () => {
+    browserActionsMocks.browserAct.mockResolvedValueOnce({ ok: true, targetId: "tab-current" });
+    const tool = createBrowserTool({ agentSessionKey: "agent:main:main" });
+    await tool.execute?.("call-1", { action: "close" });
+
+    expect(browserActionsMocks.browserAct).toHaveBeenCalledWith(
+      undefined,
+      { kind: "close" },
+      expect.objectContaining({ profile: undefined }),
+    );
+    expect(sessionTabRegistryMocks.untrackSessionBrowserTab).toHaveBeenCalledWith({
+      sessionKey: "agent:main:main",
+      targetId: "tab-current",
+      baseUrl: undefined,
+      profile: undefined,
+    });
+  });
+
+  it("untracks the proxied close target reported by the node", async () => {
+    mockSingleBrowserProxyNode();
+    gatewayMocks.callGatewayTool.mockResolvedValueOnce({
+      ok: true,
+      payload: {
+        result: { ok: true, targetId: "tab-proxy-current" },
+      },
+    });
+    const tool = createBrowserTool({ agentSessionKey: "agent:main:main" });
+    await tool.execute?.("call-1", { action: "close" });
+
+    expect(sessionTabRegistryMocks.untrackSessionBrowserTab).toHaveBeenCalledWith({
+      sessionKey: "agent:main:main",
+      targetId: "tab-proxy-current",
       baseUrl: undefined,
       profile: undefined,
     });

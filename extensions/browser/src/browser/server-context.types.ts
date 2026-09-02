@@ -37,8 +37,8 @@ export type BrowserServerState = {
 type BrowserProfileActions = {
   ensureBrowserAvailable: () => Promise<void>;
   ensureTabAvailable: (targetId?: string) => Promise<BrowserTab>;
-  isHttpReachable: (timeoutMs?: number) => Promise<boolean>;
-  isTransportAvailable: (timeoutMs?: number) => Promise<boolean>;
+  isHttpReachable: (timeoutMs?: number, signal?: AbortSignal) => Promise<boolean>;
+  isTransportAvailable: (timeoutMs?: number, signal?: AbortSignal) => Promise<boolean>;
   isReachable: (
     timeoutMs?: number,
     options?: { ephemeral?: boolean; signal?: AbortSignal },

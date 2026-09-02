@@ -9,12 +9,13 @@ const { BrowserProfileUnavailableError } = await import("../errors.js");
 const { registerBrowserBasicRoutes } = await import("./basic.js");
 
 function createExistingSessionProfileState(params?: {
-  isHttpReachable?: (timeoutMs?: number) => Promise<boolean>;
-  isTransportAvailable?: (timeoutMs?: number) => Promise<boolean>;
+  isHttpReachable?: (timeoutMs?: number, signal?: AbortSignal) => Promise<boolean>;
+  isTransportAvailable?: (timeoutMs?: number, signal?: AbortSignal) => Promise<boolean>;
   isReachable?: (
     timeoutMs?: number,
     options?: { ephemeral?: boolean; signal?: AbortSignal },
   ) => Promise<boolean>;
+  profileOverrides?: Record<string, unknown>;
 }) {
   return {
     resolved: {
@@ -34,6 +35,7 @@ function createExistingSessionProfileState(params?: {
           userDataDir: "/tmp/brave-profile",
           color: "#00AA00",
           attachOnly: true,
+          ...params?.profileOverrides,
         },
         isHttpReachable: params?.isHttpReachable ?? (async () => true),
         isTransportAvailable: params?.isTransportAvailable ?? (async () => true),
@@ -45,6 +47,7 @@ function createExistingSessionProfileState(params?: {
 async function callBasicRouteWithState(params: {
   query?: Record<string, string>;
   state: ReturnType<typeof createExistingSessionProfileState>;
+  signal?: AbortSignal;
 }) {
   const { app, getHandlers } = createBrowserRouteApp();
   registerBrowserBasicRoutes(app, {
@@ -56,7 +59,14 @@ async function callBasicRouteWithState(params: {
   expect(handler).toBeTypeOf("function");
 
   const response = createBrowserRouteResponse();
-  await handler?.({ params: {}, query: params.query ?? { profile: "chrome-live" } }, response.res);
+  await handler?.(
+    {
+      params: {},
+      query: params.query ?? { profile: "chrome-live" },
+      ...(params.signal ? { signal: params.signal } : {}),
+    },
+    response.res,
+  );
   return response;
 }
 
@@ -143,7 +153,7 @@ describe("basic browser routes", () => {
 
     expect(response.statusCode).toBe(200);
     expect(isTransportAvailable).toHaveBeenCalledTimes(1);
-    expect(isTransportAvailable).toHaveBeenCalledWith(5_000);
+    expect(isTransportAvailable).toHaveBeenCalledWith(5_000, undefined);
     expect(isReachable).toHaveBeenCalledWith(
       expect.any(Number),
       expect.objectContaining({ ephemeral: true, signal: expect.any(AbortSignal) }),
@@ -201,6 +211,49 @@ describe("basic browser routes", () => {
     expect(isReachable.mock.calls[0]?.[1]).toEqual(
       expect.objectContaining({ ephemeral: true, signal: expect.any(AbortSignal) }),
     );
+  });
+
+  it("passes cancellation to managed browser status probes", async () => {
+    const controller = new AbortController();
+    const isHttpReachable = vi.fn(async () => true);
+    const isTransportAvailable = vi.fn(async () => false);
+
+    const response = await callBasicRouteWithState({
+      state: createExistingSessionProfileState({
+        isHttpReachable,
+        isTransportAvailable,
+        profileOverrides: { driver: "chrome", cdpIsLoopback: true, cdpPort: 18792 },
+      }),
+      signal: controller.signal,
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(isHttpReachable).toHaveBeenCalledWith(300, controller.signal);
+    expect(isTransportAvailable).toHaveBeenCalledWith(600, controller.signal);
+  });
+
+  it("cancels an in-flight Chrome MCP page-readiness probe", async () => {
+    const controller = new AbortController();
+    const cancellation = new Error("browser status canceled");
+    const isReachable = vi.fn(
+      async (_timeoutMs?: number, options?: { ephemeral?: boolean; signal?: AbortSignal }) =>
+        await new Promise<boolean>((_resolve, reject) => {
+          options?.signal?.addEventListener("abort", () => reject(cancellation), { once: true });
+        }),
+    );
+
+    const pending = callBasicRouteWithState({
+      state: createExistingSessionProfileState({ isReachable }),
+      signal: controller.signal,
+    });
+    await vi.waitFor(() => expect(isReachable).toHaveBeenCalledOnce());
+    controller.abort(cancellation);
+
+    const response = await pending;
+    expect(response.statusCode).toBe(500);
+    expect(response.body).toMatchObject({ error: "Error: browser status canceled" });
+    const probeSignal = isReachable.mock.calls[0]?.[1]?.signal;
+    expect(probeSignal?.aborted).toBe(true);
   });
 
   it("skips the page-reachability probe when transport is unavailable", async () => {

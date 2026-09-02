@@ -4,10 +4,42 @@ import { callBrowserRequest, type BrowserParentOpts } from "./browser-cli-shared
 import {
   danger,
   defaultRuntime,
+  inheritOptionFromParent,
   loadConfig,
   shortenHomePath,
   type SnapshotResult,
 } from "./core-api.js";
+
+/** Fallback budget when neither the subcommand nor its parent set --timeout. */
+const DEFAULT_BROWSER_INSPECT_TIMEOUT_MS = 20_000;
+
+/**
+ * An explicit --timeout must win over the built-in inspection budget, and a
+ * subcommand-level flag must win over the parent's. Returns the explicitly
+ * requested value only, so callers can tell "explicit" from "defaulted" and
+ * forward the owner timeout to the browser server.
+ */
+function resolveBrowserInspectTimeoutMs(cmd: Command): number | undefined {
+  const own = cmd.opts().timeout;
+  // Only a "cli" source counts as explicit. Reading the parent through
+  // inheritOptionFromParent (rather than the resolved parent opts) keeps the
+  // parent's own *default* from masquerading as an explicit request.
+  const explicit =
+    cmd.getOptionValueSource("timeout") === "cli" && typeof own === "string"
+      ? own
+      : inheritOptionFromParent<string>(cmd, "timeout");
+  if (explicit === undefined) {
+    return undefined;
+  }
+  if (!/^\d+$/.test(explicit.trim())) {
+    throw new Error(`--timeout expects a positive integer in ms (received "${explicit}")`);
+  }
+  const parsed = Number.parseInt(explicit.trim(), 10);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(`--timeout expects a positive integer in ms (received "${explicit}")`);
+  }
+  return parsed;
+}
 
 export function registerBrowserInspectCommands(
   browser: Command,
@@ -21,10 +53,12 @@ export function registerBrowserInspectCommands(
     .option("--ref <ref>", "ARIA ref from ai snapshot")
     .option("--element <selector>", "CSS selector for element screenshot")
     .option("--type <png|jpeg>", "Output type (default: png)", "png")
+    .option("--timeout <ms>", "Timeout in ms")
     .action(async (targetId: string | undefined, opts, cmd) => {
       const parent = parentOpts(cmd);
       const profile = parent?.browserProfile;
       try {
+        const timeoutMs = resolveBrowserInspectTimeoutMs(cmd);
         const result = await callBrowserRequest<{ path: string }>(
           parent,
           {
@@ -37,9 +71,10 @@ export function registerBrowserInspectCommands(
               ref: normalizeOptionalString(opts.ref),
               element: normalizeOptionalString(opts.element),
               type: opts.type === "jpeg" ? "jpeg" : "png",
+              ...(timeoutMs === undefined ? {} : { timeoutMs }),
             },
           },
-          { timeoutMs: 20000 },
+          { timeoutMs: timeoutMs ?? DEFAULT_BROWSER_INSPECT_TIMEOUT_MS },
         );
         if (parent?.json) {
           defaultRuntime.writeJson(result);
@@ -67,6 +102,7 @@ export function registerBrowserInspectCommands(
     .option("--frame <sel>", "Role snapshot: scope to an iframe selector")
     .option("--labels", "Include viewport label overlay screenshot", false)
     .option("--out <path>", "Write snapshot to a file")
+    .option("--timeout <ms>", "Timeout in ms")
     .action(async (opts, cmd) => {
       const parent = parentOpts(cmd);
       const profile = parent?.browserProfile;
@@ -77,6 +113,7 @@ export function registerBrowserInspectCommands(
           : undefined;
       const mode = opts.efficient === true || opts.mode === "efficient" ? "efficient" : configMode;
       try {
+        const timeoutMs = resolveBrowserInspectTimeoutMs(cmd);
         const query: Record<string, string | number | boolean | undefined> = {
           format,
           targetId: normalizeOptionalString(opts.targetId),
@@ -89,6 +126,7 @@ export function registerBrowserInspectCommands(
           labels: opts.labels ? true : undefined,
           mode,
           profile,
+          ...(timeoutMs === undefined ? {} : { timeoutMs }),
         };
         const result = await callBrowserRequest<SnapshotResult>(
           parent,
@@ -97,7 +135,7 @@ export function registerBrowserInspectCommands(
             path: "/snapshot",
             query,
           },
-          { timeoutMs: 20000 },
+          { timeoutMs: timeoutMs ?? DEFAULT_BROWSER_INSPECT_TIMEOUT_MS },
         );
 
         if (opts.out) {

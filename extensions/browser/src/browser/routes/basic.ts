@@ -17,7 +17,11 @@ function remainingChromeMcpStatusTimeoutMs(startedAtMs: number): number {
   return Math.max(1, STATUS_CHROME_MCP_TOTAL_TIMEOUT_MS - (Date.now() - startedAtMs));
 }
 
-async function probeChromeMcpPageReady(profileCtx: ProfileContext, timeoutMs: number) {
+async function probeChromeMcpPageReady(
+  profileCtx: ProfileContext,
+  timeoutMs: number,
+  signal?: AbortSignal,
+) {
   const abort = new AbortController();
   const timer = setTimeout(() => {
     abort.abort(new Error(`Chrome MCP page-readiness probe timed out after ${timeoutMs}ms.`));
@@ -25,9 +29,12 @@ async function probeChromeMcpPageReady(profileCtx: ProfileContext, timeoutMs: nu
   try {
     return await profileCtx.isReachable(timeoutMs, {
       ephemeral: true,
-      signal: abort.signal,
+      signal: signal ? AbortSignal.any([signal, abort.signal]) : abort.signal,
     });
   } catch {
+    // A probe timeout still reports "not ready", but a canceled request must
+    // propagate instead of being reported as a healthy-but-unready browser.
+    signal?.throwIfAborted();
     return false;
   } finally {
     clearTimeout(timer);
@@ -106,6 +113,7 @@ export function registerBrowserBasicRoutes(app: BrowserRouteRegistrar, ctx: Brow
             const statusStartedAtMs = Date.now();
             const transportReady = await profileCtx.isTransportAvailable(
               STATUS_CHROME_MCP_TRANSPORT_TIMEOUT_MS,
+              req.signal,
             );
             if (!transportReady) {
               return [false, false, false] as const;
@@ -113,13 +121,14 @@ export function registerBrowserBasicRoutes(app: BrowserRouteRegistrar, ctx: Brow
             const pageReachable = await probeChromeMcpPageReady(
               profileCtx,
               remainingChromeMcpStatusTimeoutMs(statusStartedAtMs),
+              req.signal,
             );
             return [transportReady, transportReady, pageReachable] as const;
           })()
         : await (async () => {
             const [http, ready] = await Promise.all([
-              profileCtx.isHttpReachable(STATUS_CDP_HTTP_TIMEOUT_MS),
-              profileCtx.isTransportAvailable(STATUS_CDP_TRANSPORT_TIMEOUT_MS),
+              profileCtx.isHttpReachable(STATUS_CDP_HTTP_TIMEOUT_MS, req.signal),
+              profileCtx.isTransportAvailable(STATUS_CDP_TRANSPORT_TIMEOUT_MS, req.signal),
             ]);
             return [http, ready, ready] as const;
           })();
