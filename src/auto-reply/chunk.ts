@@ -330,7 +330,8 @@ export function chunkMarkdownText(text: string, limit: number): string[] {
   let reopenFence: ReturnType<typeof findFenceSpanAt> | undefined;
 
   while (start < text.length) {
-    const reopenPrefix = reopenFence ? `${reopenFence.openLine}\n` : "";
+    const reopenLine = reopenFence ? resolveFenceReopenLine(reopenFence, limit) : "";
+    const reopenPrefix = reopenLine ? `${reopenLine}\n` : "";
     const contentLimit = Math.max(1, limit - reopenPrefix.length);
     if (text.length - start <= contentLimit) {
       const finalChunk = `${reopenPrefix}${text.slice(start)}`;
@@ -340,6 +341,8 @@ export function chunkMarkdownText(text: string, limit: number): string[] {
       break;
     }
 
+    // A reopen applies to one continuation; the split below records the next one.
+    reopenFence = undefined;
     const windowEnd = Math.min(text.length, start + contentLimit);
     const softBreak = pickSafeBreakIndex(text, start, windowEnd, spans);
     let breakIdx = softBreak > start ? softBreak : windowEnd;
@@ -351,15 +354,17 @@ export function chunkMarkdownText(text: string, limit: number): string[] {
     let fenceToSplit = initialFence;
     if (initialFence) {
       const closeLine = `${initialFence.indent}${initialFence.marker}`;
-      const maxIdxIfNeedNewline = start + (contentLimit - (closeLine.length + 1));
-
-      if (maxIdxIfNeedNewline <= start) {
+      if (!resolveFenceReopenLine(initialFence, limit)) {
         fenceToSplit = undefined;
         breakIdx = windowEnd;
       } else {
+        const maxIdxIfNeedNewline = start + (contentLimit - (closeLine.length + 1));
+        // A synthetic reopen makes any remaining physical opener bytes continuation body.
         const minProgressIdx = Math.min(
           text.length,
-          Math.max(start + 1, initialFence.start + initialFence.openLine.length + 2),
+          reopenPrefix
+            ? start + 1
+            : Math.max(start + 1, initialFence.start + initialFence.openLine.length + 2),
         );
         const maxIdxIfAlreadyNewline = start + (contentLimit - closeLine.length);
 
@@ -379,19 +384,34 @@ export function chunkMarkdownText(text: string, limit: number): string[] {
           lastNewline = text.lastIndexOf("\n", lastNewline - 1);
         }
 
-        if (!pickedNewline) {
-          if (minProgressIdx > maxIdxIfAlreadyNewline) {
-            fenceToSplit = undefined;
-            breakIdx = windowEnd;
-          } else {
+        if (!pickedNewline && minProgressIdx >= maxIdxIfAlreadyNewline) {
+          // No room to balance a synthetic fence here: emit raw progress and
+          // carry the reopen so the next continuation still reopens the fence.
+          fenceToSplit = undefined;
+          breakIdx = windowEnd;
+          reopenFence = initialFence;
+        } else {
+          if (!pickedNewline) {
             breakIdx = Math.max(minProgressIdx, maxIdxIfNeedNewline);
           }
+          const fenceAtBreak = findFenceSpanAt(spans, breakIdx);
+          fenceToSplit =
+            fenceAtBreak && fenceAtBreak.start === initialFence.start ? fenceAtBreak : undefined;
         }
       }
+    }
 
-      const fenceAtBreak = findFenceSpanAt(spans, breakIdx);
-      fenceToSplit =
-        fenceAtBreak && fenceAtBreak.start === initialFence.start ? fenceAtBreak : undefined;
+    // Never cut between a surrogate pair: a lone half is an invalid code unit
+    // that channels render as a replacement character. Upstream does this via
+    // `avoidTrailingHighSurrogateBreak`; this tree has no such helper yet.
+    const safeBreakIdx = avoidTrailingHighSurrogateBreak(text, start, breakIdx);
+    if (safeBreakIdx !== breakIdx) {
+      breakIdx = safeBreakIdx;
+      if (fenceToSplit) {
+        const fenceAtBreak = findFenceSpanAt(spans, breakIdx);
+        fenceToSplit =
+          fenceAtBreak && fenceAtBreak.start === fenceToSplit.start ? fenceAtBreak : undefined;
+      }
     }
 
     const rawContent = text.slice(start, breakIdx);
@@ -400,22 +420,59 @@ export function chunkMarkdownText(text: string, limit: number): string[] {
     }
 
     let rawChunk = `${reopenPrefix}${rawContent}`;
-    const brokeOnSeparator = breakIdx < text.length && /\s/.test(text[breakIdx]);
-    let nextStart = Math.min(text.length, breakIdx + (brokeOnSeparator ? 1 : 0));
+    let nextStart = breakIdx;
 
     if (fenceToSplit) {
       const closeLine = `${fenceToSplit.indent}${fenceToSplit.marker}`;
       rawChunk = rawChunk.endsWith("\n") ? `${rawChunk}${closeLine}` : `${rawChunk}\n${closeLine}`;
       reopenFence = fenceToSplit;
-    } else {
+    } else if (!initialFence) {
+      // Only prose separators are disposable; fenced whitespace can be code indentation.
+      const brokeOnSeparator = breakIdx < text.length && /\s/.test(text[breakIdx]);
+      nextStart = Math.min(text.length, breakIdx + (brokeOnSeparator ? 1 : 0));
       nextStart = skipLeadingNewlines(text, nextStart);
-      reopenFence = undefined;
     }
 
     chunks.push(rawChunk);
     start = nextStart;
   }
   return chunks;
+}
+
+/**
+ * Moves a break index back off a trailing high surrogate so a code point is
+ * never split across two chunks. Never backs past `start + 1`, so the caller
+ * always makes progress.
+ */
+function avoidTrailingHighSurrogateBreak(text: string, start: number, end: number): number {
+  if (end <= 0 || end >= text.length) {
+    return end;
+  }
+  const lastCode = text.charCodeAt(end - 1);
+  const nextCode = text.charCodeAt(end);
+  const splitsPair =
+    lastCode >= 0xd800 && lastCode <= 0xdbff && nextCode >= 0xdc00 && nextCode <= 0xdfff;
+  if (!splitsPair) {
+    return end;
+  }
+  const adjusted = end - 1;
+  // Backing off below `start` would stall the loop, so take the whole pair
+  // instead. That can overshoot the limit by one unit, which upstream accepts
+  // rather than emitting an unpaired surrogate.
+  return adjusted > start ? adjusted : end + 1;
+}
+
+function resolveFenceReopenLine(
+  fence: NonNullable<ReturnType<typeof findFenceSpanAt>>,
+  limit: number,
+): string {
+  const markerLine = `${fence.indent}${fence.marker}`;
+  // Reserve the closing marker, two newlines, and one body character so a
+  // reopen header can never consume the whole continuation budget.
+  if (fence.openLine.length + markerLine.length + 3 <= limit) {
+    return fence.openLine;
+  }
+  return markerLine.length * 2 + 3 <= limit ? markerLine : "";
 }
 
 function skipLeadingNewlines(value: string, start = 0): number {

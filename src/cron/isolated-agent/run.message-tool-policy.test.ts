@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   clearFastTestEnv,
   dispatchCronDeliveryMock,
+  isCliProviderMock,
   isHeartbeatOnlyResponseMock,
   loadRunCronIsolatedAgentTurn,
   mockRunCronFallbackPassthrough,
@@ -9,7 +10,9 @@ import {
   resolveCronDeliveryPlanMock,
   resolveDeliveryTargetMock,
   restoreFastTestEnv,
+  runCliAgentMock,
   runEmbeddedPiAgentMock,
+  runWithModelFallbackMock,
 } from "./run.test-harness.js";
 
 const runCronIsolatedAgentTurn = await loadRunCronIsolatedAgentTurn();
@@ -163,5 +166,50 @@ describe("runCronIsolatedAgentTurn message tool policy", () => {
         skipMessagingToolDelivery: true,
       }),
     );
+  });
+  it("binds the resolved delivery account to CLI-backed announce runs (#126995)", async () => {
+    // The CLI runner forwards agentAccountId into the loopback MCP env, which
+    // is what scopes account-implicit message sends to the selected account.
+    isCliProviderMock.mockReturnValue(true);
+    runCliAgentMock.mockResolvedValue({
+      payloads: [{ text: "done" }],
+      meta: { agentMeta: { usage: { input: 5, output: 10 } } },
+    });
+    runWithModelFallbackMock.mockImplementationOnce(
+      async (fallbackParams: { run: (provider: string, model: string) => Promise<unknown> }) => {
+        const result = await fallbackParams.run("claude-cli", "claude-opus-4-6");
+        return { result, provider: "claude-cli", model: "claude-opus-4-6", attempts: [] };
+      },
+    );
+    resolveCronDeliveryPlanMock.mockReturnValue({
+      requested: true,
+      mode: "announce",
+      channel: "telegram",
+      to: "123",
+      accountId: "bot-a",
+    });
+    resolveDeliveryTargetMock.mockResolvedValue({
+      ok: true,
+      channel: "telegram",
+      to: "123",
+      accountId: "bot-a",
+      error: undefined,
+    });
+
+    await runCronIsolatedAgentTurn({
+      ...makeParams(),
+      job: {
+        id: "message-tool-policy",
+        name: "Message Tool Policy",
+        schedule: { kind: "every", everyMs: 60_000 },
+        sessionTarget: "isolated",
+        payload: { kind: "agentTurn", message: "send a message" },
+        delivery: { mode: "announce", channel: "telegram", to: "123", accountId: "bot-a" },
+      } as never,
+    });
+
+    expect(runCliAgentMock).toHaveBeenCalledOnce();
+    expect(runCliAgentMock.mock.calls[0][0]).toHaveProperty("agentAccountId", "bot-a");
+    expect(runCliAgentMock.mock.calls[0][0]).toHaveProperty("messageProvider", "telegram");
   });
 });

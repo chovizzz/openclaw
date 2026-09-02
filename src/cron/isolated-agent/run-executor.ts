@@ -116,6 +116,14 @@ export function createCronPromptExecutor(params: {
             timeoutMs: params.timeoutMs,
             runId: params.cronSession.sessionEntry.sessionId,
             cliSessionId,
+            // Bind the resolved delivery channel + account so account-implicit
+            // message sends from a CLI-backed announce run reach the selected
+            // account instead of the global default (upstream #126995). The
+            // embedded path already forwards both; without the channel the
+            // loopback MCP tool has no fallback when several channels are
+            // configured.
+            messageProvider: params.messageChannel,
+            agentAccountId: params.resolvedDelivery.accountId,
             bootstrapPromptWarningSignaturesSeen,
             bootstrapPromptWarningSignature,
           });

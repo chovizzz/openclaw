@@ -37,6 +37,21 @@ function expectChunkTextCase(params: {
   params.assert(chunks, params.text);
 }
 
+function expectNoLoneSurrogates(chunks: string[]) {
+  for (const chunk of chunks) {
+    for (let i = 0; i < chunk.length; i++) {
+      const code = chunk.charCodeAt(i);
+      if (code >= 0xd800 && code <= 0xdbff) {
+        const next = chunk.charCodeAt(i + 1);
+        expect(next >= 0xdc00 && next <= 0xdfff).toBe(true);
+        i++;
+      } else {
+        expect(code >= 0xdc00 && code <= 0xdfff).toBe(false);
+      }
+    }
+  }
+}
+
 function expectChunkSpecialCase(run: () => void) {
   run();
 }
@@ -402,6 +417,99 @@ describe("chunkMarkdownText", () => {
       name: "parses fence spans once for long fenced payloads",
       run: () => {
         expectFenceParseOccursOnce(`\`\`\`txt\n${"line\n".repeat(600)}\`\`\``, 80);
+      },
+    },
+    {
+      name: "keeps chunks within the limit when a fence opening line exceeds it (#131086)",
+      run: () => {
+        const payload = `token.${"A".repeat(4200)}`;
+        const chunks = chunkMarkdownText(`\`\`\`${payload}\n\`\`\``, 4000);
+        expect(chunks.length).toBeLessThanOrEqual(3);
+        for (const chunk of chunks) {
+          expect(chunk.length).toBeLessThanOrEqual(4000);
+        }
+        expect(chunks.join("").replaceAll("`", "").replaceAll("\n", "")).toBe(payload);
+        expectFencesBalanced(chunks.slice(1));
+      },
+    },
+    {
+      name: "reopens an oversized fence opening line with the bare marker (#131086)",
+      run: () => {
+        const chunks = chunkMarkdownText(`\`\`\`${"A".repeat(4200)}\n\`\`\``, 2000);
+        expect(chunks.length).toBeLessThanOrEqual(4);
+        expect(chunks[1]?.startsWith("```\n")).toBe(true);
+        for (const chunk of chunks) {
+          expect(chunk.length).toBeLessThanOrEqual(2000);
+        }
+        expectFencesBalanced(chunks.slice(1));
+      },
+    },
+    {
+      name: "keeps the full opening line when it fits the reopen budget (#131086)",
+      run: () => {
+        const openLine = `\`\`\`language-${"A".repeat(1_488)}`;
+        const chunks = chunkMarkdownText(`${openLine}\n${"x".repeat(1_200)}\n\`\`\``, 2_000);
+        expect(chunks.length).toBeGreaterThan(1);
+        for (const chunk of chunks.slice(1)) {
+          expect(chunk.startsWith(`${openLine}\n`)).toBe(true);
+        }
+        expect(chunks.every((chunk) => chunk.length <= 2_000)).toBe(true);
+        expectFencesBalanced(chunks);
+      },
+    },
+    {
+      name: "keeps the hard limit when synthetic fence balancing cannot fit (#131086)",
+      run: () => {
+        const text = `\`\`\`\n${"x".repeat(20)}\n\`\`\``;
+        for (const limit of [5, 6, 8]) {
+          const chunks = chunkMarkdownText(text, limit);
+          expect(
+            chunks.every((chunk) => chunk.length <= limit),
+            `limit ${limit}`,
+          ).toBe(true);
+          expect(chunks.length, `limit ${limit}`).toBeLessThanOrEqual(
+            Math.ceil(text.length / limit),
+          );
+          expect(chunks.join(""), `limit ${limit}`).toBe(text);
+        }
+      },
+    },
+    {
+      name: "prefers an over-limit chunk to an unpaired surrogate (#131086)",
+      run: () => {
+        // The pair sits at the very start of the window, so backing the break
+        // off would stall the loop; upstream takes the whole pair instead.
+        const chunks = chunkMarkdownText("```\n\u{1F600}X\n```", 9);
+        // Fence splitting inserts synthetic close/reopen markers, so compare
+        // the payload rather than the raw concatenation.
+        expect(chunks.join("").replaceAll("`", "").replaceAll("\n", "")).toBe("\u{1F600}X");
+        expectNoLoneSurrogates(chunks);
+      },
+    },
+    {
+      name: "never splits a surrogate pair when continuing a fence (#131086)",
+      run: () => {
+        // A fence continuation whose synthetic reopen lands mid-emoji used to
+        // emit a lone high surrogate at the chunk tail and a lone low surrogate
+        // right after the reopen header.
+        const text = `\`\`\`${"A".repeat(100)}\n${"\u{1F600} ".repeat(1_334)}\n\`\`\``;
+        const chunks = chunkMarkdownText(text, 2_000);
+        for (const chunk of chunks) {
+          expect(chunk.length).toBeLessThanOrEqual(2_000);
+        }
+        expectNoLoneSurrogates(chunks);
+      },
+    },
+    {
+      name: "does not emit a header-only fence at the reopen budget boundary (#131086)",
+      run: () => {
+        const limit = 20;
+        const openLine = `\`\`\`${"x".repeat(limit - 8)}`;
+        const text = `${openLine}\nbody-content-long\n\`\`\``;
+        const chunks = chunkMarkdownText(text, limit);
+
+        expect(chunks.every((chunk) => chunk.length <= limit)).toBe(true);
+        expectNoEmptyFencedChunks(text, limit);
       },
     },
   ] as const)("$name", ({ run }) => {
