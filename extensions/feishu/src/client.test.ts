@@ -116,6 +116,24 @@ type HttpInstanceLike = {
   post: (url: string, body?: unknown, options?: Record<string, unknown>) => Promise<unknown>;
 };
 
+type FullHttpInstanceLike = {
+  request: (options?: Record<string, unknown>) => Promise<unknown>;
+  get: (url: string, options?: Record<string, unknown>) => Promise<unknown>;
+  delete: (url: string, options?: Record<string, unknown>) => Promise<unknown>;
+  head: (url: string, options?: Record<string, unknown>) => Promise<unknown>;
+  options: (url: string, options?: Record<string, unknown>) => Promise<unknown>;
+  post: (url: string, body?: unknown, options?: Record<string, unknown>) => Promise<unknown>;
+  put: (url: string, body?: unknown, options?: Record<string, unknown>) => Promise<unknown>;
+  patch: (url: string, body?: unknown, options?: Record<string, unknown>) => Promise<unknown>;
+};
+
+function requireHttpInstance(value: unknown): FullHttpInstanceLike {
+  if (isRecord(value) && typeof value.request === "function" && typeof value.get === "function") {
+    return value as unknown as FullHttpInstanceLike;
+  }
+  throw new Error("expected Feishu HTTP instance");
+}
+
 function readCallOptions(
   mock: { mock: { calls: unknown[][] } },
   index = -1,
@@ -132,7 +150,7 @@ function firstWsClientOptions(): { agent?: unknown; wsConfig?: unknown } {
 beforeAll(async () => {
   vi.doMock("@larksuiteoapi/node-sdk", () => ({
     AppType: { SelfBuild: "self" },
-    Domain: { Feishu: "https://open.feishu.cn", Lark: "https://open.larksuite.com" },
+    Domain: { Feishu: 0, Lark: 1 },
     LoggerLevel: { info: "info" },
     Client: clientCtorMock,
     WSClient: wsClientCtorMock,
@@ -167,10 +185,7 @@ beforeEach(() => {
   setFeishuClientRuntimeForTest({
     sdk: {
       AppType: { SelfBuild: "self" } as never,
-      Domain: {
-        Feishu: "https://open.feishu.cn",
-        Lark: "https://open.larksuite.com",
-      } as never,
+      Domain: { Feishu: 0, Lark: 1 } as never,
       LoggerLevel: { info: "info" } as never,
       Client: clientCtorMock as never,
       WSClient: wsClientCtorMock as never,
@@ -347,6 +362,146 @@ describe("createFeishuClient HTTP timeout", () => {
       expect.objectContaining({ timeout: 45_000 }),
     );
   });
+});
+
+describe("Feishu custom HTTPS API domains", () => {
+  const sdkOrigin = "https://open.feishu.cn";
+  const customDomain = "https://private.feishu.test:8443/reverse-proxy/";
+
+  function createCustomDomainHttpInstance(accountId: string): FullHttpInstanceLike {
+    createFeishuClient({
+      appId: `app_${accountId}`,
+      appSecret: "local-test-placeholder", // pragma: allowlist secret
+      accountId,
+      domain: customDomain,
+    });
+    // The SDK must stay on its canonical domain; the custom origin lives in our transport.
+    expect(readCallOptions(clientCtorMock).domain).toBe(0);
+    return requireHttpInstance(readCallOptions(clientCtorMock).httpInstance);
+  }
+
+  it.each(["get", "delete", "head", "options"] as const)(
+    "routes SDK %s requests through the configured HTTPS origin, port, and path",
+    async (method) => {
+      const httpInstance = createCustomDomainHttpInstance(`custom-domain-${method}`);
+
+      await httpInstance[method](`${sdkOrigin}/open-apis/im/v1/messages/om_proof?locale=en`, {
+        headers: { "X-Proof": "true" },
+      });
+
+      expect(mockBaseHttpInstance[method]).toHaveBeenCalledWith(
+        "https://private.feishu.test:8443/reverse-proxy/open-apis/im/v1/messages/om_proof?locale=en",
+        { timeout: FEISHU_HTTP_TIMEOUT_MS, headers: { "X-Proof": "true" } },
+      );
+    },
+  );
+
+  it.each(["post", "put", "patch"] as const)(
+    "routes SDK %s requests without changing their body or request options",
+    async (method) => {
+      const httpInstance = createCustomDomainHttpInstance(`custom-domain-${method}`);
+      const body = { content: "preserve this body" };
+
+      await httpInstance[method](`${sdkOrigin}/open-apis/im/v1/messages`, body, {
+        headers: { "X-Proof": "true" },
+      });
+
+      expect(mockBaseHttpInstance[method]).toHaveBeenCalledWith(
+        "https://private.feishu.test:8443/reverse-proxy/open-apis/im/v1/messages",
+        body,
+        { timeout: FEISHU_HTTP_TIMEOUT_MS, headers: { "X-Proof": "true" } },
+      );
+    },
+  );
+
+  it("routes the url carried inside generic request options", async () => {
+    const httpInstance = createCustomDomainHttpInstance("custom-domain-request");
+
+    await httpInstance.request({
+      url: `${sdkOrigin}/open-apis/im/v1/files?folder=root`,
+      method: "POST",
+    });
+
+    expect(mockBaseHttpInstance.request).toHaveBeenCalledWith({
+      url: "https://private.feishu.test:8443/reverse-proxy/open-apis/im/v1/files?folder=root",
+      method: "POST",
+      timeout: FEISHU_HTTP_TIMEOUT_MS,
+    });
+  });
+
+  it.each([
+    "https://open.feishu.cn.evil.test/open-apis/im/v1/messages",
+    "https://open.feishu.cn:444/open-apis/im/v1/messages",
+    "https://unrelated.example/open-apis/im/v1/messages",
+  ])("does not rewrite an unrelated request origin: %s", async (url) => {
+    const httpInstance = createCustomDomainHttpInstance(`custom-domain-external-${url.length}`);
+
+    await httpInstance.get(url);
+
+    expect(mockBaseHttpInstance.get).toHaveBeenCalledWith(url, {
+      timeout: FEISHU_HTTP_TIMEOUT_MS,
+    });
+  });
+
+  it("keeps independent account transport origins isolated", async () => {
+    const first = createCustomDomainHttpInstance("custom-domain-first-account");
+    createFeishuClient({
+      appId: "app_second_account",
+      appSecret: "local-test-placeholder", // pragma: allowlist secret
+      accountId: "custom-domain-second-account",
+      domain: "https://another.feishu.test:9443/tenant",
+    });
+    const second = requireHttpInstance(readCallOptions(clientCtorMock).httpInstance);
+
+    await first.get(`${sdkOrigin}/open-apis/im/v1/chats/oc_first`);
+    await second.get(`${sdkOrigin}/open-apis/im/v1/chats/oc_second`);
+
+    expect(mockBaseHttpInstance.get.mock.calls.map((call) => call[0])).toEqual([
+      "https://private.feishu.test:8443/reverse-proxy/open-apis/im/v1/chats/oc_first",
+      "https://another.feishu.test:9443/tenant/open-apis/im/v1/chats/oc_second",
+    ]);
+  });
+
+  it("routes WebSocket endpoint discovery through the same configured origin", async () => {
+    await createFeishuWSClient({
+      ...baseAccount,
+      accountId: "custom-domain-websocket",
+      domain: customDomain,
+    });
+
+    const options = readCallOptions(wsClientCtorMock);
+    expect(options.domain).toBe(0);
+    const httpInstance = requireHttpInstance(options.httpInstance);
+    await httpInstance.request({ url: `${sdkOrigin}/callback/ws/endpoint`, method: "post" });
+
+    expect(mockBaseHttpInstance.request).toHaveBeenCalledWith({
+      url: "https://private.feishu.test:8443/reverse-proxy/callback/ws/endpoint",
+      method: "post",
+      timeout: FEISHU_HTTP_TIMEOUT_MS,
+    });
+  });
+
+  it.each([
+    ["feishu", 0, "https://open.feishu.cn"],
+    ["lark", 1, "https://open.larksuite.com"],
+  ] as const)(
+    "preserves the existing %s SDK domain and direct requests",
+    async (domain, sdkDomain, url) => {
+      createFeishuClient({
+        appId: `app_${domain}`,
+        appSecret: "local-test-placeholder", // pragma: allowlist secret
+        accountId: `official-domain-${domain}`,
+        domain,
+      });
+
+      const options = readCallOptions(clientCtorMock);
+      expect(options.domain).toBe(sdkDomain);
+      await requireHttpInstance(options.httpInstance).get(`${url}/open-apis/im/v1/messages`);
+      expect(mockBaseHttpInstance.get).toHaveBeenCalledWith(`${url}/open-apis/im/v1/messages`, {
+        timeout: FEISHU_HTTP_TIMEOUT_MS,
+      });
+    },
+  );
 });
 
 describe("createFeishuWSClient proxy handling", () => {

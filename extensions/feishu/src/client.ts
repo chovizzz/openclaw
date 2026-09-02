@@ -3,6 +3,8 @@ import * as Lark from "@larksuiteoapi/node-sdk";
 import { resolveAmbientNodeProxyAgent } from "openclaw/plugin-sdk/extension-shared";
 import type { FeishuConfig, FeishuDomain, ResolvedFeishuAccount } from "./types.js";
 
+const FEISHU_SDK_ORIGIN = "https://open.feishu.cn";
+
 const FEISHU_WS_CONFIG = {
   PingInterval: 30,
   PingTimeout: 3,
@@ -53,14 +55,11 @@ const clientCache = new Map<
   }
 >();
 
-function resolveDomain(domain: FeishuDomain | undefined): Lark.Domain | string {
-  if (domain === "lark") {
-    return feishuClientSdk.Domain.Lark;
-  }
-  if (domain === "feishu" || !domain) {
-    return feishuClientSdk.Domain.Feishu;
-  }
-  return domain.replace(/\/+$/, ""); // Custom URL for private deployment
+function resolveSdkDomain(domain: FeishuDomain | undefined): Lark.Domain {
+  // The SDK parses ":port" inside a custom domain string as an API route parameter, so a
+  // private-deployment origin must never be handed to the SDK directly. Keep the SDK on a
+  // canonical origin and re-target the request in our own HTTP transport instead.
+  return domain === "lark" ? feishuClientSdk.Domain.Lark : feishuClientSdk.Domain.Feishu;
 }
 
 /**
@@ -68,22 +67,55 @@ function resolveDomain(domain: FeishuDomain | undefined): Lark.Domain | string {
  * but injects a default request timeout to prevent indefinite hangs
  * (e.g. when the Feishu API is slow, causing per-chat queue deadlocks).
  */
-function createTimeoutHttpInstance(defaultTimeoutMs: number): Lark.HttpInstance {
+function createTimeoutHttpInstance(
+  defaultTimeoutMs: number,
+  configuredDomain?: FeishuDomain,
+): Lark.HttpInstance {
   const base: FeishuHttpInstanceLike = feishuClientSdk.defaultHttpInstance;
+  const customDomain =
+    configuredDomain && configuredDomain !== "feishu" && configuredDomain !== "lark"
+      ? new URL(configuredDomain)
+      : undefined;
+
+  /**
+   * Re-target SDK-generated URLs at the configured private-deployment origin, preserving its
+   * port and base path. Requests that already point somewhere else are left untouched so a
+   * look-alike host (open.feishu.cn.evil.test) can never capture the rewrite.
+   */
+  function resolveRequestUrl(url: string): string {
+    if (!customDomain) {
+      return url;
+    }
+    const requestUrl = new URL(url);
+    if (requestUrl.origin !== FEISHU_SDK_ORIGIN) {
+      return url;
+    }
+    const destination = new URL(customDomain);
+    destination.pathname = `${destination.pathname.replace(/\/+$/, "")}${requestUrl.pathname}`;
+    destination.search = requestUrl.search;
+    destination.hash = requestUrl.hash;
+    return destination.toString();
+  }
 
   function injectTimeout<D>(opts?: Lark.HttpRequestOptions<D>): Lark.HttpRequestOptions<D> {
-    return { timeout: defaultTimeoutMs, ...opts } as Lark.HttpRequestOptions<D>;
+    const next = { timeout: defaultTimeoutMs, ...opts } as Lark.HttpRequestOptions<D> & {
+      url?: string;
+    };
+    if (typeof next.url === "string") {
+      next.url = resolveRequestUrl(next.url);
+    }
+    return next;
   }
 
   return {
     request: (opts) => base.request(injectTimeout(opts)),
-    get: (url, opts) => base.get(url, injectTimeout(opts)),
-    post: (url, data, opts) => base.post(url, data, injectTimeout(opts)),
-    put: (url, data, opts) => base.put(url, data, injectTimeout(opts)),
-    patch: (url, data, opts) => base.patch(url, data, injectTimeout(opts)),
-    delete: (url, opts) => base.delete(url, injectTimeout(opts)),
-    head: (url, opts) => base.head(url, injectTimeout(opts)),
-    options: (url, opts) => base.options(url, injectTimeout(opts)),
+    get: (url, opts) => base.get(resolveRequestUrl(url), injectTimeout(opts)),
+    post: (url, data, opts) => base.post(resolveRequestUrl(url), data, injectTimeout(opts)),
+    put: (url, data, opts) => base.put(resolveRequestUrl(url), data, injectTimeout(opts)),
+    patch: (url, data, opts) => base.patch(resolveRequestUrl(url), data, injectTimeout(opts)),
+    delete: (url, opts) => base.delete(resolveRequestUrl(url), injectTimeout(opts)),
+    head: (url, opts) => base.head(resolveRequestUrl(url), injectTimeout(opts)),
+    options: (url, opts) => base.options(resolveRequestUrl(url), injectTimeout(opts)),
   };
 }
 
@@ -160,8 +192,8 @@ export function createFeishuClient(creds: FeishuClientCredentials): Lark.Client 
     appId,
     appSecret,
     appType: feishuClientSdk.AppType.SelfBuild,
-    domain: resolveDomain(domain),
-    httpInstance: createTimeoutHttpInstance(defaultHttpTimeoutMs),
+    domain: resolveSdkDomain(domain),
+    httpInstance: createTimeoutHttpInstance(defaultHttpTimeoutMs, domain),
   });
 
   // Cache it
@@ -185,10 +217,12 @@ export async function createFeishuWSClient(account: ResolvedFeishuAccount): Prom
   }
 
   const agent = await getWsProxyAgent();
+  const defaultHttpTimeoutMs = resolveConfiguredHttpTimeoutMs(account);
   return new feishuClientSdk.WSClient({
     appId,
     appSecret,
-    domain: resolveDomain(domain),
+    domain: resolveSdkDomain(domain),
+    httpInstance: createTimeoutHttpInstance(defaultHttpTimeoutMs, domain),
     loggerLevel: feishuClientSdk.LoggerLevel.info,
     wsConfig: FEISHU_WS_CONFIG,
     ...(agent ? { agent } : {}),

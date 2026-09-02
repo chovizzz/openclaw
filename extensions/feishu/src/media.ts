@@ -12,6 +12,7 @@ import { normalizeFeishuExternalKey } from "./external-keys.js";
 import { getFeishuRuntime } from "./runtime.js";
 import { assertFeishuMessageApiSuccess, toFeishuSendResult } from "./send-result.js";
 import { resolveFeishuSendTarget } from "./send-target.js";
+import { sendReplyOrFallbackDirect } from "./send.js";
 
 const FEISHU_MEDIA_HTTP_TIMEOUT_MS = 120_000;
 
@@ -432,16 +433,22 @@ export async function sendImageFeishu(params: {
   const content = JSON.stringify({ image_key: imageKey });
 
   if (replyToMessageId) {
-    const response = await client.im.message.reply({
-      path: { message_id: replyToMessageId },
-      data: {
+    // Media replies must degrade the same way text replies do: when the reply target is gone
+    // (withdrawn/expired), fall back to a top-level send instead of failing the whole delivery.
+    return sendReplyOrFallbackDirect(client, {
+      replyToMessageId,
+      replyInThread,
+      content,
+      msgType: "image",
+      directParams: {
+        receiveId,
+        receiveIdType,
         content,
-        msg_type: "image",
-        ...(replyInThread ? { reply_in_thread: true } : {}),
+        msgType: "image",
       },
+      directErrorPrefix: "Feishu image send failed",
+      replyErrorPrefix: "Feishu image reply failed",
     });
-    assertFeishuMessageApiSuccess(response, "Feishu image reply failed");
-    return toFeishuSendResult(response, receiveId);
   }
 
   const response = await client.im.message.create({
@@ -479,16 +486,21 @@ export async function sendFileFeishu(params: {
   const content = JSON.stringify({ file_key: fileKey });
 
   if (replyToMessageId) {
-    const response = await client.im.message.reply({
-      path: { message_id: replyToMessageId },
-      data: {
+    // Same degradation contract as image replies above.
+    return sendReplyOrFallbackDirect(client, {
+      replyToMessageId,
+      replyInThread,
+      content,
+      msgType,
+      directParams: {
+        receiveId,
+        receiveIdType,
         content,
-        msg_type: msgType,
-        ...(replyInThread ? { reply_in_thread: true } : {}),
+        msgType,
       },
+      directErrorPrefix: "Feishu file send failed",
+      replyErrorPrefix: "Feishu file reply failed",
     });
-    assertFeishuMessageApiSuccess(response, "Feishu file reply failed");
-    return toFeishuSendResult(response, receiveId);
   }
 
   const response = await client.im.message.create({
