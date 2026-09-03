@@ -7,6 +7,7 @@ import {
 } from "openclaw/plugin-sdk/channel-config-helpers";
 import type {
   ChannelMessageActionAdapter,
+  ChannelMessageActionContext,
   ChannelMessageToolDiscovery,
 } from "openclaw/plugin-sdk/channel-contract";
 import { createChatChannelPlugin } from "openclaw/plugin-sdk/channel-core";
@@ -498,6 +499,64 @@ function resolveFeishuMessageId(params: Record<string, unknown>): string | undef
   return readFirstString(params, ["messageId", "message_id", "replyTo", "reply_to"]);
 }
 
+function isFeishuGroupTopicSessionKey(sessionKey: string | null | undefined): boolean {
+  if (typeof sessionKey !== "string" || !sessionKey) {
+    return false;
+  }
+  const parsed = parseFeishuConversationId({ conversationId: sessionKey });
+  return parsed?.scope === "group_topic" || parsed?.scope === "group_topic_sender";
+}
+
+type FeishuActionReplyAnchor = {
+  replyToMessageId: string | undefined;
+  replyInThread: boolean;
+};
+
+type FeishuSendActionContext = Pick<
+  ChannelMessageActionContext,
+  "action" | "params" | "sessionKey" | "toolContext"
+>;
+
+/** In a group_topic session the agent is already inside a Feishu topic, so a
+ * bare `send` must anchor to the inbound message. Otherwise the reply escapes
+ * the topic and lands in the parent group chat. */
+function resolveFeishuTopicAutoThreadAnchor(ctx: FeishuSendActionContext): string | undefined {
+  if (ctx.action !== "send") {
+    return undefined;
+  }
+  // The session key is not a reliable topic signal on its own: thread bindings
+  // and ACP routes replace it with an opaque bound key. `currentThreadTs` is
+  // populated from MessageThreadId, which feishu only sets for topic sessions,
+  // so honor either signal.
+  const threadRoot = ctx.toolContext?.currentThreadTs;
+  const inTopic =
+    isFeishuGroupTopicSessionKey(ctx.sessionKey) ||
+    (typeof threadRoot === "string" && threadRoot.length > 0);
+  if (!inTopic) {
+    return undefined;
+  }
+  const inbound = ctx.toolContext?.currentMessageId;
+  if (typeof inbound === "string" && inbound.length > 0) {
+    return inbound;
+  }
+  // No inbound message id (e.g. a followup turn): anchor to the topic root.
+  return typeof threadRoot === "string" && threadRoot.length > 0 ? threadRoot : undefined;
+}
+
+function buildFeishuSendReplyAnchor(ctx: FeishuSendActionContext): FeishuActionReplyAnchor {
+  if (ctx.action === "thread-reply") {
+    return {
+      replyToMessageId: resolveFeishuMessageId(ctx.params),
+      replyInThread: true,
+    };
+  }
+  const autoThreadId = resolveFeishuTopicAutoThreadAnchor(ctx);
+  return {
+    replyToMessageId: autoThreadId,
+    replyInThread: autoThreadId !== undefined,
+  };
+}
+
 function resolveFeishuMemberId(params: Record<string, unknown>): string | undefined {
   return readFirstString(params, [
     "memberId",
@@ -659,8 +718,7 @@ export const feishuPlugin: ChannelPlugin<ResolvedFeishuAccount, FeishuProbeResul
             if (!to) {
               throw new Error(`Feishu ${ctx.action} requires a target (to).`);
             }
-            const replyToMessageId =
-              ctx.action === "thread-reply" ? resolveFeishuMessageId(ctx.params) : undefined;
+            const { replyToMessageId, replyInThread } = buildFeishuSendReplyAnchor(ctx);
             if (ctx.action === "thread-reply" && !replyToMessageId) {
               throw new Error("Feishu thread-reply requires messageId.");
             }
@@ -695,7 +753,7 @@ export const feishuPlugin: ChannelPlugin<ResolvedFeishuAccount, FeishuProbeResul
                 card,
                 accountId: ctx.accountId ?? undefined,
                 replyToMessageId,
-                replyInThread: ctx.action === "thread-reply",
+                replyInThread,
               });
             } else if (mediaUrl) {
               result = await sendMedia!({
@@ -705,7 +763,9 @@ export const feishuPlugin: ChannelPlugin<ResolvedFeishuAccount, FeishuProbeResul
                 mediaUrl,
                 accountId: ctx.accountId ?? undefined,
                 mediaLocalRoots: ctx.mediaLocalRoots,
-                replyToId: replyToMessageId,
+                ...(replyInThread
+                  ? { threadId: replyToMessageId }
+                  : { replyToId: replyToMessageId }),
               });
             } else {
               result = await runtime.sendMessageFeishu({
@@ -714,7 +774,7 @@ export const feishuPlugin: ChannelPlugin<ResolvedFeishuAccount, FeishuProbeResul
                 text: text!,
                 accountId: ctx.accountId ?? undefined,
                 replyToMessageId,
-                replyInThread: ctx.action === "thread-reply",
+                replyInThread,
               });
             }
             return jsonActionResult({

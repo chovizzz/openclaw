@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import { raceWithTimeoutAndAbort } from "./async.js";
 import { createFeishuClient, type FeishuClientCredentials } from "./client.js";
@@ -34,6 +35,13 @@ type FeishuRequestClient = ReturnType<typeof createFeishuClient> & {
   }): Promise<FeishuBotInfoResponse>;
 };
 
+function buildProbeCacheKey(creds: FeishuClientCredentials): string {
+  // Account ids survive config reloads. Bind cached health and identity to the
+  // complete credentials so a reconfigured account must perform a fresh probe.
+  const identity = [creds.accountId ?? null, creds.appId, creds.appSecret, creds.domain ?? null];
+  return createHash("sha256").update(JSON.stringify(identity)).digest("hex");
+}
+
 function setCachedProbeResult(
   cacheKey: string,
   result: FeishuProbeResult,
@@ -69,11 +77,8 @@ export async function probeFeishu(
 
   const timeoutMs = options.timeoutMs ?? FEISHU_PROBE_REQUEST_TIMEOUT_MS;
 
-  // Return cached result if still valid.
-  // Use accountId when available; otherwise include appSecret prefix so two
-  // accounts sharing the same appId (e.g. after secret rotation) don't
-  // pollute each other's cache entry.
-  const cacheKey = creds.accountId ?? `${creds.appId}:${creds.appSecret.slice(0, 8)}`;
+  // Return cached result if still valid for this exact configured identity.
+  const cacheKey = buildProbeCacheKey(creds);
   const cached = probeCache.get(cacheKey);
   if (cached && cached.expiresAt > Date.now()) {
     return cached.result;

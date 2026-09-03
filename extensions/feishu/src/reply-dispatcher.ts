@@ -9,8 +9,6 @@ import { stripReasoningTagsFromText } from "openclaw/plugin-sdk/text-runtime";
 import { resolveFeishuRuntimeAccount } from "./accounts.js";
 import { createFeishuClient, resolveConfiguredHttpTimeoutMs } from "./client.js";
 import { sendMediaFeishu } from "./media.js";
-import type { MentionTarget } from "./mention.js";
-import { buildMentionedCardContent } from "./mention.js";
 import {
   createReplyPrefixContext,
   type ClawdbotConfig,
@@ -33,6 +31,35 @@ function shouldUseCard(text: string): boolean {
  * Messages older than this are likely replays after context compaction (#30418). */
 const TYPING_INDICATOR_MAX_AGE_MS = 2 * 60_000;
 const MS_EPOCH_MIN = 1_000_000_000_000;
+/** Streaming-card creation can fail permanently for a workspace (missing card
+ * permissions, unsupported app setup). Retrying on every reply adds the failing
+ * request's latency to each message, so back off briefly and fall back to a
+ * normal card, then retry so transient failures and fixed permissions recover
+ * without a restart. */
+const STREAMING_START_FAILURE_BACKOFF_MS = 60_000;
+const streamingStartBackoffUntilByAccount = new Map<string, number>();
+
+function isStreamingStartBackedOff(accountId: string, now = Date.now()): boolean {
+  const backoffUntil = streamingStartBackoffUntilByAccount.get(accountId);
+  if (backoffUntil === undefined) {
+    return false;
+  }
+  if (backoffUntil <= now) {
+    streamingStartBackoffUntilByAccount.delete(accountId);
+    return false;
+  }
+  return true;
+}
+
+function rememberStreamingStartFailure(accountId: string, now = Date.now()): number {
+  const backoffUntil = now + STREAMING_START_FAILURE_BACKOFF_MS;
+  streamingStartBackoffUntilByAccount.set(accountId, backoffUntil);
+  return backoffUntil;
+}
+
+export function clearFeishuStreamingStartBackoffForTests() {
+  streamingStartBackoffUntilByAccount.clear();
+}
 
 function normalizeEpochMs(timestamp: number | undefined): number | undefined {
   if (!Number.isFinite(timestamp) || timestamp === undefined || timestamp <= 0) {
@@ -90,7 +117,6 @@ export type CreateFeishuReplyDispatcherParams = {
   /** True when inbound message is already inside a thread/topic context */
   threadReply?: boolean;
   rootId?: string;
-  mentionTargets?: MentionTarget[];
   accountId?: string;
   identity?: OutboundIdentity;
   /** Epoch ms when the inbound message was created. Used to suppress typing
@@ -109,7 +135,6 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
     replyInThread,
     threadReply,
     rootId,
-    mentionTargets,
     accountId,
     identity,
   } = params;
@@ -204,6 +229,11 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
   const deliveredFinalTexts = new Set<string>();
   let partialUpdateQueue: Promise<void> = Promise.resolve();
   let streamingStartPromise: Promise<void> | null = null;
+  // Tracks whether the streaming card for the current reply was already closed
+  // with the final text. A late `final` payload that repeats what the card
+  // already shows must not be re-delivered as a second card (#72294).
+  let streamingClosedForReply = false;
+  let streamingCloseErroredForReply = false;
   type StreamTextUpdateMode = "snapshot" | "delta";
 
   const formatReasoningPrefix = (thinking: string): string => {
@@ -291,7 +321,12 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
   };
 
   const startStreaming = () => {
-    if (!streamingEnabled || streamingStartPromise || streaming) {
+    if (
+      !streamingEnabled ||
+      streamingStartPromise ||
+      streaming ||
+      isStreamingStartBackedOff(account.accountId)
+    ) {
       return;
     }
     streamingStartPromise = (async () => {
@@ -321,15 +356,21 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
           header: cardHeader,
           note: cardNote,
         });
+        streamingStartBackoffUntilByAccount.delete(account.accountId);
       } catch (error) {
-        params.runtime.error?.(`feishu: streaming start failed: ${String(error)}`);
+        rememberStreamingStartFailure(account.accountId);
+        params.runtime.error?.(
+          `feishu[${account.accountId}]: streaming start failed; using non-streaming card fallback for ${
+            STREAMING_START_FAILURE_BACKOFF_MS / 1000
+          }s: ${String(error)}`,
+        );
         streaming = null;
-        streamingStartPromise = null; // allow retry on next deliver
+        streamingStartPromise = null;
       }
     })();
   };
 
-  const closeStreaming = async () => {
+  const closeStreaming = async (options?: { markClosedForReply?: boolean }) => {
     try {
       if (streamingStartPromise) {
         await streamingStartPromise;
@@ -337,17 +378,31 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
       await partialUpdateQueue;
       if (streaming?.isActive()) {
         statusLine = "";
-        let text = buildCombinedStreamText(reasoningText, streamText);
-        if (mentionTargets?.length) {
-          text = buildMentionedCardContent(mentionTargets, text);
-        }
+        const text = buildCombinedStreamText(reasoningText, streamText);
         const finalNote = resolveCardNote(agentId, identity, prefixContext.prefixContext);
-        await streaming.close(text, { note: finalNote });
-        // Track the raw streamed text so the duplicate-final check in deliver()
-        // can skip the redundant text delivery that arrives after onIdle closes
-        // the streaming card.
+        // Mark closed *before* awaiting close(): the session is deactivated
+        // synchronously inside close(), so a late final arriving during the
+        // async close window must already see the suppression flag or it posts
+        // a duplicate card. Roll the flag back if close() fails so the
+        // onError recovery final can still deliver.
+        const markClosed =
+          !!streamText && options?.markClosedForReply !== false && !streamingCloseErroredForReply;
         if (streamText) {
+          // Track the raw streamed text so the duplicate-final check in deliver()
+          // can skip the redundant text delivery that arrives after onIdle closes
+          // the streaming card.
           deliveredFinalTexts.add(streamText);
+        }
+        if (markClosed) {
+          streamingClosedForReply = true;
+        }
+        try {
+          await streaming.close(text, { note: finalNote });
+        } catch (error) {
+          if (markClosed) {
+            streamingClosedForReply = false;
+          }
+          throw error;
         }
       }
     } finally {
@@ -420,6 +475,8 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
       humanDelay: core.channel.reply.resolveHumanDelayConfig(cfg, agentId),
       onReplyStart: async () => {
         deliveredFinalTexts.clear();
+        streamingClosedForReply = false;
+        streamingCloseErroredForReply = false;
         if (streamingEnabled && renderMode === "card") {
           startStreaming();
         }
@@ -430,17 +487,27 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
         const text = reply.text;
         const hasText = reply.hasText;
         const hasMedia = reply.hasMedia;
+        const useCard =
+          hasText && (renderMode === "card" || (renderMode === "auto" && shouldUseCard(text)));
         const skipTextForDuplicateFinal =
           info?.kind === "final" && hasText && deliveredFinalTexts.has(text);
-        const shouldDeliverText = hasText && !skipTextForDuplicateFinal;
+        // The streaming card already rendered the final answer for this reply,
+        // so a trailing `final` payload would post a duplicate card.
+        const skipTextForClosedStreamingFinal =
+          info?.kind === "final" &&
+          hasText &&
+          streamingClosedForReply &&
+          !streamingCloseErroredForReply &&
+          streamingEnabled &&
+          useCard;
+        const shouldDeliverText =
+          hasText && !skipTextForDuplicateFinal && !skipTextForClosedStreamingFinal;
 
         if (!shouldDeliverText && !hasMedia) {
           return;
         }
 
         if (shouldDeliverText) {
-          const useCard = renderMode === "card" || (renderMode === "auto" && shouldUseCard(text));
-
           if (info?.kind === "block") {
             // Drop internal block chunks unless we can safely consume them as
             // streaming-card fallback content.
@@ -486,14 +553,13 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
               text,
               useCard: true,
               infoKind: info?.kind,
-              sendChunk: async ({ chunk, isFirst }) => {
+              sendChunk: async ({ chunk }) => {
                 await sendStructuredCardFeishu({
                   cfg,
                   to: chatId,
                   text: chunk,
                   replyToMessageId: sendReplyToMessageId,
                   replyInThread: effectiveReplyInThread,
-                  mentions: isFirst ? mentionTargets : undefined,
                   accountId,
                   header: cardHeader,
                   note: cardNote,
@@ -505,14 +571,13 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
               text,
               useCard: false,
               infoKind: info?.kind,
-              sendChunk: async ({ chunk, isFirst }) => {
+              sendChunk: async ({ chunk }) => {
                 await sendMessageFeishu({
                   cfg,
                   to: chatId,
                   text: chunk,
                   replyToMessageId: sendReplyToMessageId,
                   replyInThread: effectiveReplyInThread,
-                  mentions: isFirst ? mentionTargets : undefined,
                   accountId,
                 });
               },
@@ -525,10 +590,12 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
         }
       },
       onError: async (error, info) => {
+        streamingCloseErroredForReply = true;
+        streamingClosedForReply = false;
         params.runtime.error?.(
           `feishu[${account.accountId}] ${info.kind} reply failed: ${String(error)}`,
         );
-        await closeStreaming();
+        await closeStreaming({ markClosedForReply: false });
         typingCallbacks?.onIdle?.();
       },
       onIdle: async () => {

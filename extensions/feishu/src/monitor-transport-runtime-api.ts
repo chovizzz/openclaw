@@ -5,5 +5,6 @@ export {
   isRequestBodyLimitError,
   readRequestBodyWithLimit,
   requestBodyErrorToText,
+  resolveRequestClientIp,
 } from "openclaw/plugin-sdk/webhook-ingress";
 export { installRequestBodyLimitGuard } from "openclaw/plugin-sdk/webhook-request-guards";

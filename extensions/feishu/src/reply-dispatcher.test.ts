@@ -90,13 +90,17 @@ vi.mock("./streaming-card.js", () => {
   };
 });
 
-import { createFeishuReplyDispatcher } from "./reply-dispatcher.js";
+import {
+  clearFeishuStreamingStartBackoffForTests,
+  createFeishuReplyDispatcher,
+} from "./reply-dispatcher.js";
 
 describe("createFeishuReplyDispatcher streaming behavior", () => {
   type ReplyDispatcherArgs = Parameters<typeof createFeishuReplyDispatcher>[0];
 
   beforeEach(() => {
     vi.clearAllMocks();
+    clearFeishuStreamingStartBackoffForTests();
     streamingInstances.length = 0;
     sendMediaFeishuMock.mockResolvedValue(undefined);
     sendStructuredCardFeishuMock.mockResolvedValue(undefined);
@@ -269,6 +273,50 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
     expect(sendMarkdownCardFeishuMock).not.toHaveBeenCalled();
   });
 
+  it("does not attach automatic mentions to plain text replies", async () => {
+    const { options } = createDispatcherHarness({
+      replyToMessageId: "om_msg",
+    });
+    await options.deliver({ text: "plain text" }, { kind: "final" });
+
+    expect(sendMessageFeishuMock).toHaveBeenCalledTimes(1);
+    expect(sendMessageFeishuMock.mock.calls[0]?.[0]).not.toHaveProperty("mentions");
+  });
+
+  it("does not attach automatic mentions to card replies", async () => {
+    resolveFeishuAccountMock.mockReturnValue({
+      accountId: "main",
+      appId: "app_id",
+      appSecret: "app_secret",
+      domain: "feishu",
+      config: {
+        renderMode: "card",
+        streaming: false,
+      },
+    });
+
+    const { options } = createDispatcherHarness({
+      replyToMessageId: "om_msg",
+    });
+    await options.deliver({ text: "card text" }, { kind: "final" });
+
+    expect(sendStructuredCardFeishuMock).toHaveBeenCalledTimes(1);
+    expect(sendStructuredCardFeishuMock.mock.calls[0]?.[0]).not.toHaveProperty("mentions");
+  });
+
+  it("does not prepend automatic mentions to streaming card closes", async () => {
+    const { options } = createDispatcherHarness({
+      runtime: createRuntimeLogger(),
+    });
+    await options.deliver({ text: "```md\nanswer\n```" }, { kind: "final" });
+    await options.onIdle?.();
+
+    expect(streamingInstances).toHaveLength(1);
+    expect(streamingInstances[0].close).toHaveBeenCalledWith("```md\nanswer\n```", {
+      note: "Agent: agent",
+    });
+  });
+
   it("suppresses internal block payload delivery", async () => {
     const { options } = createDispatcherHarness();
     await options.deliver({ text: "internal reasoning chunk" }, { kind: "block" });
@@ -386,6 +434,126 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
     });
     expect(sendMessageFeishuMock).not.toHaveBeenCalled();
     expect(sendMarkdownCardFeishuMock).not.toHaveBeenCalled();
+    expect(sendStructuredCardFeishuMock).not.toHaveBeenCalled();
+  });
+
+  it("skips distinct late final text after streaming card close", async () => {
+    resolveFeishuAccountMock.mockReturnValue({
+      accountId: "main",
+      appId: "app_id",
+      appSecret: "app_secret",
+      domain: "feishu",
+      config: {
+        renderMode: "card",
+        streaming: true,
+      },
+    });
+
+    const { options } = createDispatcherHarness({
+      runtime: createRuntimeLogger(),
+    });
+
+    await options.deliver({ text: "First complete answer" }, { kind: "final" });
+    await options.onIdle?.();
+    await options.deliver(
+      { text: "Late tool-result final", mediaUrl: "https://example.com/a.png" },
+      { kind: "final" },
+    );
+    await options.onIdle?.();
+
+    expect(streamingInstances).toHaveLength(1);
+    expect(streamingInstances[0].close).toHaveBeenCalledTimes(1);
+    expect(streamingInstances[0].close).toHaveBeenCalledWith("First complete answer", {
+      note: "Agent: agent",
+    });
+    expect(sendMessageFeishuMock).not.toHaveBeenCalled();
+    expect(sendMarkdownCardFeishuMock).not.toHaveBeenCalled();
+    expect(sendStructuredCardFeishuMock).not.toHaveBeenCalled();
+    expect(sendMediaFeishuMock).toHaveBeenCalledTimes(1);
+    expect(sendMediaFeishuMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mediaUrl: "https://example.com/a.png",
+      }),
+    );
+  });
+
+  it("does not suppress a later final after error closeout", async () => {
+    resolveFeishuAccountMock.mockReturnValue({
+      accountId: "main",
+      appId: "app_id",
+      appSecret: "app_secret",
+      domain: "feishu",
+      config: {
+        renderMode: "card",
+        streaming: true,
+      },
+    });
+    sendMediaFeishuMock.mockRejectedValueOnce(new Error("media failed"));
+
+    const { options } = createDispatcherHarness({
+      runtime: createRuntimeLogger(),
+    });
+
+    await expect(
+      options.deliver(
+        { text: "First answer", mediaUrl: "https://example.com/a.png" },
+        { kind: "final" },
+      ),
+    ).rejects.toThrow("media failed");
+    await Promise.all([
+      options.onError?.(new Error("media failed"), { kind: "final" }),
+      options.onIdle?.(),
+    ]);
+    await options.deliver({ text: "Second answer" }, { kind: "final" });
+    await options.onIdle?.();
+
+    expect(streamingInstances).toHaveLength(2);
+    expect(streamingInstances[0].close).toHaveBeenCalledWith("First answer", {
+      note: "Agent: agent",
+    });
+    expect(streamingInstances[1].close).toHaveBeenCalledWith("Second answer", {
+      note: "Agent: agent",
+    });
+    expect(sendMessageFeishuMock).not.toHaveBeenCalled();
+    expect(sendStructuredCardFeishuMock).not.toHaveBeenCalled();
+  });
+
+  it("does not suppress a recovery final after late media failure", async () => {
+    resolveFeishuAccountMock.mockReturnValue({
+      accountId: "main",
+      appId: "app_id",
+      appSecret: "app_secret",
+      domain: "feishu",
+      config: {
+        renderMode: "card",
+        streaming: true,
+      },
+    });
+
+    const { options } = createDispatcherHarness({
+      runtime: createRuntimeLogger(),
+    });
+
+    await options.deliver({ text: "First answer" }, { kind: "final" });
+    await options.onIdle?.();
+    sendMediaFeishuMock.mockRejectedValueOnce(new Error("media failed"));
+    await expect(
+      options.deliver(
+        { text: "Late attachment", mediaUrl: "https://example.com/a.png" },
+        { kind: "final" },
+      ),
+    ).rejects.toThrow("media failed");
+    await options.onError?.(new Error("media failed"), { kind: "final" });
+    await options.deliver({ text: "Recovered answer" }, { kind: "final" });
+    await options.onIdle?.();
+
+    expect(streamingInstances).toHaveLength(2);
+    expect(streamingInstances[0].close).toHaveBeenCalledWith("First answer", {
+      note: "Agent: agent",
+    });
+    expect(streamingInstances[1].close).toHaveBeenCalledWith("Recovered answer", {
+      note: "Agent: agent",
+    });
     expect(sendStructuredCardFeishuMock).not.toHaveBeenCalled();
   });
 
@@ -735,9 +903,10 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
     );
   });
 
-  it("recovers streaming after start() throws (HTTP 400)", async () => {
+  it("backs off streaming retries after start() throws (HTTP 400)", async () => {
     const errorMock = vi.fn();
     let shouldFailStart = true;
+    const nowSpy = vi.spyOn(Date, "now").mockReturnValue(1_000);
 
     // Intercept streaming instance creation to make first start() reject
     const origPush = streamingInstances.push.bind(streamingInstances);
@@ -762,22 +931,33 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
       const options = createReplyDispatcherWithTypingMock.mock.calls[0]?.[0];
 
       // First deliver with markdown triggers startStreaming - which will fail
-      await options.deliver({ text: "```ts\nconst x = 1\n```" }, { kind: "block" });
+      await options.deliver({ text: "```ts\nconst x = 1\n```" }, { kind: "final" });
 
       // Wait for the async error to propagate
       await vi.waitFor(() => {
         expect(errorMock).toHaveBeenCalledWith(expect.stringContaining("streaming start failed"));
       });
+      expect(streamingInstances).toHaveLength(1);
+      expect(sendStructuredCardFeishuMock).toHaveBeenCalledTimes(1);
 
-      // Second deliver should create a NEW streaming session (not stuck)
+      // Immediate next markdown reply should skip a new streaming start and
+      // fall back directly to a normal card instead of paying the 400 latency.
       await options.deliver({ text: "```ts\nconst y = 2\n```" }, { kind: "final" });
 
-      // Two instances created: first failed, second succeeded and closed
+      expect(streamingInstances).toHaveLength(1);
+      expect(sendStructuredCardFeishuMock).toHaveBeenCalledTimes(2);
+
+      // After the short backoff expires, retry streaming so fixed permissions
+      // or transient Feishu failures recover without a process restart.
+      nowSpy.mockReturnValue(62_000);
+      await options.deliver({ text: "```ts\nconst z = 3\n```" }, { kind: "final" });
+
       expect(streamingInstances).toHaveLength(2);
       expect(streamingInstances[1].start).toHaveBeenCalled();
       expect(streamingInstances[1].close).toHaveBeenCalled();
     } finally {
       streamingInstances.push = origPush;
+      nowSpy.mockRestore();
     }
   });
 });

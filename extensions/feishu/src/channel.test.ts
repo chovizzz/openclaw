@@ -584,6 +584,195 @@ describe("feishuPlugin actions", () => {
     });
   });
 
+  it("auto-threads `send` text against the inbound trigger in group_topic sessions", async () => {
+    sendMessageFeishuMock.mockResolvedValueOnce({ messageId: "om_topic", chatId: "oc_group_1" });
+
+    await feishuPlugin.actions?.handleAction?.({
+      action: "send",
+      params: { to: "chat:oc_group_1", text: "topic reply" },
+      cfg,
+      accountId: undefined,
+      sessionKey: "feishu:group:oc_group_1:topic:om_inbound",
+      toolContext: { currentMessageId: "om_inbound" },
+    } as never);
+
+    expect(sendMessageFeishuMock).toHaveBeenCalledWith({
+      cfg,
+      to: "chat:oc_group_1",
+      text: "topic reply",
+      accountId: undefined,
+      replyToMessageId: "om_inbound",
+      replyInThread: true,
+    });
+  });
+
+  it("auto-threads `send` cards against the inbound trigger in group_topic sessions", async () => {
+    sendCardFeishuMock.mockResolvedValueOnce({ messageId: "om_topic_card", chatId: "oc_group_1" });
+
+    await feishuPlugin.actions?.handleAction?.({
+      action: "send",
+      params: { to: "chat:oc_group_1", card: { schema: "2.0" } },
+      cfg,
+      accountId: undefined,
+      sessionKey: "feishu:group:oc_group_1:topic:om_inbound",
+      toolContext: { currentMessageId: "om_inbound" },
+    } as never);
+
+    expect(sendCardFeishuMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        replyToMessageId: "om_inbound",
+        replyInThread: true,
+      }),
+    );
+  });
+
+  it("auto-threads `send` media against the inbound trigger in group_topic sessions", async () => {
+    feishuOutboundSendMediaMock.mockResolvedValueOnce({
+      channel: "feishu",
+      messageId: "om_topic_media",
+      details: { messageId: "om_topic_media", chatId: "oc_group_1" },
+    });
+
+    await feishuPlugin.actions?.handleAction?.({
+      action: "send",
+      params: {
+        to: "chat:oc_group_1",
+        message: "topic reply",
+        media: "/tmp/image.png",
+      },
+      cfg,
+      accountId: undefined,
+      sessionKey: "feishu:group:oc_group_1:topic:om_inbound",
+      toolContext: { currentMessageId: "om_inbound" },
+      mediaLocalRoots: ["/tmp"],
+    } as never);
+
+    expect(feishuOutboundSendMediaMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        threadId: "om_inbound",
+      }),
+    );
+    expect(feishuOutboundSendMediaMock).toHaveBeenCalledWith(
+      expect.not.objectContaining({ replyToId: expect.anything() }),
+    );
+  });
+
+  it("still auto-threads `send` when a thread binding replaced the session key", async () => {
+    // Bindings/ACP routes swap the group_topic key for an opaque bound key, but
+    // currentThreadTs (from MessageThreadId) still identifies the topic.
+    sendMessageFeishuMock.mockResolvedValueOnce({ messageId: "om_topic", chatId: "oc_group_1" });
+
+    await feishuPlugin.actions?.handleAction?.({
+      action: "send",
+      params: { to: "chat:oc_group_1", text: "bound topic reply" },
+      cfg,
+      accountId: undefined,
+      sessionKey: "agent:main:bound:opaque-key-123",
+      toolContext: { currentMessageId: "om_inbound", currentThreadTs: "om_root" },
+    } as never);
+
+    expect(sendMessageFeishuMock).toHaveBeenCalledWith(
+      expect.objectContaining({ replyToMessageId: "om_inbound", replyInThread: true }),
+    );
+  });
+
+  it("anchors a bound-session `send` to the topic root when no inbound id is available", async () => {
+    sendMessageFeishuMock.mockResolvedValueOnce({ messageId: "om_topic", chatId: "oc_group_1" });
+
+    await feishuPlugin.actions?.handleAction?.({
+      action: "send",
+      params: { to: "chat:oc_group_1", text: "followup in topic" },
+      cfg,
+      accountId: undefined,
+      sessionKey: "agent:main:bound:opaque-key-123",
+      toolContext: { currentThreadTs: "om_root" },
+    } as never);
+
+    expect(sendMessageFeishuMock).toHaveBeenCalledWith(
+      expect.objectContaining({ replyToMessageId: "om_root", replyInThread: true }),
+    );
+  });
+
+  it("does not auto-thread a plain group `send` with no topic signal", async () => {
+    sendMessageFeishuMock.mockResolvedValueOnce({ messageId: "om_plain", chatId: "oc_group_1" });
+
+    await feishuPlugin.actions?.handleAction?.({
+      action: "send",
+      params: { to: "chat:oc_group_1", text: "plain" },
+      cfg,
+      accountId: undefined,
+      sessionKey: "agent:main:bound:opaque-key-123",
+      toolContext: { currentMessageId: "om_inbound" },
+    } as never);
+
+    const call = sendMessageFeishuMock.mock.calls.at(-1)?.[0] as Record<string, unknown>;
+    expect(call.replyInThread).not.toBe(true);
+  });
+
+  it("auto-threads `send` in group_topic_sender sessions too", async () => {
+    sendMessageFeishuMock.mockResolvedValueOnce({ messageId: "om_topic", chatId: "oc_group_1" });
+
+    await feishuPlugin.actions?.handleAction?.({
+      action: "send",
+      params: { to: "chat:oc_group_1", text: "topic reply" },
+      cfg,
+      accountId: undefined,
+      sessionKey: "feishu:group:oc_group_1:topic:om_inbound:sender:ou_user",
+      toolContext: { currentMessageId: "om_inbound" },
+    } as never);
+
+    expect(sendMessageFeishuMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        replyToMessageId: "om_inbound",
+        replyInThread: true,
+      }),
+    );
+  });
+
+  it("does not auto-thread `send` in plain group sessions (no topic)", async () => {
+    sendMessageFeishuMock.mockResolvedValueOnce({ messageId: "om_plain", chatId: "oc_group_1" });
+
+    await feishuPlugin.actions?.handleAction?.({
+      action: "send",
+      params: { to: "chat:oc_group_1", text: "plain group reply" },
+      cfg,
+      accountId: undefined,
+      sessionKey: "feishu:group:oc_group_1",
+      toolContext: { currentMessageId: "om_inbound" },
+    } as never);
+
+    expect(sendMessageFeishuMock).toHaveBeenCalledWith({
+      cfg,
+      to: "chat:oc_group_1",
+      text: "plain group reply",
+      accountId: undefined,
+      replyToMessageId: undefined,
+      replyInThread: false,
+    });
+  });
+
+  it("does not auto-thread `send` in group_topic when no inbound currentMessageId is available", async () => {
+    sendMessageFeishuMock.mockResolvedValueOnce({ messageId: "om_topic", chatId: "oc_group_1" });
+
+    await feishuPlugin.actions?.handleAction?.({
+      action: "send",
+      params: { to: "chat:oc_group_1", text: "topic reply" },
+      cfg,
+      accountId: undefined,
+      sessionKey: "feishu:group:oc_group_1:topic:om_inbound",
+      toolContext: {},
+    } as never);
+
+    expect(sendMessageFeishuMock).toHaveBeenCalledWith({
+      cfg,
+      to: "chat:oc_group_1",
+      text: "topic reply",
+      accountId: undefined,
+      replyToMessageId: undefined,
+      replyInThread: false,
+    });
+  });
+
   it("creates pins", async () => {
     createPinFeishuMock.mockResolvedValueOnce({ messageId: "om_pin", chatId: "oc_group_1" });
 

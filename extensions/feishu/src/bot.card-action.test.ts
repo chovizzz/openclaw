@@ -363,6 +363,24 @@ describe("Feishu Card Action Handler", () => {
     expect(handleFeishuMessage).toHaveBeenCalledTimes(1);
   });
 
+  it("does not log raw duplicate callback tokens", async () => {
+    const log = vi.fn();
+    const callbackToken = "test-token-placeholder";
+    const event = createStructuredQuickActionEvent({
+      token: callbackToken,
+      action: "feishu.quick_actions.help",
+      command: "/help",
+    });
+
+    await handleFeishuCardAction({ cfg, event, runtime: { ...runtime, log } });
+    await handleFeishuCardAction({ cfg, event, runtime: { ...runtime, log } });
+
+    const logs = log.mock.calls.flat().join("\n");
+    expect(handleFeishuMessage).toHaveBeenCalledTimes(1);
+    expect(logs).toContain("skipping duplicate card action token");
+    expect(logs).not.toContain(callbackToken);
+  });
+
   it("releases a claimed token when dispatch fails so retries can succeed", async () => {
     const event = createStructuredQuickActionEvent({
       token: "tok11",

@@ -209,7 +209,21 @@ export function createFeishuClient(creds: FeishuClientCredentials): Lark.Client 
  * Create a Feishu WebSocket client for an account.
  * Note: WSClient is not cached since each call creates a new connection.
  */
-export async function createFeishuWSClient(account: ResolvedFeishuAccount): Promise<Lark.WSClient> {
+/** WebSocket lifecycle callbacks accepted by newer `@larksuiteoapi/node-sdk`
+ * releases. The pinned SDK's `IConstructorParams` does not declare them yet, so
+ * the shape is declared locally and forwarded verbatim; older SDKs ignore the
+ * extra keys. */
+export type FeishuWsClientCallbacks = {
+  onError?: (err: Error) => void;
+  onReady?: () => void;
+  onReconnected?: () => void;
+  onReconnecting?: () => void;
+};
+
+export async function createFeishuWSClient(
+  account: ResolvedFeishuAccount,
+  callbacks: FeishuWsClientCallbacks = {},
+): Promise<Lark.WSClient> {
   const { accountId, appId, appSecret, domain } = account;
 
   if (!appId || !appSecret) {
@@ -223,12 +237,14 @@ export async function createFeishuWSClient(account: ResolvedFeishuAccount): Prom
     appSecret,
     domain: resolveSdkDomain(domain),
     httpInstance: createTimeoutHttpInstance(defaultHttpTimeoutMs, domain),
+    ...callbacks,
     loggerLevel: feishuClientSdk.LoggerLevel.info,
     wsConfig: FEISHU_WS_CONFIG,
     ...(agent ? { agent } : {}),
-  } as ConstructorParameters<typeof feishuClientSdk.WSClient>[0] & {
-    wsConfig: typeof FEISHU_WS_CONFIG;
-  });
+  } as ConstructorParameters<typeof feishuClientSdk.WSClient>[0] &
+    FeishuWsClientCallbacks & {
+      wsConfig: typeof FEISHU_WS_CONFIG;
+    });
 }
 
 /**

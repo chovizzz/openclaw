@@ -33,6 +33,11 @@ export type FeishuMonitorBotIdentity = {
   botName?: string;
 };
 
+function normalizeOptionalAppId(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
 function isTimeoutErrorMessage(message: string | undefined): boolean {
   const lower = normalizeLowercaseStringOrEmpty(message);
   return lower.includes("timeout") || lower.includes("timed out");
@@ -55,8 +60,20 @@ export async function fetchBotIdentityForMonitor(
     timeoutMs,
     abortSignal: options.abortSignal,
   });
-  if (result.ok) {
+  // Only trust identity that belongs to this account's configured app. A cached
+  // probe result minted under different credentials must never be adopted as
+  // this account's bot identity.
+  const resultAppId = normalizeOptionalAppId(result.appId);
+  if (result.ok && resultAppId === normalizeOptionalAppId(account.appId)) {
     return { botOpenId: result.botOpenId, botName: result.botName };
+  }
+
+  if (result.ok) {
+    const log = options.runtime?.log ?? console.log;
+    log(
+      `feishu[${account.accountId}]: bot info probe returned identity for a different app; ignoring stale result`,
+    );
+    return {};
   }
 
   if (options.abortSignal?.aborted || isAbortErrorMessage(result.error)) {

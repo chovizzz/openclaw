@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { createNonExitingRuntimeEnv } from "../../../test/helpers/plugins/runtime-env.js";
 import type { ClawdbotConfig } from "../runtime-api.js";
 import { monitorFeishuProvider, stopFeishuMonitor } from "./monitor.js";
+import { fetchBotIdentityForMonitor } from "./monitor.startup.js";
 
 const probeFeishuMock = vi.hoisted(() => vi.fn());
 
@@ -58,13 +59,13 @@ describe("Feishu monitor startup preflight", () => {
     const probesReleased = new Promise<void>((resolve) => {
       releaseProbes = () => resolve();
     });
-    probeFeishuMock.mockImplementation(async (account: { accountId: string }) => {
+    probeFeishuMock.mockImplementation(async (account: { accountId: string; appId: string }) => {
       started.push(account.accountId);
       inFlight += 1;
       maxInFlight = Math.max(maxInFlight, inFlight);
       await probesReleased;
       inFlight -= 1;
-      return { ok: true, botOpenId: `bot_${account.accountId}` };
+      return { ok: true, appId: account.appId, botOpenId: `bot_${account.accountId}` };
     });
 
     const abortController = new AbortController();
@@ -93,13 +94,13 @@ describe("Feishu monitor startup preflight", () => {
       releaseBetaProbe = () => resolve();
     });
 
-    probeFeishuMock.mockImplementation(async (account: { accountId: string }) => {
+    probeFeishuMock.mockImplementation(async (account: { accountId: string; appId: string }) => {
       started.push(account.accountId);
       if (account.accountId === "alpha") {
         return { ok: false };
       }
       await betaProbeReleased;
-      return { ok: true, botOpenId: `bot_${account.accountId}` };
+      return { ok: true, appId: account.appId, botOpenId: `bot_${account.accountId}` };
     });
 
     const abortController = new AbortController();
@@ -126,12 +127,16 @@ describe("Feishu monitor startup preflight", () => {
       releaseBetaProbe = () => resolve();
     });
 
-    probeFeishuMock.mockImplementation((account: { accountId: string }) => {
+    probeFeishuMock.mockImplementation((account: { accountId: string; appId: string }) => {
       started.push(account.accountId);
       if (account.accountId === "alpha") {
         return Promise.resolve({ ok: false, error: "probe timed out after 10000ms" });
       }
-      return betaProbeReleased.then(() => ({ ok: true, botOpenId: `bot_${account.accountId}` }));
+      return betaProbeReleased.then(() => ({
+        ok: true,
+        appId: account.appId,
+        botOpenId: `bot_${account.accountId}`,
+      }));
     });
 
     const abortController = new AbortController();
@@ -187,5 +192,50 @@ describe("Feishu monitor startup preflight", () => {
     } finally {
       abortController.abort();
     }
+  });
+
+  it("adopts bot identity when the probe result matches the configured app", async () => {
+    probeFeishuMock.mockResolvedValue({
+      ok: true,
+      appId: "cli_alpha",
+      botOpenId: "bot_alpha",
+      botName: "Alpha",
+    });
+    const runtime = createNonExitingRuntimeEnv();
+
+    await expect(
+      fetchBotIdentityForMonitor(
+        {
+          accountId: "alpha",
+          appId: "cli_alpha",
+          appSecret: "secret_alpha", // pragma: allowlist secret
+        } as never,
+        { runtime },
+      ),
+    ).resolves.toEqual({ botOpenId: "bot_alpha", botName: "Alpha" });
+  });
+
+  it("rejects a probe result minted for another app", async () => {
+    probeFeishuMock.mockResolvedValue({
+      ok: true,
+      appId: "cli_old",
+      botOpenId: "bot_old",
+      botName: "Old",
+    });
+    const runtime = createNonExitingRuntimeEnv();
+
+    await expect(
+      fetchBotIdentityForMonitor(
+        {
+          accountId: "alpha",
+          appId: "cli_alpha",
+          appSecret: "secret_alpha", // pragma: allowlist secret
+        } as never,
+        { runtime },
+      ),
+    ).resolves.toEqual({});
+    expect(runtime.log).toHaveBeenCalledWith(
+      "feishu[alpha]: bot info probe returned identity for a different app; ignoring stale result",
+    );
   });
 });
