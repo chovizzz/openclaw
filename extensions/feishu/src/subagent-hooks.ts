@@ -332,6 +332,15 @@ export async function handleFeishuSubagentSpawning(
     return {
       status: "ok" as const,
       threadBindingReady: true,
+      // The generic session-spawn path only routes the initial child run when the hook
+      // returns a deliveryOrigin, so hand back the bound conversation's origin here.
+      deliveryOrigin: resolveFeishuDeliveryOrigin({
+        conversationId: binding.conversationId,
+        parentConversationId: binding.parentConversationId,
+        accountId: binding.accountId,
+        deliveryTo: binding.deliveryTo,
+        deliveryThreadId: binding.deliveryThreadId,
+      }),
     };
   } catch (err) {
     return {

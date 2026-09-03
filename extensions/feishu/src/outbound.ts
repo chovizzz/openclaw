@@ -6,7 +6,7 @@ import { resolveFeishuAccount } from "./accounts.js";
 import { createFeishuClient } from "./client.js";
 import { parseFeishuCommentTarget } from "./comment-target.js";
 import { replyComment } from "./drive.js";
-import { sendMediaFeishu } from "./media.js";
+import { sendMediaFeishu, shouldSuppressFeishuTextForVoiceMedia } from "./media.js";
 import { chunkTextForOutbound, type ChannelOutboundAdapter } from "./outbound-runtime-api.js";
 import { sendMarkdownCardFeishu, sendMessageFeishu, sendStructuredCardFeishu } from "./send.js";
 
@@ -266,8 +266,12 @@ export const feishuOutbound: ChannelOutboundAdapter = {
         });
       }
 
-      // Send text first if provided
-      if (text?.trim()) {
+      const suppressTextForVoiceMedia =
+        mediaUrl !== undefined && shouldSuppressFeishuTextForVoiceMedia({ mediaUrl });
+
+      // Send text first if provided, except for Feishu native voice bubbles, where the
+      // bubble already carries its own transcription of the same text.
+      if (text?.trim() && !suppressTextForVoiceMedia) {
         await sendOutboundText({
           cfg,
           to,
@@ -293,11 +297,18 @@ export const feishuOutbound: ChannelOutboundAdapter = {
         } catch (err) {
           // Log the error for debugging
           console.error(`[feishu] sendMediaFeishu failed:`, err);
-          // Fallback to URL link if upload fails
+          // Fallback to URL link if upload fails. Re-attach the text when it was suppressed
+          // above, otherwise the suppressed text would be lost along with the voice bubble.
+          const fallbackText = [
+            suppressTextForVoiceMedia ? text?.trim() : undefined,
+            `📎 ${mediaUrl}`,
+          ]
+            .filter(Boolean)
+            .join("\n\n");
           return await sendOutboundText({
             cfg,
             to,
-            text: `📎 ${mediaUrl}`,
+            text: fallbackText,
             accountId: accountId ?? undefined,
             replyToMessageId,
             replyInThread,

@@ -26,7 +26,10 @@ type CardState = {
   cardId: string;
   messageId: string;
   sequence: number;
+  /** Full text the session believes the card should display. */
   currentText: string;
+  /** Full text CardKit has actually acknowledged. Deltas are computed against this. */
+  sentText: string;
   hasNote: boolean;
 };
 
@@ -143,6 +146,19 @@ function shouldPushStreamingUpdate(previousText: string, nextText: string): bool
   return nextText.length - previousText.length >= STREAMING_SIGNIFICANT_DELTA_CHARS;
 }
 
+// CardKit's `/elements/content/content` PUT appends its payload to the card, it does not
+// replace it. Send only the unsent suffix; fall back to the whole text when the new text is
+// not an extension of what was already acknowledged.
+function resolveStreamingCardAppendContent(previousText: string, nextText: string): string {
+  if (!nextText || nextText === previousText) {
+    return "";
+  }
+  if (!previousText) {
+    return nextText;
+  }
+  return nextText.startsWith(previousText) ? nextText.slice(previousText.length) : nextText;
+}
+
 export function mergeStreamingText(
   previousText: string | undefined,
   nextText: string | undefined,
@@ -219,7 +235,7 @@ export class FeishuStreamingSession {
 
     const apiBase = resolveApiBase(this.creds.domain);
     const elements: Record<string, unknown>[] = [
-      { tag: "markdown", content: "⏳ Thinking...", element_id: "content" },
+      { tag: "markdown", content: "", element_id: "content" },
     ];
     if (options?.note) {
       elements.push({ tag: "hr" });
@@ -320,39 +336,95 @@ export class FeishuStreamingSession {
       messageId: sendRes.data.message_id,
       sequence: 1,
       currentText: "",
+      sentText: "",
       hasNote: !!options?.note,
     };
     this.log?.(`Started streaming: cardId=${cardId}, messageId=${sendRes.data.message_id}`);
   }
 
-  private async updateCardContent(text: string, onError?: (error: unknown) => void): Promise<void> {
+  private async updateCardContent(
+    text: string,
+    onError?: (error: unknown) => void,
+  ): Promise<boolean> {
     if (!this.state) {
-      return;
+      return false;
     }
     const apiBase = resolveApiBase(this.creds.domain);
     this.state.sequence += 1;
-    await fetchWithSsrFGuard({
-      url: `${apiBase}/cardkit/v1/cards/${this.state.cardId}/elements/content/content`,
-      init: {
-        method: "PUT",
-        headers: {
-          Authorization: `Bearer ${await getToken(this.creds)}`,
-          "Content-Type": "application/json",
+    try {
+      const { response, release } = await fetchWithSsrFGuard({
+        url: `${apiBase}/cardkit/v1/cards/${this.state.cardId}/elements/content/content`,
+        init: {
+          method: "PUT",
+          headers: {
+            Authorization: `Bearer ${await getToken(this.creds)}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            content: text,
+            sequence: this.state.sequence,
+            uuid: `s_${this.state.cardId}_${this.state.sequence}`,
+          }),
         },
-        body: JSON.stringify({
-          content: text,
-          sequence: this.state.sequence,
-          uuid: `s_${this.state.cardId}_${this.state.sequence}`,
-        }),
-      },
-      policy: { allowedHostnames: resolveAllowedHostnames(this.creds.domain) },
-      auditContext: "feishu.streaming-card.update",
-      timeoutMs: resolveRequestTimeoutMs(this.creds),
-    })
-      .then(async ({ release }) => {
-        await release();
-      })
-      .catch((error) => onError?.(error));
+        policy: { allowedHostnames: resolveAllowedHostnames(this.creds.domain) },
+        auditContext: "feishu.streaming-card.update",
+        timeoutMs: resolveRequestTimeoutMs(this.creds),
+      });
+      await release();
+      if (!response.ok) {
+        onError?.(new Error(`Update card content failed with HTTP ${response.status}`));
+        return false;
+      }
+      return true;
+    } catch (error) {
+      onError?.(error);
+      return false;
+    }
+  }
+
+  /**
+   * Rewrite the whole content element. Used when the final text is not an extension of what
+   * CardKit already displays (for example a transient status line that the final answer drops),
+   * where an append-style delta update cannot express the change.
+   */
+  private async replaceCardContent(
+    text: string,
+    onError?: (error: unknown) => void,
+  ): Promise<boolean> {
+    if (!this.state) {
+      return false;
+    }
+    const apiBase = resolveApiBase(this.creds.domain);
+    this.state.sequence += 1;
+    try {
+      const { response, release } = await fetchWithSsrFGuard({
+        url: `${apiBase}/cardkit/v1/cards/${this.state.cardId}/elements/content`,
+        init: {
+          method: "PUT",
+          headers: {
+            Authorization: `Bearer ${await getToken(this.creds)}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            element: JSON.stringify({ tag: "markdown", content: text, element_id: "content" }),
+            sequence: this.state.sequence,
+            uuid: `r_${this.state.cardId}_${this.state.sequence}`,
+          }),
+        },
+        policy: { allowedHostnames: resolveAllowedHostnames(this.creds.domain) },
+        auditContext: "feishu.streaming-card.replace",
+        timeoutMs: resolveRequestTimeoutMs(this.creds),
+      });
+      await release();
+      if (!response.ok) {
+        onError?.(new Error(`Replace card content failed with HTTP ${response.status}`));
+        return false;
+      }
+      return true;
+    } catch (error) {
+      onError?.(error);
+      return false;
+    }
   }
 
   private clearFlushTimer(): void {
@@ -407,9 +479,26 @@ export class FeishuStreamingSession {
       if (!mergedText || mergedText === this.state.currentText) {
         return;
       }
+      const appendContent = resolveStreamingCardAppendContent(this.state.sentText, mergedText);
+      if (!appendContent) {
+        return;
+      }
       this.pendingText = null;
       this.state.currentText = mergedText;
-      await this.updateCardContent(mergedText, (e) => this.log?.(`Update failed: ${String(e)}`));
+      // The append endpoint can only extend what CardKit already shows. When the merged text
+      // is not an extension of the acknowledged text, rewrite the element instead of appending
+      // it onto the stale content.
+      const sent = mergedText.startsWith(this.state.sentText)
+        ? await this.updateCardContent(appendContent, (e) =>
+            this.log?.(`Update failed: ${String(e)}`),
+          )
+        : await this.replaceCardContent(mergedText, (e) =>
+            this.log?.(`Update replace failed: ${String(e)}`),
+          );
+      // Leave sentText untouched on failure so the next delta re-sends the unsent suffix.
+      if (sent && this.state) {
+        this.state.sentText = mergedText;
+      }
     });
     await this.queue;
   }
@@ -453,13 +542,25 @@ export class FeishuStreamingSession {
     await this.queue;
 
     const pendingMerged = mergeStreamingText(this.state.currentText, this.pendingText ?? undefined);
-    const text = finalText ? mergeStreamingText(pendingMerged, finalText) : pendingMerged;
+    // The final text is authoritative: merging it with the streamed text would double-append
+    // when the final answer drops transient streamed content (e.g. a tool status line).
+    const text = finalText ?? pendingMerged;
     const apiBase = resolveApiBase(this.creds.domain);
 
-    // Only send final update if content differs from what's already displayed
-    if (text && text !== this.state.currentText) {
-      await this.updateCardContent(text);
+    // Only send a final write when it differs from what CardKit already acknowledged.
+    if (text && text !== this.state.sentText) {
+      const sent = text.startsWith(this.state.sentText)
+        ? await this.updateCardContent(
+            resolveStreamingCardAppendContent(this.state.sentText, text),
+            (e) => this.log?.(`Final update failed: ${String(e)}`),
+          )
+        : await this.replaceCardContent(text, (e) =>
+            this.log?.(`Final replace failed: ${String(e)}`),
+          );
       this.state.currentText = text;
+      if (sent) {
+        this.state.sentText = text;
+      }
     }
 
     // Update note with final model/provider info

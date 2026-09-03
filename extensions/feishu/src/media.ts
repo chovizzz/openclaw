@@ -55,6 +55,7 @@ type FeishuDownloadResponse =
   | Awaited<ReturnType<Lark.Client["im"]["messageResource"]["get"]>>;
 
 type FeishuHeaderMap = Record<string, string | string[]>;
+type FeishuMessageResourceDownloadType = "image" | "file" | "media";
 
 function asHeaderMap(value: object | undefined): FeishuHeaderMap | undefined {
   if (!value) {
@@ -123,6 +124,27 @@ function readHeaderValue(
     }
   }
   return undefined;
+}
+
+function readHttpStatusFromError(error: unknown): number | undefined {
+  if (!error || typeof error !== "object") {
+    return undefined;
+  }
+
+  const response = (error as { response?: unknown }).response;
+  if (response && typeof response === "object") {
+    const status = (response as { status?: unknown }).status;
+    if (typeof status === "number") {
+      return status;
+    }
+  }
+
+  const status = (error as { status?: unknown }).status;
+  return typeof status === "number" ? status : undefined;
+}
+
+function isHttpStatusError(error: unknown, status: number): boolean {
+  return readHttpStatusFromError(error) === status;
 }
 
 function containsEastAsianScript(value: string): boolean {
@@ -283,6 +305,25 @@ export async function downloadImageFeishu(params: {
   return { buffer, contentType: meta.contentType };
 }
 
+async function downloadMessageResourceWithType(params: {
+  client: ReturnType<typeof createFeishuClient>;
+  messageId: string;
+  fileKey: string;
+  type: FeishuMessageResourceDownloadType;
+}): Promise<DownloadMessageResourceResult> {
+  const response = await params.client.im.messageResource.get({
+    path: { message_id: params.messageId, file_key: params.fileKey },
+    params: { type: params.type },
+  });
+
+  const buffer = await readFeishuResponseBuffer({
+    response,
+    tmpDirPrefix: "openclaw-feishu-resource-",
+    errorPrefix: "Feishu message resource download failed",
+  });
+  return { buffer, ...extractFeishuDownloadMetadata(response) };
+}
+
 /**
  * Download a message resource (file/image/audio/video) from Feishu.
  * Used for downloading files, audio, and video from messages.
@@ -301,17 +342,31 @@ export async function downloadMessageResourceFeishu(params: {
   }
   const { client } = createConfiguredFeishuMediaClient({ cfg, accountId });
 
-  const response = await client.im.messageResource.get({
-    path: { message_id: messageId, file_key: normalizedFileKey },
-    params: { type },
-  });
-
-  const buffer = await readFeishuResponseBuffer({
-    response,
-    tmpDirPrefix: "openclaw-feishu-resource-",
-    errorPrefix: "Feishu message resource download failed",
-  });
-  return { buffer, ...extractFeishuDownloadMetadata(response) };
+  try {
+    return await downloadMessageResourceWithType({
+      client,
+      messageId,
+      fileKey: normalizedFileKey,
+      type,
+    });
+  } catch (err) {
+    // Feishu returns HTTP 502 for file_key values that are actually media resources
+    // (audio/video sent as files). Retry once with type "media" before giving up, and
+    // surface the original error if the fallback also fails.
+    if (type !== "file" || !isHttpStatusError(err, 502)) {
+      throw err;
+    }
+    try {
+      return await downloadMessageResourceWithType({
+        client,
+        messageId,
+        fileKey: normalizedFileKey,
+        type: "media",
+      });
+    } catch {
+      throw err;
+    }
+  }
 }
 
 export type UploadImageResult = {
@@ -546,6 +601,53 @@ export function detectFileType(
   }
 }
 
+/**
+ * Feishu renders these as native voice bubbles with its own inline transcription, so any
+ * accompanying reply text would read as a duplicate of what the bubble already shows.
+ */
+function isFeishuNativeVoiceAudio(params: { fileName: string; contentType?: string }): boolean {
+  const ext = normalizeLowercaseStringOrEmpty(path.extname(params.fileName));
+  const contentType = normalizeLowercaseStringOrEmpty(params.contentType);
+  return (
+    ext === ".opus" || ext === ".ogg" || contentType === "audio/ogg" || contentType === "audio/opus"
+  );
+}
+
+function normalizeMediaNameForExtension(raw: string): string {
+  try {
+    return new URL(raw).pathname;
+  } catch {
+    return raw.split(/[?#]/, 1)[0] ?? raw;
+  }
+}
+
+/**
+ * True when the media will be delivered as a Feishu native voice bubble, in which case the
+ * caller should suppress the separate text reply instead of posting it twice.
+ */
+export function shouldSuppressFeishuTextForVoiceMedia(params: {
+  mediaUrl?: string;
+  fileName?: string;
+  contentType?: string;
+}): boolean {
+  if (
+    params.fileName &&
+    isFeishuNativeVoiceAudio({
+      fileName: params.fileName,
+      contentType: params.contentType,
+    })
+  ) {
+    return true;
+  }
+  if (!params.mediaUrl) {
+    return false;
+  }
+  return isFeishuNativeVoiceAudio({
+    fileName: normalizeMediaNameForExtension(params.mediaUrl),
+    contentType: params.contentType,
+  });
+}
+
 function resolveFeishuOutboundMediaKind(params: { fileName: string; contentType?: string }): {
   fileType?: "opus" | "mp4" | "pdf" | "doc" | "xls" | "ppt" | "stream";
   msgType: "image" | "file" | "audio" | "media";
@@ -561,12 +663,7 @@ function resolveFeishuOutboundMediaKind(params: { fileName: string; contentType?
     return { msgType: "image" };
   }
 
-  if (
-    ext === ".opus" ||
-    ext === ".ogg" ||
-    contentType === "audio/ogg" ||
-    contentType === "audio/opus"
-  ) {
+  if (isFeishuNativeVoiceAudio({ fileName, contentType })) {
     return { fileType: "opus", msgType: "audio" };
   }
 

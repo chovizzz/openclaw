@@ -5,6 +5,9 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { ClawdbotConfig } from "../runtime-api.js";
 
 const sendMediaFeishuMock = vi.hoisted(() => vi.fn());
+const shouldSuppressFeishuTextForVoiceMediaMock = vi.hoisted(
+  () => (params: { mediaUrl?: string }) => /\.(?:ogg|opus)(?:[?#]|$)/i.test(params.mediaUrl ?? ""),
+);
 const sendMessageFeishuMock = vi.hoisted(() => vi.fn());
 const sendMarkdownCardFeishuMock = vi.hoisted(() => vi.fn());
 const sendStructuredCardFeishuMock = vi.hoisted(() => vi.fn());
@@ -12,6 +15,7 @@ const replyCommentMock = vi.hoisted(() => vi.fn());
 
 vi.mock("./media.js", () => ({
   sendMediaFeishu: sendMediaFeishuMock,
+  shouldSuppressFeishuTextForVoiceMedia: shouldSuppressFeishuTextForVoiceMediaMock,
 }));
 
 vi.mock("./send.js", () => ({
@@ -486,6 +490,83 @@ describe("feishuOutbound.sendMedia replyToId forwarding", () => {
       expect.objectContaining({
         replyToMessageId: "om_topic_root",
         replyInThread: true,
+      }),
+    );
+  });
+
+  it("suppresses duplicate text for native voice media", async () => {
+    await feishuOutbound.sendMedia?.({
+      cfg: emptyConfig,
+      to: "chat_1",
+      text: "spoken reply",
+      mediaUrl: "https://example.com/reply.ogg?download=1",
+      accountId: "main",
+    });
+
+    expect(sendMessageFeishuMock).not.toHaveBeenCalled();
+    expect(sendMediaFeishuMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mediaUrl: "https://example.com/reply.ogg?download=1",
+      }),
+    );
+  });
+
+  it("keeps captions for regular audio file attachments", async () => {
+    await feishuOutbound.sendMedia?.({
+      cfg: emptyConfig,
+      to: "chat_1",
+      text: "caption text",
+      mediaUrl: "https://example.com/song.mp3",
+      accountId: "main",
+    });
+
+    expect(sendMessageFeishuMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: "caption text",
+      }),
+    );
+    expect(sendMediaFeishuMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mediaUrl: "https://example.com/song.mp3",
+      }),
+    );
+  });
+
+  it("keeps skipped voice text in the upload failure fallback", async () => {
+    sendMediaFeishuMock.mockRejectedValueOnce(new Error("upload failed"));
+
+    await feishuOutbound.sendMedia?.({
+      cfg: emptyConfig,
+      to: "chat_1",
+      text: "spoken reply",
+      mediaUrl: "https://example.com/reply.opus",
+      accountId: "main",
+    });
+
+    expect(sendMessageFeishuMock).toHaveBeenCalledTimes(1);
+    expect(sendMessageFeishuMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: "spoken reply\n\n📎 https://example.com/reply.opus",
+      }),
+    );
+  });
+
+  it("does not repeat already-sent caption text in the upload failure fallback", async () => {
+    sendMediaFeishuMock.mockRejectedValueOnce(new Error("upload failed"));
+
+    await feishuOutbound.sendMedia?.({
+      cfg: emptyConfig,
+      to: "chat_1",
+      text: "caption text",
+      mediaUrl: "https://example.com/song.mp3",
+      accountId: "main",
+    });
+
+    // The caption already went out as its own message, so the fallback carries the link only.
+    expect(sendMessageFeishuMock).toHaveBeenCalledTimes(2);
+    expect(sendMessageFeishuMock).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        text: "📎 https://example.com/song.mp3",
       }),
     );
   });

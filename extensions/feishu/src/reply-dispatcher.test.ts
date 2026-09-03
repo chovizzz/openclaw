@@ -14,6 +14,9 @@ const sendMessageFeishuMock = vi.hoisted(() => vi.fn());
 const sendMarkdownCardFeishuMock = vi.hoisted(() => vi.fn());
 const sendStructuredCardFeishuMock = vi.hoisted(() => vi.fn());
 const sendMediaFeishuMock = vi.hoisted(() => vi.fn());
+const shouldSuppressFeishuTextForVoiceMediaMock = vi.hoisted(
+  () => (params: { mediaUrl?: string }) => /\.(?:ogg|opus)(?:[?#]|$)/i.test(params.mediaUrl ?? ""),
+);
 const createFeishuClientMock = vi.hoisted(() => vi.fn());
 const resolveConfiguredHttpTimeoutMsMock = vi.hoisted(() => vi.fn(() => 30_000));
 const resolveReceiveIdTypeMock = vi.hoisted(() => vi.fn());
@@ -59,7 +62,10 @@ vi.mock("./send.js", () => ({
   sendMarkdownCardFeishu: sendMarkdownCardFeishuMock,
   sendStructuredCardFeishu: sendStructuredCardFeishuMock,
 }));
-vi.mock("./media.js", () => ({ sendMediaFeishu: sendMediaFeishuMock }));
+vi.mock("./media.js", () => ({
+  sendMediaFeishu: sendMediaFeishuMock,
+  shouldSuppressFeishuTextForVoiceMedia: shouldSuppressFeishuTextForVoiceMediaMock,
+}));
 vi.mock("./client.js", () => ({
   createFeishuClient: createFeishuClientMock,
   resolveConfiguredHttpTimeoutMs: resolveConfiguredHttpTimeoutMsMock,
@@ -635,6 +641,116 @@ describe("createFeishuReplyDispatcher streaming behavior", () => {
     );
     expect(sendMessageFeishuMock).not.toHaveBeenCalled();
     expect(sendMarkdownCardFeishuMock).not.toHaveBeenCalled();
+  });
+
+  it("suppresses duplicate text when final replies send native voice media", async () => {
+    const { options } = createDispatcherHarness();
+    await options.deliver(
+      {
+        text: "spoken reply",
+        mediaUrl: "https://example.com/reply.opus?download=1",
+      },
+      { kind: "final" },
+    );
+
+    expect(sendMessageFeishuMock).not.toHaveBeenCalled();
+    expect(sendStructuredCardFeishuMock).not.toHaveBeenCalled();
+    expect(sendMediaFeishuMock).toHaveBeenCalledTimes(1);
+    expect(sendMediaFeishuMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mediaUrl: "https://example.com/reply.opus?download=1",
+      }),
+    );
+  });
+
+  it("preserves captions for regular audio attachments", async () => {
+    const { options } = createDispatcherHarness();
+    await options.deliver(
+      {
+        text: "caption text",
+        mediaUrl: "https://example.com/song.mp3",
+      },
+      { kind: "final" },
+    );
+
+    expect(sendMessageFeishuMock).toHaveBeenCalledTimes(1);
+    expect(sendMessageFeishuMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: "caption text",
+      }),
+    );
+    expect(sendMediaFeishuMock).toHaveBeenCalledTimes(1);
+    expect(sendMediaFeishuMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mediaUrl: "https://example.com/song.mp3",
+      }),
+    );
+  });
+
+  it("keeps skipped voice text in the media failure fallback", async () => {
+    sendMediaFeishuMock.mockRejectedValueOnce(new Error("media failed"));
+
+    const { options } = createDispatcherHarness();
+    await options.deliver(
+      {
+        text: "spoken reply",
+        mediaUrl: "https://example.com/reply.opus",
+      },
+      { kind: "final" },
+    );
+
+    expect(sendMessageFeishuMock).toHaveBeenCalledTimes(1);
+    expect(sendMessageFeishuMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: "spoken reply\n\n📎 https://example.com/reply.opus",
+      }),
+    );
+  });
+
+  it("does not reuse the voice text fallback for a sibling attachment failure", async () => {
+    // The voice bubble succeeds; a sibling image fails. The suppressed text belongs to the
+    // voice bubble, so re-attaching it to the image failure would duplicate it.
+    sendMediaFeishuMock
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("image failed"));
+
+    const { options } = createDispatcherHarness();
+    await expect(
+      options.deliver(
+        {
+          text: "spoken reply",
+          mediaUrls: ["https://example.com/reply.opus", "https://example.com/pic.png"],
+        },
+        { kind: "final" },
+      ),
+    ).rejects.toThrow("image failed");
+
+    expect(sendMediaFeishuMock).toHaveBeenCalledTimes(2);
+    expect(sendMessageFeishuMock).not.toHaveBeenCalled();
+  });
+
+  it("does not add a text fallback when a regular attachment fails", async () => {
+    sendMediaFeishuMock.mockRejectedValueOnce(new Error("media failed"));
+
+    const { options } = createDispatcherHarness();
+    await expect(
+      options.deliver(
+        {
+          text: "caption text",
+          mediaUrl: "https://example.com/song.mp3",
+        },
+        { kind: "final" },
+      ),
+    ).rejects.toThrow("media failed");
+
+    // The caption was already delivered on its own, so no fallback text is registered
+    // and the media error still surfaces to the dispatcher's onError path.
+    expect(sendMessageFeishuMock).toHaveBeenCalledTimes(1);
+    expect(sendMessageFeishuMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: "caption text",
+      }),
+    );
   });
 
   it("falls back to legacy mediaUrl when mediaUrls is an empty array", async () => {

@@ -8,7 +8,7 @@ import {
 import { stripReasoningTagsFromText } from "openclaw/plugin-sdk/text-runtime";
 import { resolveFeishuRuntimeAccount } from "./accounts.js";
 import { createFeishuClient, resolveConfiguredHttpTimeoutMs } from "./client.js";
-import { sendMediaFeishu } from "./media.js";
+import { sendMediaFeishu, shouldSuppressFeishuTextForVoiceMedia } from "./media.js";
 import {
   createReplyPrefixContext,
   type ClawdbotConfig,
@@ -55,6 +55,12 @@ function rememberStreamingStartFailure(accountId: string, now = Date.now()): num
   const backoffUntil = now + STREAMING_START_FAILURE_BACKOFF_MS;
   streamingStartBackoffUntilByAccount.set(accountId, backoffUntil);
   return backoffUntil;
+}
+
+function formatMediaFallbackText(text: string | undefined, mediaUrl: string): string {
+  const trimmedText = text?.trim() ?? "";
+  const attachmentText = `📎 ${mediaUrl}`;
+  return trimmedText ? `${trimmedText}\n\n${attachmentText}` : attachmentText;
 }
 
 export function clearFeishuStreamingStartBackoffForTests() {
@@ -451,7 +457,11 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
     }
   };
 
-  const sendMediaReplies = async (payload: ReplyPayload) => {
+  const sendMediaReplies = async (payload: ReplyPayload, options?: { fallbackText?: string }) => {
+    // When the voice bubble itself fails to send, the text we suppressed for it would be lost,
+    // so fall back to posting that text alongside the attachment link. Only the first failing
+    // attachment carries the text; later ones get the bare link.
+    let sentFallbackText = false;
     await sendMediaWithLeadingCaption({
       mediaUrls: resolveSendableOutboundReplyParts(payload).mediaUrls,
       caption: "",
@@ -465,6 +475,37 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
           accountId,
         });
       },
+      onError:
+        options?.fallbackText === undefined
+          ? undefined
+          : async ({ error, mediaUrl }) => {
+              // Only the native voice attachment had its text suppressed. A mixed payload's
+              // other attachments never swallowed the text, so re-attaching it there would
+              // duplicate it; keep their normal failure semantics instead.
+              if (!shouldSuppressFeishuTextForVoiceMedia({ mediaUrl })) {
+                throw error;
+              }
+              const fallbackText = formatMediaFallbackText(
+                sentFallbackText ? undefined : options.fallbackText,
+                mediaUrl,
+              );
+              sentFallbackText = true;
+              await sendChunkedTextReply({
+                text: fallbackText,
+                useCard: false,
+                infoKind: "final",
+                sendChunk: async ({ chunk }) => {
+                  await sendMessageFeishu({
+                    cfg,
+                    to: chatId,
+                    text: chunk,
+                    replyToMessageId: sendReplyToMessageId,
+                    replyInThread: effectiveReplyInThread,
+                    accountId,
+                  });
+                },
+              });
+            },
     });
   };
 
@@ -487,6 +528,11 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
         const text = reply.text;
         const hasText = reply.hasText;
         const hasMedia = reply.hasMedia;
+        // A Feishu native voice bubble renders its own transcription, so posting the same
+        // text as a separate reply would duplicate it.
+        const hasVoiceMedia =
+          hasMedia &&
+          reply.mediaUrls.some((mediaUrl) => shouldSuppressFeishuTextForVoiceMedia({ mediaUrl }));
         const useCard =
           hasText && (renderMode === "card" || (renderMode === "auto" && shouldUseCard(text)));
         const skipTextForDuplicateFinal =
@@ -501,7 +547,10 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
           streamingEnabled &&
           useCard;
         const shouldDeliverText =
-          hasText && !skipTextForDuplicateFinal && !skipTextForClosedStreamingFinal;
+          hasText &&
+          !hasVoiceMedia &&
+          !skipTextForDuplicateFinal &&
+          !skipTextForClosedStreamingFinal;
 
         if (!shouldDeliverText && !hasMedia) {
           return;
@@ -586,7 +635,10 @@ export function createFeishuReplyDispatcher(params: CreateFeishuReplyDispatcherP
         }
 
         if (hasMedia) {
-          await sendMediaReplies(payload);
+          await sendMediaReplies(
+            payload,
+            hasVoiceMedia && hasText ? { fallbackText: text } : undefined,
+          );
         }
       },
       onError: async (error, info) => {
