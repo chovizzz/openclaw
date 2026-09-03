@@ -49,6 +49,7 @@ let createFeishuWSClient: CreateFeishuWSClient;
 let clearClientCache: ClearClientCache;
 let setFeishuClientRuntimeForTest: SetFeishuClientRuntimeForTest;
 let FEISHU_HTTP_TIMEOUT_MS: number;
+let FEISHU_WS_CONFIG: typeof import("./client.js").FEISHU_WS_CONFIG;
 let FEISHU_HTTP_TIMEOUT_MAX_MS: number;
 let FEISHU_HTTP_TIMEOUT_ENV_VAR: string;
 
@@ -183,6 +184,7 @@ beforeAll(async () => {
     FEISHU_HTTP_TIMEOUT_MS,
     FEISHU_HTTP_TIMEOUT_MAX_MS,
     FEISHU_HTTP_TIMEOUT_ENV_VAR,
+    FEISHU_WS_CONFIG,
   } = await import("./client.js"));
 });
 
@@ -523,10 +525,7 @@ describe("createFeishuWSClient proxy handling", () => {
     await createFeishuWSClient(baseAccount);
 
     const options = firstWsClientOptions();
-    expect(options.wsConfig).toEqual({
-      PingInterval: 30,
-      PingTimeout: 3,
-    });
+    expect(options.wsConfig).toEqual(FEISHU_WS_CONFIG);
   });
 
   it("passes lifecycle callbacks while preserving heartbeat wsConfig defaults", async () => {
@@ -547,10 +546,7 @@ describe("createFeishuWSClient proxy handling", () => {
     expect(options.onReady).toBe(onReady);
     expect(options.onReconnected).toBe(onReconnected);
     expect(options.onReconnecting).toBe(onReconnecting);
-    expect(options.wsConfig).toEqual({
-      PingInterval: 30,
-      PingTimeout: 3,
-    });
+    expect(options.wsConfig).toEqual(FEISHU_WS_CONFIG);
   });
 
   it("does not set a ws proxy agent when proxy env is absent", async () => {

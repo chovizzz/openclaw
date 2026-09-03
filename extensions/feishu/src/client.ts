@@ -5,10 +5,24 @@ import type { FeishuConfig, FeishuDomain, ResolvedFeishuAccount } from "./types.
 
 const FEISHU_SDK_ORIGIN = "https://open.feishu.cn";
 
-const FEISHU_WS_CONFIG = {
-  PingInterval: 30,
-  PingTimeout: 3,
-} as const;
+/**
+ * Client-side WebSocket overrides. The SDK only exposes `pingTimeout` here:
+ * ping cadence, reconnect interval and reconnect count stay server-authoritative
+ * (pushed via `pullConnectConfig` / pong frames), so there is no client knob for
+ * them. `pingTimeout` arms a liveness watchdog right after a ping is sent and is
+ * cleared by any inbound frame, so a short window measures pong latency rather
+ * than idle time.
+ */
+//
+// 10s rather than the 3s first written in 4f252f55c44: that value never ran in
+// production (SDK 1.60 dropped wsConfig entirely), so this upgrade is the first
+// real activation across the fleet. 3s is a pong-latency threshold that a GC
+// pause, proxy hop, or event-loop stall on a loaded gateway can exceed, and the
+// failure mode is a reconnect storm — worse than the disabled watchdog it
+// replaces. 10s still catches a dead connection; tighten only with p99 data.
+export const FEISHU_WS_CONFIG: Lark.WSConfigOverrides = {
+  pingTimeout: 10,
+};
 type FeishuClientSdk = Pick<
   typeof Lark,
   | "AppType"
@@ -205,21 +219,19 @@ export function createFeishuClient(creds: FeishuClientCredentials): Lark.Client 
   return client;
 }
 
+type FeishuWsClientParams = ConstructorParameters<typeof Lark.WSClient>[0];
+
+/** WebSocket lifecycle callbacks, derived from the SDK's own constructor
+ * params so the shape cannot drift from the installed SDK. */
+export type FeishuWsClientCallbacks = Pick<
+  FeishuWsClientParams,
+  "onError" | "onReady" | "onReconnected" | "onReconnecting"
+>;
+
 /**
  * Create a Feishu WebSocket client for an account.
  * Note: WSClient is not cached since each call creates a new connection.
  */
-/** WebSocket lifecycle callbacks accepted by newer `@larksuiteoapi/node-sdk`
- * releases. The pinned SDK's `IConstructorParams` does not declare them yet, so
- * the shape is declared locally and forwarded verbatim; older SDKs ignore the
- * extra keys. */
-export type FeishuWsClientCallbacks = {
-  onError?: (err: Error) => void;
-  onReady?: () => void;
-  onReconnected?: () => void;
-  onReconnecting?: () => void;
-};
-
 export async function createFeishuWSClient(
   account: ResolvedFeishuAccount,
   callbacks: FeishuWsClientCallbacks = {},
@@ -241,10 +253,7 @@ export async function createFeishuWSClient(
     loggerLevel: feishuClientSdk.LoggerLevel.info,
     wsConfig: FEISHU_WS_CONFIG,
     ...(agent ? { agent } : {}),
-  } as ConstructorParameters<typeof feishuClientSdk.WSClient>[0] &
-    FeishuWsClientCallbacks & {
-      wsConfig: typeof FEISHU_WS_CONFIG;
-    });
+  });
 }
 
 /**
