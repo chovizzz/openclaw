@@ -7,6 +7,7 @@ import {
   executeTabsAction,
 } from "./browser-tool.actions.js";
 import { BrowserToolSchema } from "./browser-tool.schema.js";
+import { parseBrowserNavigationUrl } from "./browser/navigation-guard.js";
 import {
   type AnyAgentTool,
   type NodeListNode,
@@ -124,10 +125,13 @@ function readOptionalTargetAndTimeout(params: Record<string, unknown>) {
 }
 
 function readTargetUrlParam(params: Record<string, unknown>) {
-  return (
+  const targetUrl =
     readStringParam(params, "targetUrl") ??
-    readStringParam(params, "url", { required: true, label: "targetUrl" })
-  );
+    readStringParam(params, "url", { required: true, label: "targetUrl" });
+  // Reject URL-embedded credentials before the URL reaches any transport,
+  // including the proxy path that skips the navigation guard.
+  parseBrowserNavigationUrl(targetUrl);
+  return targetUrl;
 }
 
 const LEGACY_BROWSER_ACT_REQUEST_KEYS = [

@@ -14,6 +14,8 @@ import {
 import { normalizeFingerprint } from "../infra/tls/fingerprint.js";
 import { rawDataToString } from "../infra/ws.js";
 import { logDebug, logError } from "../logger.js";
+import { redactSensitiveText } from "../logging/redact.js";
+import { redactSensitiveUrlLikeString } from "../shared/net/redact-sensitive-url.js";
 import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
@@ -150,6 +152,21 @@ function readConnectChallengeTimeoutOverride(
     return opts.connectDelayMs;
   }
   return undefined;
+}
+
+/**
+ * Gateway errors routinely stringify the target URL, which can carry userinfo
+ * credentials (`wss://user:pass@host`) or a token query param. Scrub those, then
+ * run the shared secret-pattern redaction. Tools mode is forced here because
+ * this is a diagnostic log surface, not a `logging.redactSensitive` decision.
+ */
+function formatGatewayClientErrorForLog(err: unknown): string {
+  const redactedUrlLikeString = redactSensitiveUrlLikeString(String(err));
+  // Two passes: the first forces the built-in patterns regardless of
+  // `logging.redactSensitive` (this is a log surface, not a user preference);
+  // the second applies any user-configured `logging.redactPatterns`.
+  const forced = redactSensitiveText(redactedUrlLikeString, { mode: "tools" });
+  return redactSensitiveText(forced);
 }
 
 export function resolveGatewayClientConnectChallengeTimeoutMs(
@@ -326,7 +343,7 @@ export class GatewayClient {
       this.opts.onClose?.(code, reasonText);
     });
     ws.on("error", (err) => {
-      logDebug(`gateway client error: ${String(err)}`);
+      logDebug(`gateway client error: ${formatGatewayClientErrorForLog(err)}`);
       if (!this.connectSent) {
         this.opts.onConnectError?.(err instanceof Error ? err : new Error(String(err)));
       }
@@ -550,7 +567,7 @@ export class GatewayClient {
           this.backoffMs = Math.min(this.backoffMs, 250);
         }
         this.opts.onConnectError?.(err instanceof Error ? err : new Error(String(err)));
-        const msg = `gateway connect failed: ${String(err)}`;
+        const msg = `gateway connect failed: ${formatGatewayClientErrorForLog(err)}`;
         if (this.opts.mode === GATEWAY_CLIENT_MODES.PROBE) {
           logDebug(msg);
         } else {
@@ -779,7 +796,7 @@ export class GatewayClient {
         }
       }
     } catch (err) {
-      logDebug(`gateway client parse error: ${String(err)}`);
+      logDebug(`gateway client parse error: ${formatGatewayClientErrorForLog(err)}`);
     }
   }
 

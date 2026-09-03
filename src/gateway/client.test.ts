@@ -8,6 +8,7 @@ const clearDeviceAuthTokenMock = vi.hoisted(() => vi.fn());
 const loadDeviceAuthTokenMock = vi.hoisted(() => vi.fn());
 const storeDeviceAuthTokenMock = vi.hoisted(() => vi.fn());
 const logDebugMock = vi.hoisted(() => vi.fn());
+const logErrorMock = vi.hoisted(() => vi.fn());
 
 type WsEvent = "open" | "message" | "close" | "error";
 type WsEventHandlers = {
@@ -117,6 +118,7 @@ vi.mock("../logger.js", async () => {
   return {
     ...actual,
     logDebug: (...args: unknown[]) => logDebugMock(...args),
+    logError: (...args: unknown[]) => logErrorMock(...args),
   };
 });
 
@@ -419,6 +421,8 @@ describe("GatewayClient connect auth payload", () => {
     wsInstances.length = 0;
     loadDeviceAuthTokenMock.mockReset();
     storeDeviceAuthTokenMock.mockReset();
+    logDebugMock.mockClear();
+    logErrorMock.mockClear();
   });
 
   type ParsedConnectRequest = {
@@ -487,6 +491,7 @@ describe("GatewayClient connect auth payload", () => {
     ws: MockWebSocket,
     connectId: string | undefined,
     details: Record<string, unknown>,
+    message = "unauthorized",
   ) {
     ws.emitMessage(
       JSON.stringify({
@@ -495,7 +500,7 @@ describe("GatewayClient connect auth payload", () => {
         ok: false,
         error: {
           code: "INVALID_REQUEST",
-          message: "unauthorized",
+          message,
           details,
         },
       }),
@@ -766,5 +771,83 @@ describe("GatewayClient connect auth payload", () => {
       connectId: firstConnect.id,
       failureDetails: { code: "AUTH_TOKEN_MISMATCH", canRetryWithDeviceToken: true },
     });
+  });
+
+  it("redacts secret-bearing connect failure logs", async () => {
+    const client = new GatewayClient({
+      url: "ws://127.0.0.1:18789",
+      token: "shared-token",
+      deviceIdentity: null,
+    });
+
+    const { ws, connect } = startClientAndConnect({ client });
+    emitConnectFailure(
+      ws,
+      connect.id,
+      { code: "AUTH_UNAUTHORIZED" },
+      "Authorization: Bearer sk-testsecret1234567890abcd wss://user:pass@gateway.example/ws?token=secret-token", // pragma: allowlist secret
+    );
+
+    await vi.waitFor(() => {
+      expect(logErrorMock).toHaveBeenCalledWith(expect.stringContaining("gateway connect failed:"));
+    });
+    const logged = String(logErrorMock.mock.calls.at(-1)?.[0] ?? "");
+    // (a) no secret survives
+    expect(logged).not.toContain("sk-testsecret1234567890abcd");
+    expect(logged).not.toContain("user:pass");
+    expect(logged).not.toContain("secret-token");
+    // (b) the surrounding diagnostic text is preserved
+    expect(logged).toContain("Authorization: Bearer");
+    expect(logged).toContain("gateway.example/ws");
+    client.stop();
+  });
+
+  it("preserves trailing diagnostics after redacted connect failure URL query params", async () => {
+    const client = new GatewayClient({
+      url: "ws://127.0.0.1:18789",
+      token: "shared-token",
+      deviceIdentity: null,
+    });
+
+    const { ws, connect } = startClientAndConnect({ client });
+    emitConnectFailure(
+      ws,
+      connect.id,
+      { code: "AUTH_UNAUTHORIZED" },
+      "wss://gateway.example/ws?token=secret-token failed with 401 from remote gateway", // pragma: allowlist secret
+    );
+
+    await vi.waitFor(() => {
+      expect(logErrorMock).toHaveBeenCalledWith(expect.stringContaining("gateway connect failed:"));
+    });
+    const logged = String(logErrorMock.mock.calls.at(-1)?.[0] ?? "");
+    expect(logged).toContain("wss://gateway.example/ws?token=*** failed with 401");
+    expect(logged).toContain("from remote gateway");
+    expect(logged).not.toContain("secret-token");
+    client.stop();
+  });
+
+  it("keeps non-sensitive connect failure messages intact", async () => {
+    const client = new GatewayClient({
+      url: "ws://127.0.0.1:18789",
+      token: "shared-token",
+      deviceIdentity: null,
+    });
+
+    const { ws, connect } = startClientAndConnect({ client });
+    emitConnectFailure(
+      ws,
+      connect.id,
+      { code: "AUTH_UNAUTHORIZED" },
+      "wss://gateway.example/ws?agent=main refused the connection",
+    );
+
+    await vi.waitFor(() => {
+      expect(logErrorMock).toHaveBeenCalledWith(expect.stringContaining("gateway connect failed:"));
+    });
+    const logged = String(logErrorMock.mock.calls.at(-1)?.[0] ?? "");
+    expect(logged).toContain("wss://gateway.example/ws?agent=main refused the connection");
+    expect(logged).not.toContain("***");
+    client.stop();
   });
 });

@@ -539,6 +539,44 @@ describe("browser tool url alias support", () => {
     );
   });
 
+  it("rejects credentialed open URLs before host or node dispatch", async () => {
+    mockSingleBrowserProxyNode();
+    const tool = createBrowserTool();
+    for (const target of ["host", "node"] as const) {
+      for (const url of ["https://user:secret@example.com/path", "https://user:secret@"]) {
+        const error = await tool.execute?.("call-1", { action: "open", target, url }).then(
+          () => new Error("credentialed URL was accepted"),
+          (cause: unknown) => cause,
+        );
+        expect(error).toBeInstanceOf(Error);
+        expect(String(error)).not.toContain("secret");
+      }
+    }
+
+    expect(browserClientMocks.browserOpenTab).not.toHaveBeenCalled();
+    expect(gatewayMocks.callGatewayTool).not.toHaveBeenCalled();
+  });
+
+  it("rejects credentialed navigate URLs before host or node dispatch", async () => {
+    mockSingleBrowserProxyNode();
+    const tool = createBrowserTool();
+    for (const target of ["host", "node"] as const) {
+      for (const url of ["https://user:secret@example.com/path", "https://user:secret@"]) {
+        const error = await tool
+          .execute?.("call-1", { action: "navigate", target, url, targetId: "tab-1" })
+          .then(
+            () => new Error("credentialed URL was accepted"),
+            (cause: unknown) => cause,
+          );
+        expect(error).toBeInstanceOf(Error);
+        expect(String(error)).not.toContain("secret");
+      }
+    }
+
+    expect(browserActionsMocks.browserNavigate).not.toHaveBeenCalled();
+    expect(gatewayMocks.callGatewayTool).not.toHaveBeenCalled();
+  });
+
   it("keeps targetUrl required error label when both params are missing", async () => {
     const tool = createBrowserTool();
 

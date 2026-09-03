@@ -9,6 +9,8 @@ import {
 
 const NETWORK_NAVIGATION_PROTOCOLS = new Set(["http:", "https:"]);
 const SAFE_NON_NETWORK_URLS = new Set(["about:blank"]);
+const BROWSER_NAVIGATION_CREDENTIALS_BLOCKED_MESSAGE =
+  "Navigation blocked: URL-embedded credentials are not supported for page navigation. Set HTTP Basic auth with `openclaw browser set credentials <username> <password>` or use an authenticated browser profile.";
 
 function isAllowedNonNetworkNavigationUrl(parsed: URL): boolean {
   // Keep non-network navigation explicit; about:blank is the only allowed bootstrap URL.
@@ -20,6 +22,28 @@ export class InvalidBrowserNavigationUrlError extends Error {
     super(message);
     this.name = "InvalidBrowserNavigationUrlError";
   }
+}
+
+/** Parse a page-navigation URL and reject credentials before any transport dispatch. */
+export function parseBrowserNavigationUrl(url: string): URL {
+  const rawUrl = normalizeOptionalString(url) ?? "";
+  if (!rawUrl) {
+    throw new InvalidBrowserNavigationUrlError("url is required");
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    // A malformed URL containing "@" may still carry credentials; never echo it.
+    const diagnostic = rawUrl.includes("@") ? "[redacted credential-bearing URL]" : rawUrl;
+    throw new InvalidBrowserNavigationUrlError(`Invalid URL: ${diagnostic}`);
+  }
+
+  if (parsed.username || parsed.password) {
+    throw new InvalidBrowserNavigationUrlError(BROWSER_NAVIGATION_CREDENTIALS_BLOCKED_MESSAGE);
+  }
+  return parsed;
 }
 
 export type BrowserNavigationPolicyOptions = {
@@ -47,17 +71,7 @@ export async function assertBrowserNavigationAllowed(
     lookupFn?: LookupFn;
   } & BrowserNavigationPolicyOptions,
 ): Promise<void> {
-  const rawUrl = normalizeOptionalString(opts.url) ?? "";
-  if (!rawUrl) {
-    throw new InvalidBrowserNavigationUrlError("url is required");
-  }
-
-  let parsed: URL;
-  try {
-    parsed = new URL(rawUrl);
-  } catch {
-    throw new InvalidBrowserNavigationUrlError(`Invalid URL: ${rawUrl}`);
-  }
+  const parsed = parseBrowserNavigationUrl(opts.url);
 
   if (!NETWORK_NAVIGATION_PROTOCOLS.has(parsed.protocol)) {
     if (isAllowedNonNetworkNavigationUrl(parsed)) {

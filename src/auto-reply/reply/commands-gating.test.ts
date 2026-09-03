@@ -82,6 +82,12 @@ vi.mock("../../config/config.js", () => ({
   writeConfigFile: writeConfigFileMock,
 }));
 
+vi.mock("../../config/runtime-schema.js", () => ({
+  // Schema construction walks the plugin registry; the redaction path under
+  // test falls back to regex-based sensitivity when no hints are supplied.
+  loadGatewayRuntimeConfigSchema: vi.fn(() => ({ uiHints: undefined })),
+}));
+
 vi.mock("../../config/runtime-overrides.js", () => ({
   getConfigOverrides: getConfigOverridesMock,
   resetConfigOverrides: vi.fn(),

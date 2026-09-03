@@ -15,6 +15,7 @@ import { loadWorkspaceSkillEntries, type SkillEntry } from "../../agents/skills.
 import { listAgentWorkspaceDirs } from "../../agents/workspace-dirs.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import { loadConfig, writeConfigFile } from "../../config/config.js";
+import { redactConfigObject, REDACTED_SENTINEL } from "../../config/redact-snapshot.js";
 import { fetchClawHubSkillDetail } from "../../infra/clawhub.js";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { getRemoteSkillEligibility } from "../../infra/skills-remote.js";
@@ -312,7 +313,9 @@ export const skillsHandlers: GatewayRequestHandlers = {
     }
     if (typeof p.apiKey === "string") {
       const trimmed = normalizeSecretInput(p.apiKey);
-      if (trimmed) {
+      if (trimmed === REDACTED_SENTINEL) {
+        // Keep the stored secret when a client round-trips a redacted response value.
+      } else if (trimmed) {
         current.apiKey = trimmed;
       } else {
         delete current.apiKey;
@@ -326,6 +329,10 @@ export const skillsHandlers: GatewayRequestHandlers = {
           continue;
         }
         const trimmedVal = value.trim();
+        if (trimmedVal === REDACTED_SENTINEL) {
+          // Same round-trip guard as apiKey: never overwrite a secret with its mask.
+          continue;
+        }
         if (!trimmedVal) {
           delete nextEnv[trimmedKey];
         } else {
@@ -341,6 +348,10 @@ export const skillsHandlers: GatewayRequestHandlers = {
       skills,
     };
     await writeConfigFile(nextConfig);
-    respond(true, { ok: true, skillKey: p.skillKey, config: current }, undefined);
+    respond(
+      true,
+      { ok: true, skillKey: p.skillKey, config: redactConfigObject(current) },
+      undefined,
+    );
   },
 };

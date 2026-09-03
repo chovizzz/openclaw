@@ -1,7 +1,11 @@
 import crypto from "node:crypto";
 import path from "node:path";
 import { isRecord } from "../utils.js";
-import { appendConfigAuditRecord, appendConfigAuditRecordSync } from "./io.audit.js";
+import {
+  appendConfigAuditRecord,
+  appendConfigAuditRecordSync,
+  snapshotConfigAuditProcessInfo,
+} from "./io.audit.js";
 import { resolveStateDir } from "./paths.js";
 
 export type ObserveRecoveryDeps = {
@@ -471,11 +475,7 @@ export async function maybeRecoverSuspiciousConfigRead(params: {
     event: "config.observe",
     phase: "read",
     configPath: params.configPath,
-    pid: process.pid,
-    ppid: process.ppid,
-    cwd: process.cwd(),
-    argv: process.argv.slice(0, 8),
-    execArgv: process.execArgv.slice(0, 8),
+    ...snapshotConfigAuditProcessInfo(),
     exists: true,
     valid: true,
     hash: current.hash,
@@ -608,11 +608,7 @@ export function maybeRecoverSuspiciousConfigReadSync(params: {
     event: "config.observe",
     phase: "read",
     configPath: params.configPath,
-    pid: process.pid,
-    ppid: process.ppid,
-    cwd: process.cwd(),
-    argv: process.argv.slice(0, 8),
-    execArgv: process.execArgv.slice(0, 8),
+    ...snapshotConfigAuditProcessInfo(),
     exists: true,
     valid: true,
     hash: current.hash,
@@ -751,11 +747,7 @@ export async function observeConfigSnapshot(
     event: "config.observe",
     phase: "read",
     configPath: snapshot.path,
-    pid: process.pid,
-    ppid: process.ppid,
-    cwd: process.cwd(),
-    argv: process.argv.slice(0, 8),
-    execArgv: process.execArgv.slice(0, 8),
+    ...snapshotConfigAuditProcessInfo(),
     exists: true,
     valid: snapshot.valid,
     hash: current.hash,
@@ -876,11 +868,7 @@ export function observeConfigSnapshotSync(
     event: "config.observe",
     phase: "read",
     configPath: snapshot.path,
-    pid: process.pid,
-    ppid: process.ppid,
-    cwd: process.cwd(),
-    argv: process.argv.slice(0, 8),
-    execArgv: process.execArgv.slice(0, 8),
+    ...snapshotConfigAuditProcessInfo(),
     exists: true,
     valid: snapshot.valid,
     hash: current.hash,

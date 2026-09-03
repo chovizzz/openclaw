@@ -81,6 +81,36 @@ describe("browser navigation guard", () => {
     ).rejects.toBeInstanceOf(InvalidBrowserNavigationUrlError);
   });
 
+  it("blocks network URLs with embedded credentials before lookup", async () => {
+    const lookupFn = createLookupFn("93.184.216.34");
+    const result = assertBrowserNavigationAllowed({
+      url: "https://user:secret@example.com/private",
+      lookupFn,
+    });
+    // (a) the credential never reaches the message or the resolver
+    await expect(result).rejects.not.toThrow("secret");
+    expect(lookupFn).not.toHaveBeenCalled();
+    // (b) the actionable guidance is preserved
+    await expect(result).rejects.toThrow("URL-embedded credentials are not supported");
+    await expect(result).rejects.toThrow("openclaw browser set credentials");
+  });
+
+  it("redacts malformed credential-bearing URLs from diagnostics", async () => {
+    const result = assertBrowserNavigationAllowed({
+      url: "https://user:secret@",
+    });
+    await expect(result).rejects.toThrow("Invalid URL: [redacted credential-bearing URL]");
+    await expect(result).rejects.not.toThrow("secret");
+  });
+
+  it("still echoes credential-free malformed URLs in diagnostics", async () => {
+    await expect(
+      assertBrowserNavigationAllowed({
+        url: "not a url",
+      }),
+    ).rejects.toThrow("Invalid URL: not a url");
+  });
+
   it("allows blocked hostnames when explicitly allowed", async () => {
     const lookupFn = createLookupFn("127.0.0.1");
     await expect(

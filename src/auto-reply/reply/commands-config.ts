@@ -11,12 +11,14 @@ import {
   validateConfigObjectWithPlugins,
   writeConfigFile,
 } from "../../config/config.js";
+import { redactConfigObject, redactConfigSnapshot } from "../../config/redact-snapshot.js";
 import {
   getConfigOverrides,
   resetConfigOverrides,
   setConfigOverride,
   unsetConfigOverride,
 } from "../../config/runtime-overrides.js";
+import { loadGatewayRuntimeConfigSchema } from "../../config/runtime-schema.js";
 import { normalizeOptionalString } from "../../shared/string-coerce.js";
 import { isInternalMessageChannel } from "../../utils/message-channel.js";
 import { resolveChannelAccountId } from "./channel-context.js";
@@ -31,7 +33,42 @@ import { parseConfigCommand } from "./config-commands.js";
 import { resolveConfigWriteDeniedText } from "./config-write-authorization.js";
 import { parseDebugCommand } from "./debug-commands.js";
 
+type ConfigSchemaUiHints = ReturnType<typeof loadGatewayRuntimeConfigSchema>["uiHints"];
+
+/**
+ * Loads the runtime config schema at most once per command invocation.
+ * Schema construction walks the plugin manifest registry, so it is kept lazy:
+ * only the branches that actually render config values pay for it.
+ */
+function createSchemaLoader(): () => ConfigSchemaUiHints {
+  let cached: ConfigSchemaUiHints | undefined;
+  return () => {
+    cached ??= loadGatewayRuntimeConfigSchema().uiHints;
+    return cached;
+  };
+}
+
+/**
+ * Renders a `path=value` acknowledgement label with schema-aware redaction.
+ * The value is staged into a throwaway object at its real config path so the
+ * redactor can decide sensitivity from the path, then read back out.
+ */
+function formatConfigSetValueLabel(params: {
+  path: string[];
+  value: unknown;
+  uiHints: ConfigSchemaUiHints;
+}): string {
+  const previewRoot: Record<string, unknown> = {};
+  setConfigValueAtPath(previewRoot, params.path, params.value);
+  const redactedRoot = redactConfigObject(previewRoot, params.uiHints);
+  const redactedValue = getConfigValueAtPath(redactedRoot, params.path);
+  return typeof redactedValue === "string"
+    ? `"${redactedValue}"`
+    : (JSON.stringify(redactedValue) ?? "null");
+}
+
 export const handleConfigCommand: CommandHandler = async (params, allowTextCommands) => {
+  const loadUiHints = createSchemaLoader();
   if (!allowTextCommands) {
     return null;
   }
@@ -116,6 +153,9 @@ export const handleConfigCommand: CommandHandler = async (params, allowTextComma
   const parsedBase = structuredClone(snapshot.parsed as Record<string, unknown>);
 
   if (configCommand.action === "show") {
+    // Never render on-disk config verbatim to chat: redact via schema hints.
+    const redactedSnapshot = redactConfigSnapshot(snapshot, loadUiHints());
+    const shownBase = (redactedSnapshot.parsed ?? {}) as Record<string, unknown>;
     const pathRaw = normalizeOptionalString(configCommand.path);
     if (pathRaw) {
       const parsedPath = parseConfigPath(pathRaw);
@@ -125,7 +165,7 @@ export const handleConfigCommand: CommandHandler = async (params, allowTextComma
           reply: { text: `⚠️ ${parsedPath.error ?? "Invalid path."}` },
         };
       }
-      const value = getConfigValueAtPath(parsedBase, parsedPath.path);
+      const value = getConfigValueAtPath(shownBase, parsedPath.path);
       const rendered = JSON.stringify(value ?? null, null, 2);
       return {
         shouldContinue: false,
@@ -134,7 +174,7 @@ export const handleConfigCommand: CommandHandler = async (params, allowTextComma
         },
       };
     }
-    const json = JSON.stringify(parsedBase, null, 2);
+    const json = JSON.stringify(shownBase, null, 2);
     return {
       shouldContinue: false,
       reply: { text: `⚙️ Config (raw):\n\`\`\`json\n${json}\n\`\`\`` },
@@ -178,15 +218,19 @@ export const handleConfigCommand: CommandHandler = async (params, allowTextComma
         },
       };
     }
+    // Resolve hints before writing: a schema-build failure must not leave the
+    // config persisted while the acknowledgement throws.
+    const setUiHints = loadUiHints();
     await writeConfigFile(validated.config);
-    const valueLabel =
-      typeof configCommand.value === "string"
-        ? `"${configCommand.value}"`
-        : JSON.stringify(configCommand.value);
+    const valueLabel = formatConfigSetValueLabel({
+      path: parsedWritePath ?? [],
+      value: configCommand.value,
+      uiHints: setUiHints,
+    });
     return {
       shouldContinue: false,
       reply: {
-        text: `⚙️ Config updated: ${configCommand.path}=${valueLabel ?? "null"}`,
+        text: `⚙️ Config updated: ${configCommand.path}=${valueLabel}`,
       },
     };
   }
@@ -195,6 +239,7 @@ export const handleConfigCommand: CommandHandler = async (params, allowTextComma
 };
 
 export const handleDebugCommand: CommandHandler = async (params, allowTextCommands) => {
+  const loadUiHints = createSchemaLoader();
   if (!allowTextCommands) {
     return null;
   }
@@ -232,7 +277,8 @@ export const handleDebugCommand: CommandHandler = async (params, allowTextComman
         reply: { text: "⚙️ Debug overrides: (none)" },
       };
     }
-    const json = JSON.stringify(overrides, null, 2);
+    // Overrides can hold secret-shaped values (tokens, keys); redact before echoing.
+    const json = JSON.stringify(redactConfigObject(overrides, loadUiHints()), null, 2);
     return {
       shouldContinue: false,
       reply: {
@@ -276,14 +322,20 @@ export const handleDebugCommand: CommandHandler = async (params, allowTextComman
         reply: { text: `⚠️ ${result.error ?? "Invalid override."}` },
       };
     }
-    const valueLabel =
-      typeof debugCommand.value === "string"
+    const parsedOverridePath = parseConfigPath(debugCommand.path);
+    const valueLabel = parsedOverridePath.path
+      ? formatConfigSetValueLabel({
+          path: parsedOverridePath.path,
+          value: debugCommand.value,
+          uiHints: loadUiHints(),
+        })
+      : typeof debugCommand.value === "string"
         ? `"${debugCommand.value}"`
-        : JSON.stringify(debugCommand.value);
+        : (JSON.stringify(debugCommand.value) ?? "null");
     return {
       shouldContinue: false,
       reply: {
-        text: `⚙️ Debug override set: ${debugCommand.path}=${valueLabel ?? "null"}`,
+        text: `⚙️ Debug override set: ${debugCommand.path}=${valueLabel}`,
       },
     };
   }
