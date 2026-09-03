@@ -1,6 +1,7 @@
 import process from "node:process";
 import { CommanderError } from "commander";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { resetUncaughtExceptionHandlerForTest } from "../infra/unhandled-rejections.js";
 import { runCli } from "./run-main.js";
 
 const tryRouteCliMock = vi.hoisted(() => vi.fn());
@@ -97,6 +98,9 @@ vi.mock("../terminal/restore.js", () => ({
 describe("runCli exit behavior", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // The handler is installed once per module instance; earlier cases in this
+    // file already installed it, so detach so each case can observe its own install.
+    resetUncaughtExceptionHandlerForTest();
     hasMemoryRuntimeMock.mockReturnValue(false);
     outputPrecomputedRootHelpTextMock.mockReturnValue(false);
     getProgramContextMock.mockReturnValue(null);

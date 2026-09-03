@@ -4,8 +4,8 @@ import { fileURLToPath } from "node:url";
 import { formatUncaughtError } from "./infra/errors.js";
 import { isMainModule } from "./infra/is-main.js";
 import {
+  installUncaughtExceptionHandler,
   installUnhandledRejectionHandler,
-  isBenignUncaughtExceptionError,
 } from "./infra/unhandled-rejections.js";
 
 type LegacyCliDeps = {
@@ -92,19 +92,7 @@ if (isMain) {
   // These log the error and exit gracefully instead of crashing without trace.
   installUnhandledRejectionHandler();
 
-  process.on("uncaughtException", (error) => {
-    // A broken pipe means the consumer went away, not that this process is broken.
-    if (isBenignUncaughtExceptionError(error)) {
-      console.warn(
-        "[openclaw] Non-fatal uncaught exception (continuing):",
-        formatUncaughtError(error),
-      );
-      return;
-    }
-    console.error("[openclaw] Uncaught exception:", formatUncaughtError(error));
-    restoreTerminalState("uncaught exception", { resumeStdinIfPaused: false });
-    process.exit(1);
-  });
+  installUncaughtExceptionHandler();
 
   void runLegacyCliEntry(process.argv).catch((err) => {
     console.error("[openclaw] CLI failed:", formatUncaughtError(err));

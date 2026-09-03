@@ -67,7 +67,10 @@ const TRANSIENT_SQLITE_ERRCODES = new Set([5, 6, 10, 14]);
 // already closed) is a normal end-of-consumer condition, not a fault in this process.
 // Keep this set minimal - it only relaxes the uncaughtException path, never the
 // unhandledRejection classification below.
-const BENIGN_UNCAUGHT_EXCEPTION_CODES = new Set(["EPIPE"]);
+// EPIPE and EIO are the two shapes a dead stdout/stderr produces (consumer went
+// away vs. the tty/device backing the fd is gone). Upstream and this fork's own
+// console.ts (`isEpipeError`) already treat them as one family.
+const BENIGN_UNCAUGHT_EXCEPTION_CODES = new Set(["EPIPE", "EIO"]);
 
 const TRANSIENT_NETWORK_MESSAGE_CODE_RE =
   /\b(ECONNRESET|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|ESOCKETTIMEDOUT|ECONNABORTED|EPIPE|EHOSTUNREACH|ENETUNREACH|EAI_AGAIN|EPROTO|UND_ERR_CONNECT_TIMEOUT|UND_ERR_DNS_RESOLVE_FAILED|UND_ERR_CONNECT|UND_ERR_SOCKET|UND_ERR_HEADERS_TIMEOUT|UND_ERR_BODY_TIMEOUT)\b/i;
@@ -383,6 +386,50 @@ export function isUnhandledRejectionHandled(reason: unknown): boolean {
     }
   }
   return false;
+}
+
+// Module-level so the library entry (src/index.ts) and the CLI entry
+// (src/cli/run-main.ts), which share this ESM instance in production, install
+// exactly one handler — while a test that resets modules gets a fresh install.
+let installedUncaughtExceptionHandler: ((error: unknown) => void) | undefined;
+
+/**
+ * Install the process-level uncaughtException handler exactly once.
+ *
+ * Both the library entry (src/index.ts) and the CLI entry (src/cli/run-main.ts)
+ * need it, and both can run in the same process. Before this was shared, each
+ * registered its own copy and a benign EPIPE produced two identical warnings.
+ */
+export function installUncaughtExceptionHandler(): void {
+  const installed = installedUncaughtExceptionHandler;
+  // Idempotent by *presence*, not by a sticky flag: if a previous install was
+  // removed (tests do this), the next call registers again.
+  if (installed && process.listeners("uncaughtException").includes(installed)) {
+    return;
+  }
+  const handler = (error: unknown) => {
+    // A broken pipe means the consumer went away, not that this process is broken.
+    if (isBenignUncaughtExceptionError(error)) {
+      console.warn(
+        "[openclaw] Non-fatal uncaught exception (continuing):",
+        formatUncaughtError(error),
+      );
+      return;
+    }
+    console.error("[openclaw] Uncaught exception:", formatUncaughtError(error));
+    restoreTerminalState("uncaught exception", { resumeStdinIfPaused: false });
+    process.exit(1);
+  };
+  installedUncaughtExceptionHandler = handler;
+  process.on("uncaughtException", handler);
+}
+
+/** Test-only: detach the installed uncaughtException handler so a test can observe a fresh install. */
+export function resetUncaughtExceptionHandlerForTest(): void {
+  if (installedUncaughtExceptionHandler) {
+    process.off("uncaughtException", installedUncaughtExceptionHandler);
+    installedUncaughtExceptionHandler = undefined;
+  }
 }
 
 export function installUnhandledRejectionHandler(): void {

@@ -6,7 +6,6 @@ import { CommanderError } from "commander";
 import type { OpenClawConfig } from "../config/config.js";
 import { resolveStateDir } from "../config/paths.js";
 import { normalizeEnv } from "../infra/env.js";
-import { formatUncaughtError } from "../infra/errors.js";
 import { isMainModule } from "../infra/is-main.js";
 import { ensureOpenClawCliOnPath } from "../infra/path-env.js";
 import { assertSupportedRuntime } from "../infra/runtime-guard.js";
@@ -161,32 +160,14 @@ export async function runCli(argv: string[] = process.argv) {
 
     const [
       { buildProgram },
-      { installUnhandledRejectionHandler, isBenignUncaughtExceptionError },
-      { restoreTerminalState },
-    ] = await Promise.all([
-      import("./program.js"),
-      import("../infra/unhandled-rejections.js"),
-      import("../terminal/restore.js"),
-    ]);
+      { installUncaughtExceptionHandler, installUnhandledRejectionHandler },
+    ] = await Promise.all([import("./program.js"), import("../infra/unhandled-rejections.js")]);
     const program = buildProgram();
 
     // Global error handlers to prevent silent crashes from unhandled rejections/exceptions.
     // These log the error and exit gracefully instead of crashing without trace.
     installUnhandledRejectionHandler();
-
-    process.on("uncaughtException", (error) => {
-      // A broken pipe means the consumer went away, not that this process is broken.
-      if (isBenignUncaughtExceptionError(error)) {
-        console.warn(
-          "[openclaw] Non-fatal uncaught exception (continuing):",
-          formatUncaughtError(error),
-        );
-        return;
-      }
-      console.error("[openclaw] Uncaught exception:", formatUncaughtError(error));
-      restoreTerminalState("uncaught exception", { resumeStdinIfPaused: false });
-      process.exit(1);
-    });
+    installUncaughtExceptionHandler();
 
     const parseArgv = rewriteUpdateFlagArgv(normalizedArgv);
     const invocation = resolveCliArgvInvocation(parseArgv);

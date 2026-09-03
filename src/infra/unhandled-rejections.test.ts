@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   isAbortError,
+  installUncaughtExceptionHandler,
   isBenignUncaughtExceptionError,
   isTransientNetworkError,
   isTransientSqliteError,
@@ -271,6 +272,21 @@ describe("isTransientUnhandledRejectionError", () => {
 });
 
 describe("isBenignUncaughtExceptionError", () => {
+  it("treats EIO (dead tty/device behind stdout) as non-fatal, like console.ts does", () => {
+    expect(
+      isBenignUncaughtExceptionError(Object.assign(new Error("write EIO"), { code: "EIO" })),
+    ).toBe(true);
+    // Still identity-based: an outer non-benign code wins over a nested EIO cause.
+    expect(
+      isBenignUncaughtExceptionError(
+        Object.assign(new Error("boom"), {
+          code: "ERR_OUT_OF_MEMORY",
+          cause: Object.assign(new Error("write EIO"), { code: "EIO" }),
+        }),
+      ),
+    ).toBe(false);
+  });
+
   it("treats a broken pipe as non-fatal", () => {
     expect(
       isBenignUncaughtExceptionError(
@@ -306,7 +322,7 @@ describe("isBenignUncaughtExceptionError", () => {
 
     // Other transient-network codes are retryable for rejections but must NOT be
     // suppressed as uncaught exceptions.
-    for (const code of ["ECONNRESET", "ETIMEDOUT", "ENOTFOUND", "EIO"]) {
+    for (const code of ["ECONNRESET", "ETIMEDOUT", "ENOTFOUND", "EACCES"]) {
       expect(isBenignUncaughtExceptionError(Object.assign(new Error(code), { code }))).toBe(false);
     }
 
@@ -457,5 +473,17 @@ describe("isBenignUncaughtExceptionError", () => {
         Object.assign(new Error("other"), { code: "OTHER", errno: "EPIPE" }),
       ),
     ).toBe(false);
+  });
+});
+
+describe("installUncaughtExceptionHandler", () => {
+  it("registers the process handler only once across repeated installs", () => {
+    const before = process.listenerCount("uncaughtException");
+    installUncaughtExceptionHandler();
+    installUncaughtExceptionHandler();
+    installUncaughtExceptionHandler();
+    // Both the library entry and the CLI entry call this in the same process;
+    // a second registration used to double every benign-EPIPE warning.
+    expect(process.listenerCount("uncaughtException") - before).toBeLessThanOrEqual(1);
   });
 });
