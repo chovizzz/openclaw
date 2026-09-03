@@ -85,7 +85,7 @@ class BorrowedBuiltinMemoryIndexManager implements MemorySearchManager {
 
   async search(
     query: string,
-    opts?: { maxResults?: number; minScore?: number; sessionKey?: string },
+    opts?: { maxResults?: number; minScore?: number; sessionKey?: string; signal?: AbortSignal },
   ) {
     return await this.inner.search(query, opts);
   }
@@ -352,8 +352,12 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
       maxResults?: number;
       minScore?: number;
       sessionKey?: string;
+      /** Caller-owned cancellation; stops awaiting embedding work when the caller gave up. */
+      signal?: AbortSignal;
     },
   ): Promise<MemorySearchResult[]> {
+    // Bail before any bootstrap sync / FTS work when the caller already gave up.
+    opts?.signal?.throwIfAborted();
     let hasIndexedContent = this.hasIndexedContent();
     if (!hasIndexedContent) {
       try {
@@ -447,7 +451,7 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
         ? await this.searchKeyword(cleaned, candidates).catch(() => [])
         : [];
 
-    const queryVec = await this.embedQueryWithTimeout(cleaned);
+    const queryVec = await this.embedQueryWithTimeout(cleaned, opts?.signal);
     const hasVector = queryVec.some((v) => v !== 0);
     const vectorResults = hasVector
       ? await this.searchVector(queryVec, candidates).catch(() => [])

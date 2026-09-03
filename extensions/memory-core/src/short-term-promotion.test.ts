@@ -1262,3 +1262,45 @@ describe("short-term promotion", () => {
     ).toEqual(expect.arrayContaining(["障害対応", "ルーター", "バックアップ", "路由器", "备份"]));
   });
 });
+
+describe("dreaming fence promotion guard", () => {
+  const fixture = [
+    "# Daily notes",
+    "Durable decision: keep retention at 365 days.",
+    "<!-- openclaw:dreaming:light:start -->",
+    "Candidate: User: staged dream scratchwork.",
+    "Reflections: still unconfirmed.",
+    "<!-- openclaw:dreaming:light:end -->",
+    "Durable decision: move backups to S3 Glacier.",
+  ];
+
+  it("flags ranges fully inside a dreaming fence", () => {
+    expect(__testing.lineRangeOverlapsDreamingFence(fixture, 4, 5)).toBe(true);
+  });
+
+  it("flags ranges that only touch the start or end marker line", () => {
+    // Regression: the marker line itself is managed-block content, so a range
+    // ending on the start marker or beginning on the end marker still leaks it.
+    expect(__testing.lineRangeOverlapsDreamingFence(fixture, 2, 3)).toBe(true);
+    expect(__testing.lineRangeOverlapsDreamingFence(fixture, 6, 7)).toBe(true);
+    expect(__testing.lineRangeOverlapsDreamingFence(fixture, 3, 3)).toBe(true);
+    expect(__testing.lineRangeOverlapsDreamingFence(fixture, 6, 6)).toBe(true);
+  });
+
+  it("allows durable ranges outside every fence", () => {
+    expect(__testing.lineRangeOverlapsDreamingFence(fixture, 1, 2)).toBe(false);
+    expect(__testing.lineRangeOverlapsDreamingFence(fixture, 7, 7)).toBe(false);
+  });
+
+  it("does not treat content after a closed fence as fenced", () => {
+    const reopened = [...fixture, "<!-- openclaw:dreaming:rem:start -->", "more scratchwork"];
+    expect(__testing.lineRangeOverlapsDreamingFence(reopened, 7, 7)).toBe(false);
+    expect(__testing.lineRangeOverlapsDreamingFence(reopened, 9, 9)).toBe(true);
+  });
+
+  it("returns false for an empty file and clamps out-of-range line numbers", () => {
+    expect(__testing.lineRangeOverlapsDreamingFence([], 1, 5)).toBe(false);
+    expect(__testing.lineRangeOverlapsDreamingFence(fixture, 0, 999)).toBe(true);
+    expect(__testing.lineRangeOverlapsDreamingFence(["plain line"], 0, 999)).toBe(false);
+  });
+});

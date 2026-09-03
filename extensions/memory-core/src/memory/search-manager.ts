@@ -136,7 +136,7 @@ class BorrowedMemoryManager implements MemorySearchManager {
 
   async search(
     query: string,
-    opts?: { maxResults?: number; minScore?: number; sessionKey?: string },
+    opts?: { maxResults?: number; minScore?: number; sessionKey?: string; signal?: AbortSignal },
   ) {
     return await this.inner.search(query, opts);
   }

@@ -1198,6 +1198,48 @@ function relocateCandidateRange(
   };
 }
 
+const DREAMING_FENCE_START_RE = /<!--\s*openclaw:dreaming:[a-z][a-z0-9-]*:start\s*-->/i;
+const DREAMING_FENCE_END_RE = /<!--\s*openclaw:dreaming:[a-z][a-z0-9-]*:end\s*-->/i;
+
+/**
+ * True when any line in the 1-indexed [startLine, endLine] range sits inside a
+ * managed `openclaw:dreaming:*` fence. Fence state has to be replayed from the
+ * top of the file because the opening marker can live far above the range.
+ */
+function lineRangeOverlapsDreamingFence(
+  lines: string[],
+  startLine: number,
+  endLine: number,
+): boolean {
+  if (lines.length === 0) {
+    return false;
+  }
+  const safeStart = Math.max(1, Math.min(startLine, lines.length));
+  const safeEnd = Math.max(safeStart, Math.min(endLine, lines.length));
+  let insideFence = false;
+  for (let i = 0; i < safeEnd; i += 1) {
+    const line = lines[i] ?? "";
+    const oneIndexed = i + 1;
+    const isStart = DREAMING_FENCE_START_RE.test(line);
+    const isEnd = DREAMING_FENCE_END_RE.test(line);
+    if (isStart || isEnd) {
+      // The marker line itself is managed-block content. A relocated range that
+      // includes a `<!-- openclaw:dreaming:*:start/end -->` marker would build
+      // its snippet from raw lines containing that marker text and leak it into
+      // MEMORY.md alongside any adjacent fenced content in the same window.
+      if (oneIndexed >= safeStart && oneIndexed <= safeEnd) {
+        return true;
+      }
+      insideFence = isStart;
+      continue;
+    }
+    if (insideFence && oneIndexed >= safeStart && oneIndexed <= safeEnd) {
+      return true;
+    }
+  }
+  return false;
+}
+
 async function rehydratePromotionCandidate(
   workspaceDir: string,
   candidate: PromotionCandidate,
@@ -1217,6 +1259,13 @@ async function rehydratePromotionCandidate(
     const lines = rawSource.split(/\r?\n/);
     const relocated = relocateCandidateRange(lines, candidate);
     if (!relocated) {
+      continue;
+    }
+    // Managed dreaming blocks in daily memory files are scratchwork, not durable
+    // content. If rehydration lands inside an openclaw:dreaming fence (for example
+    // because file edits shifted lines between ranking and apply), refuse the
+    // candidate so dream artifacts cannot be promoted into MEMORY.md.
+    if (lineRangeOverlapsDreamingFence(lines, relocated.startLine, relocated.endLine)) {
       continue;
     }
     return {
@@ -1648,4 +1697,5 @@ export const __testing = {
   deriveConceptTags,
   calculateConsolidationComponent,
   calculatePhaseSignalBoost,
+  lineRangeOverlapsDreamingFence,
 };

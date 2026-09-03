@@ -30,6 +30,58 @@ import {
   searchMemoryCorpusSupplements,
 } from "./tools.shared.js";
 
+const MEMORY_SEARCH_TOOL_TIMEOUT_MS = 15_000;
+
+/**
+ * Bound memory_search with a hard deadline and cancel the work it abandons.
+ *
+ * Racing a deadline is not enough on its own: without the abort the losing task
+ * keeps running with no consumer (an embedding retry loop for minutes, or a QMD
+ * subprocess for the full command timeout) after the tool already told the agent
+ * it timed out. The signal handed to `run` is what backends use to stop that work.
+ */
+async function runMemorySearchToolWithDeadline<T>(params: {
+  timeoutMs: number;
+  run: (signal: AbortSignal) => Promise<T>;
+}): Promise<{ status: "ok"; value: T } | { status: "unavailable"; error: string }> {
+  const timeoutError = () =>
+    new Error(`memory_search timed out after ${Math.round(params.timeoutMs / 1000)}s`);
+  // A unique sentinel, so a legitimate `T` can never be mistaken for the deadline.
+  const TIMED_OUT: unique symbol = Symbol("memory_search timeout");
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<typeof TIMED_OUT>((resolve) => {
+    timer = setTimeout(() => {
+      // Resolve before aborting: abort listeners dispatch synchronously, so an
+      // abort-aware backend could reject the task first and replace the stable
+      // "timed out" result with a provider-wrapped abort error.
+      resolve(TIMED_OUT);
+      controller.abort(timeoutError());
+    }, params.timeoutMs);
+    timer.unref?.();
+  });
+  // Wrapped so a synchronous throw from `run` becomes a rejection instead of
+  // escaping past the `finally` that clears the timer.
+  const task = (async () => await params.run(controller.signal))();
+  // The losing task still rejects once aborted; swallow it so the abandoned
+  // rejection never surfaces as an unhandled rejection.
+  task.catch(() => undefined);
+
+  try {
+    const result = await Promise.race([task, timeoutPromise]);
+    if (result === TIMED_OUT) {
+      return { status: "unavailable", error: timeoutError().message };
+    }
+    return { status: "ok", value: result };
+  } catch (error) {
+    return { status: "unavailable", error: formatErrorMessage(error) };
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+}
+
 type MemorySearchToolResult =
   | (Record<string, unknown> & { corpus: "memory"; score: number; path: string })
   | MemoryCorpusSearchResult;
@@ -213,87 +265,97 @@ export function createMemorySearchTool(options: {
           | "wiki"
           | "all"
           | undefined;
-        const { resolveMemoryBackendConfig } = await loadMemoryToolRuntime();
         const shouldQueryMemory = requestedCorpus !== "wiki";
         const shouldQuerySupplements = requestedCorpus === "wiki" || requestedCorpus === "all";
-        const memory = shouldQueryMemory ? await getMemoryManagerContext({ cfg, agentId }) : null;
-        if (shouldQueryMemory && memory && "error" in memory && !shouldQuerySupplements) {
-          return jsonResult(buildMemorySearchUnavailableResult(memory.error));
-        }
-        try {
-          const citationsMode = resolveMemoryCitationsMode(cfg);
-          const includeCitations = shouldIncludeCitations({
-            mode: citationsMode,
-            sessionKey: options.agentSessionKey,
-          });
-          let rawResults: MemorySearchResult[] = [];
-          let surfacedMemoryResults: Array<
-            Record<string, unknown> & { corpus: "memory"; score: number; path: string }
-          > = [];
-          let provider: string | undefined;
-          let model: string | undefined;
-          let fallback: unknown;
-          let searchMode: string | undefined;
-          if (shouldQueryMemory && memory && !("error" in memory)) {
-            rawResults = await memory.manager.search(query, {
-              maxResults,
-              minScore,
+        const outcome = await runMemorySearchToolWithDeadline({
+          timeoutMs: MEMORY_SEARCH_TOOL_TIMEOUT_MS,
+          run: async (deadlineSignal) => {
+            // Runtime load and manager resolution sit inside the deadline on
+            // purpose: index bootstrap can block, and a search that never gets
+            // a manager must still time out instead of hanging the agent.
+            const { resolveMemoryBackendConfig } = await loadMemoryToolRuntime();
+            const memory = shouldQueryMemory
+              ? await getMemoryManagerContext({ cfg, agentId })
+              : null;
+            if (shouldQueryMemory && memory && "error" in memory && !shouldQuerySupplements) {
+              return buildMemorySearchUnavailableResult(memory.error);
+            }
+            const citationsMode = resolveMemoryCitationsMode(cfg);
+            const includeCitations = shouldIncludeCitations({
+              mode: citationsMode,
               sessionKey: options.agentSessionKey,
             });
-            const status = memory.manager.status();
-            const decorated = decorateCitations(rawResults, includeCitations);
-            const resolved = resolveMemoryBackendConfig({ cfg, agentId });
-            const memoryResults =
-              status.backend === "qmd"
-                ? clampResultsByInjectedChars(decorated, resolved.qmd?.limits.maxInjectedChars)
-                : decorated;
-            surfacedMemoryResults = memoryResults.map((result) => ({
-              ...result,
-              corpus: "memory" as const,
-            }));
-            const sleepTimezone = resolveMemoryDeepDreamingConfig({
-              pluginConfig: resolveMemoryCorePluginConfig(cfg),
-              cfg,
-            }).timezone;
-            queueShortTermRecallTracking({
-              workspaceDir: status.workspaceDir,
-              query,
-              rawResults,
-              surfacedResults: memoryResults,
-              timezone: sleepTimezone,
-            });
-            provider = status.provider;
-            model = status.model;
-            fallback = status.fallback;
-            searchMode = (status.custom as { searchMode?: string } | undefined)?.searchMode;
-          }
-          const supplementResults = shouldQuerySupplements
-            ? await searchMemoryCorpusSupplements({
-                query,
+            let rawResults: MemorySearchResult[] = [];
+            let surfacedMemoryResults: Array<
+              Record<string, unknown> & { corpus: "memory"; score: number; path: string }
+            > = [];
+            let provider: string | undefined;
+            let model: string | undefined;
+            let fallback: unknown;
+            let searchMode: string | undefined;
+            if (shouldQueryMemory && memory && !("error" in memory)) {
+              rawResults = await memory.manager.search(query, {
                 maxResults,
-                agentSessionKey: options.agentSessionKey,
-                corpus: requestedCorpus,
-              })
-            : [];
-          const effectiveMax = Math.max(1, maxResults ?? 10);
-          const results = mergeMemorySearchCorpusResults({
-            memoryResults: surfacedMemoryResults,
-            supplementResults,
-            maxResults: effectiveMax,
-            balanceCorpora: requestedCorpus === "all",
-          });
-          return jsonResult({
-            results,
-            provider,
-            model,
-            fallback,
-            citations: citationsMode,
-            mode: searchMode,
-          });
-        } catch (err) {
-          const message = formatErrorMessage(err);
-          return jsonResult(buildMemorySearchUnavailableResult(message));
+                minScore,
+                sessionKey: options.agentSessionKey,
+                signal: deadlineSignal,
+              });
+              const status = memory.manager.status();
+              const decorated = decorateCitations(rawResults, includeCitations);
+              const resolved = resolveMemoryBackendConfig({ cfg, agentId });
+              const memoryResults =
+                status.backend === "qmd"
+                  ? clampResultsByInjectedChars(decorated, resolved.qmd?.limits.maxInjectedChars)
+                  : decorated;
+              surfacedMemoryResults = memoryResults.map((result) => ({
+                ...result,
+                corpus: "memory" as const,
+              }));
+              const sleepTimezone = resolveMemoryDeepDreamingConfig({
+                pluginConfig: resolveMemoryCorePluginConfig(cfg),
+                cfg,
+              }).timezone;
+              queueShortTermRecallTracking({
+                workspaceDir: status.workspaceDir,
+                query,
+                rawResults,
+                surfacedResults: memoryResults,
+                timezone: sleepTimezone,
+              });
+              provider = status.provider;
+              model = status.model;
+              fallback = status.fallback;
+              searchMode = (status.custom as { searchMode?: string } | undefined)?.searchMode;
+            }
+            const supplementResults = shouldQuerySupplements
+              ? await searchMemoryCorpusSupplements({
+                  query,
+                  maxResults,
+                  agentSessionKey: options.agentSessionKey,
+                  corpus: requestedCorpus,
+                })
+              : [];
+            const effectiveMax = Math.max(1, maxResults ?? 10);
+            const results = mergeMemorySearchCorpusResults({
+              memoryResults: surfacedMemoryResults,
+              supplementResults,
+              maxResults: effectiveMax,
+              balanceCorpora: requestedCorpus === "all",
+            });
+            return {
+              results,
+              provider,
+              model,
+              fallback,
+              citations: citationsMode,
+              mode: searchMode,
+            };
+          },
+        });
+        if (outcome.status === "unavailable") {
+          return jsonResult(buildMemorySearchUnavailableResult(outcome.error));
         }
+        return jsonResult(outcome.value);
       },
   });
 }

@@ -38,6 +38,22 @@ import { deleteMemoryFtsRows } from "./manager-fts-state.js";
 import { MemoryManagerSyncOps } from "./manager-sync-ops.js";
 import { replaceMemoryVectorRow } from "./manager-vector-write.js";
 
+/**
+ * Normalize an aborted signal into the error used to reject the raced operation.
+ * Prefers the caller-supplied abort reason so a caller deadline message (for
+ * example "memory_search timed out after 15s") survives intact.
+ */
+function abortReasonError(signal: AbortSignal, fallbackMessage: string): Error {
+  const reason = signal.reason;
+  if (reason instanceof Error) {
+    return reason;
+  }
+  if (typeof reason === "string" && reason.length > 0) {
+    return new Error(reason);
+  }
+  return new Error(fallbackMessage);
+}
+
 const VECTOR_TABLE = "chunks_vec";
 const FTS_TABLE = "chunks_fts";
 const EMBEDDING_CACHE_TABLE = "embedding_cache";
@@ -311,36 +327,68 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
     return isLocal ? EMBEDDING_BATCH_TIMEOUT_LOCAL_MS : EMBEDDING_BATCH_TIMEOUT_REMOTE_MS;
   }
 
-  protected async embedQueryWithTimeout(text: string): Promise<number[]> {
+  protected async embedQueryWithTimeout(text: string, signal?: AbortSignal): Promise<number[]> {
     if (!this.provider) {
       throw new Error("Cannot embed query in FTS-only mode (no embedding provider)");
     }
+    // Check before calling the provider: `withTimeout` receives an already
+    // started promise, so an aborted caller would otherwise still pay for one
+    // full embedding request that nobody is waiting for.
+    signal?.throwIfAborted();
     const timeoutMs = this.resolveEmbeddingTimeout("query");
     log.debug("memory embeddings: query start", { provider: this.provider.id, timeoutMs });
     return await this.withTimeout(
       this.provider.embedQuery(text),
       timeoutMs,
       `memory embeddings query timed out after ${Math.round(timeoutMs / 1000)}s`,
+      signal,
     );
   }
 
+  /**
+   * Races `promise` against the per-operation watchdog and, when supplied, a
+   * caller-owned abort signal.
+   *
+   * The caller signal lets a caller that already gave up (for example the
+   * memory_search 15s deadline) stop awaiting immediately instead of hanging
+   * for the full embedding timeout. Note the embedding provider contract does
+   * not accept a signal, so the underlying request itself is not cancelled;
+   * what this buys is that the search rejects with the caller's abort reason,
+   * which downstream abort guards recognize as a caller abort rather than a
+   * backend health failure.
+   */
   protected async withTimeout<T>(
     promise: Promise<T>,
     timeoutMs: number,
     message: string,
+    signal?: AbortSignal,
   ): Promise<T> {
-    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    if (signal?.aborted) {
+      throw abortReasonError(signal, message);
+    }
+    const hasWatchdog = Number.isFinite(timeoutMs) && timeoutMs > 0;
+    if (!hasWatchdog && !signal) {
       return await promise;
     }
     let timer: NodeJS.Timeout | null = null;
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    let onAbort: (() => void) | null = null;
+    const racePromise = new Promise<never>((_, reject) => {
+      if (hasWatchdog) {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }
+      if (signal) {
+        onAbort = () => reject(abortReasonError(signal, message));
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
     });
     try {
-      return (await Promise.race([promise, timeoutPromise])) as T;
+      return (await Promise.race([promise, racePromise])) as T;
     } finally {
       if (timer) {
         clearTimeout(timer);
+      }
+      if (onAbort) {
+        signal?.removeEventListener("abort", onAbort);
       }
     }
   }
