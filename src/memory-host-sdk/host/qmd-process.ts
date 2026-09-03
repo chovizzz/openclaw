@@ -97,6 +97,22 @@ export async function checkQmdBinaryAvailability(params: {
   });
 }
 
+/**
+ * Normalize an aborted signal into the error used to reject a killed command.
+ * Prefers the caller-supplied abort reason (so a deadline message survives) and
+ * falls back to a stable per-command abort error.
+ */
+export function cliAbortReason(signal: AbortSignal | undefined, commandSummary: string): Error {
+  const reason = signal?.reason;
+  if (reason instanceof Error) {
+    return reason;
+  }
+  if (typeof reason === "string" && reason.length > 0) {
+    return new Error(reason);
+  }
+  return new Error(`${commandSummary} aborted`);
+}
+
 export async function runCliCommand(params: {
   commandSummary: string;
   spawnInvocation: CliSpawnInvocation;
@@ -105,8 +121,20 @@ export async function runCliCommand(params: {
   timeoutMs?: number;
   maxOutputChars: number;
   discardStdout?: boolean;
+  /**
+   * Caller-owned cancellation. When the signal aborts, the spawned child is
+   * killed immediately and the call rejects, so a caller that already stopped
+   * waiting (for example after its own deadline) does not leave an orphaned
+   * process running for the full command timeout.
+   */
+  signal?: AbortSignal;
 }): Promise<{ stdout: string; stderr: string }> {
   return await new Promise((resolve, reject) => {
+    const { signal } = params;
+    if (signal?.aborted) {
+      reject(cliAbortReason(signal, params.commandSummary));
+      return;
+    }
     const child = spawn(params.spawnInvocation.command, params.spawnInvocation.argv, {
       env: params.env,
       cwd: params.cwd,
@@ -117,13 +145,34 @@ export async function runCliCommand(params: {
     let stderr = "";
     let stdoutTruncated = false;
     let stderrTruncated = false;
+    let settled = false;
     const discardStdout = params.discardStdout === true;
+    // Single settle guard so abort/timeout/error/close cannot double-settle the
+    // promise, and so the abort listener is always detached.
+    const settle = (run: () => void): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timer) {
+        clearTimeout(timer);
+      }
+      signal?.removeEventListener("abort", onAbort);
+      run();
+    };
+    const onAbort = (): void => {
+      child.kill("SIGKILL");
+      settle(() => reject(cliAbortReason(signal, params.commandSummary)));
+    };
     const timer = params.timeoutMs
       ? setTimeout(() => {
           child.kill("SIGKILL");
-          reject(new Error(`${params.commandSummary} timed out after ${params.timeoutMs}ms`));
+          settle(() =>
+            reject(new Error(`${params.commandSummary} timed out after ${params.timeoutMs}ms`)),
+          );
         }, params.timeoutMs)
       : null;
+    signal?.addEventListener("abort", onAbort, { once: true });
     child.stdout.on("data", (data) => {
       if (discardStdout) {
         return;
@@ -138,28 +187,24 @@ export async function runCliCommand(params: {
       stderrTruncated = stderrTruncated || next.truncated;
     });
     child.on("error", (err) => {
-      if (timer) {
-        clearTimeout(timer);
-      }
-      reject(err);
+      settle(() => reject(err));
     });
     child.on("close", (code) => {
-      if (timer) {
-        clearTimeout(timer);
-      }
-      if (!discardStdout && (stdoutTruncated || stderrTruncated)) {
-        reject(
-          new Error(
-            `${params.commandSummary} produced too much output (limit ${params.maxOutputChars} chars)`,
-          ),
-        );
-        return;
-      }
-      if (code === 0) {
-        resolve({ stdout, stderr });
-      } else {
-        reject(new Error(`${params.commandSummary} failed (code ${code}): ${stderr || stdout}`));
-      }
+      settle(() => {
+        if (!discardStdout && (stdoutTruncated || stderrTruncated)) {
+          reject(
+            new Error(
+              `${params.commandSummary} produced too much output (limit ${params.maxOutputChars} chars)`,
+            ),
+          );
+          return;
+        }
+        if (code === 0) {
+          resolve({ stdout, stderr });
+        } else {
+          reject(new Error(`${params.commandSummary} failed (code ${code}): ${stderr || stdout}`));
+        }
+      });
     });
   });
 }

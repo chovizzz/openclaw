@@ -3,6 +3,7 @@ import {
   jsonResult,
   readNumberParam,
   readStringParam,
+  type MemoryCorpusSearchResult,
   type OpenClawConfig,
 } from "openclaw/plugin-sdk/memory-core-host-runtime-core";
 import type { MemorySearchResult } from "openclaw/plugin-sdk/memory-core-host-runtime-files";
@@ -28,6 +29,56 @@ import {
   MemorySearchSchema,
   searchMemoryCorpusSupplements,
 } from "./tools.shared.js";
+
+type MemorySearchToolResult =
+  | (Record<string, unknown> & { corpus: "memory"; score: number; path: string })
+  | MemoryCorpusSearchResult;
+
+function sortMemorySearchToolResults<T extends { score: number; path: string }>(results: T[]): T[] {
+  return results.toSorted((left, right) => {
+    if (left.score !== right.score) {
+      return right.score - left.score;
+    }
+    return left.path.localeCompare(right.path);
+  });
+}
+
+/**
+ * Wiki and memory scores use incomparable scales, so a raw merge-and-slice lets
+ * whichever corpus happens to emit larger numbers starve the other out. For
+ * corpus=all, take up to half the slots from each corpus first, then backfill
+ * any slots the smaller corpus could not fill.
+ */
+function mergeMemorySearchCorpusResults(params: {
+  memoryResults: MemorySearchToolResult[];
+  supplementResults: MemorySearchToolResult[];
+  maxResults: number;
+  balanceCorpora: boolean;
+}): MemorySearchToolResult[] {
+  const memoryResults = sortMemorySearchToolResults(params.memoryResults);
+  const supplementResults = sortMemorySearchToolResults(params.supplementResults);
+  if (!params.balanceCorpora || memoryResults.length === 0 || supplementResults.length === 0) {
+    return sortMemorySearchToolResults([...memoryResults, ...supplementResults]).slice(
+      0,
+      params.maxResults,
+    );
+  }
+
+  const perCorpusCap = Math.ceil(params.maxResults / 2);
+  const selectedMemory = memoryResults.slice(0, perCorpusCap);
+  const selectedSupplements = supplementResults.slice(0, perCorpusCap);
+  const selected = [...selectedMemory, ...selectedSupplements];
+  if (selected.length < params.maxResults) {
+    selected.push(
+      ...sortMemorySearchToolResults([
+        ...memoryResults.slice(selectedMemory.length),
+        ...supplementResults.slice(selectedSupplements.length),
+      ]).slice(0, params.maxResults - selected.length),
+    );
+  }
+
+  return sortMemorySearchToolResults(selected).slice(0, params.maxResults);
+}
 
 function buildRecallKey(
   result: Pick<MemorySearchResult, "source" | "path" | "startLine" | "endLine">,
@@ -224,14 +275,13 @@ export function createMemorySearchTool(options: {
                 corpus: requestedCorpus,
               })
             : [];
-          const results = [...surfacedMemoryResults, ...supplementResults]
-            .toSorted((left, right) => {
-              if (left.score !== right.score) {
-                return right.score - left.score;
-              }
-              return left.path.localeCompare(right.path);
-            })
-            .slice(0, Math.max(1, maxResults ?? 10));
+          const effectiveMax = Math.max(1, maxResults ?? 10);
+          const results = mergeMemorySearchCorpusResults({
+            memoryResults: surfacedMemoryResults,
+            supplementResults,
+            maxResults: effectiveMax,
+            balanceCorpora: requestedCorpus === "all",
+          });
           return jsonResult({
             results,
             provider,

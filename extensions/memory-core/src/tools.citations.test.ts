@@ -282,6 +282,118 @@ describe("memory tools", () => {
     expect(getMemorySearchManagerMockCalls()).toBe(0);
   });
 
+  it("includes memory results in corpus=all even when wiki scores are numerically higher", async () => {
+    // Wiki uses integer point scores (up to ~100+); memory uses cosine similarity
+    // (0-1). A raw-score sort starves memory hits whenever maxResults is no
+    // larger than the number of wiki hits.
+    setMemorySearchImpl(async () => [
+      {
+        path: "memory/note-a.md",
+        startLine: 1,
+        endLine: 2,
+        score: 0.9,
+        snippet: "Memory result A",
+        source: "memory" as const,
+      },
+    ]);
+    registerMemoryCorpusSupplement("memory-wiki", {
+      search: async () =>
+        [50, 40, 30, 20, 10].map((score, index) => ({
+          corpus: "wiki" as const,
+          path: `w${index + 1}.md`,
+          title: `W${index + 1}`,
+          kind: "entity",
+          score,
+          snippet: `wiki ${index + 1}`,
+        })),
+      get: async () => null,
+    });
+
+    const tool = createMemorySearchToolOrThrow();
+    const result = await tool.execute("call_all_starvation", {
+      query: "note",
+      corpus: "all",
+      maxResults: 5,
+    });
+    const details = result.details as { results: Array<{ corpus: string; path: string }> };
+    const corpora = details.results.map((entry) => entry.corpus);
+
+    // Memory results must survive despite lower numeric scores, and the unused
+    // memory quota is backfilled by the next-best wiki results.
+    expect(corpora).toContain("memory");
+    expect(corpora).toContain("wiki");
+    expect(details.results).toHaveLength(5);
+    expect(
+      details.results.filter((entry) => entry.corpus === "wiki").map((entry) => entry.path),
+    ).toEqual(["w1.md", "w2.md", "w3.md", "w4.md"]);
+  });
+
+  it("keeps one slot per corpus for corpus=all at maxResults=2", async () => {
+    // The tightest maxResults at which balancing can still represent both
+    // corpora: one slot each, even though every wiki score dwarfs the memory one.
+    setMemorySearchImpl(async () => [
+      {
+        path: "memory/note-a.md",
+        startLine: 1,
+        endLine: 2,
+        score: 0.9,
+        snippet: "Memory result A",
+        source: "memory" as const,
+      },
+    ]);
+    registerMemoryCorpusSupplement("memory-wiki", {
+      search: async () =>
+        [50, 40, 30].map((score, index) => ({
+          corpus: "wiki" as const,
+          path: `w${index + 1}.md`,
+          title: `W${index + 1}`,
+          kind: "entity",
+          score,
+          snippet: `wiki ${index + 1}`,
+        })),
+      get: async () => null,
+    });
+
+    const tool = createMemorySearchToolOrThrow();
+    const result = await tool.execute("call_all_max_two", {
+      query: "note",
+      corpus: "all",
+      maxResults: 2,
+    });
+    const details = result.details as { results: Array<{ corpus: string; path: string }> };
+
+    expect(details.results).toHaveLength(2);
+    expect(details.results.map((entry) => entry.corpus).toSorted()).toEqual(["memory", "wiki"]);
+    expect(details.results.find((entry) => entry.corpus === "wiki")?.path).toBe("w1.md");
+  });
+
+  it("keeps raw score ordering when only one corpus is requested", async () => {
+    // corpus=wiki must not pay the balancing cost: no memory results exist, so
+    // the wiki ordering is preserved verbatim.
+    registerMemoryCorpusSupplement("memory-wiki", {
+      search: async () =>
+        [50, 40, 30].map((score, index) => ({
+          corpus: "wiki" as const,
+          path: `w${index + 1}.md`,
+          title: `W${index + 1}`,
+          kind: "entity",
+          score,
+          snippet: `wiki ${index + 1}`,
+        })),
+      get: async () => null,
+    });
+
+    const tool = createMemorySearchToolOrThrow();
+    const result = await tool.execute("call_wiki_unbalanced", {
+      query: "note",
+      corpus: "wiki",
+      maxResults: 3,
+    });
+    const details = result.details as { results: Array<{ corpus: string; path: string }> };
+
+    expect(details.results.map((entry) => entry.path)).toEqual(["w1.md", "w2.md", "w3.md"]);
+  });
+
   it("merges memory and wiki corpus search results for corpus=all", async () => {
     registerMemoryCorpusSupplement("memory-wiki", {
       search: async () => [

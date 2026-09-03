@@ -201,12 +201,18 @@ class FallbackMemoryManager implements MemorySearchManager {
 
   async search(
     query: string,
-    opts?: { maxResults?: number; minScore?: number; sessionKey?: string },
+    opts?: { maxResults?: number; minScore?: number; sessionKey?: string; signal?: AbortSignal },
   ) {
     if (!this.primaryFailed) {
       try {
         return await this.deps.primary.search(query, opts);
       } catch (err) {
+        // A caller-driven abort is not a QMD health signal. Without this guard
+        // a search deadline would tear down a perfectly healthy QMD manager and
+        // then re-run the abandoned search against the builtin index.
+        if (opts?.signal?.aborted) {
+          throw err;
+        }
         this.primaryFailed = true;
         this.lastError = formatErrorMessage(err);
         log.warn(`qmd memory failed; switching to builtin index: ${this.lastError}`);

@@ -61,7 +61,17 @@ export type MemoryProviderStatus = {
 export interface MemorySearchManager {
   search(
     query: string,
-    opts?: { maxResults?: number; minScore?: number; sessionKey?: string },
+    opts?: {
+      maxResults?: number;
+      minScore?: number;
+      sessionKey?: string;
+      /**
+       * Caller-owned cancellation. Backends that spawn work (for example the
+       * QMD subprocess backend) must stop that work when this aborts so a
+       * caller that already gave up does not leave an orphaned process behind.
+       */
+      signal?: AbortSignal;
+    },
   ): Promise<MemorySearchResult[]>;
   readFile(params: {
     relPath: string;

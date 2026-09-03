@@ -427,6 +427,33 @@ describe("getMemorySearchManager caching", () => {
     expect(fallbackSearch).toHaveBeenCalledTimes(1);
   });
 
+  it("rethrows a caller abort instead of treating it as a qmd failure", async () => {
+    const abortAgentId = "abort-agent";
+    const cfg = createQmdCfg(abortAgentId);
+    const controller = new AbortController();
+    const abortError = new Error("memory_search timed out after 15s");
+    // Model the QMD manager rejecting because the caller's own signal aborted.
+    mockPrimary.search.mockImplementationOnce(async () => {
+      controller.abort(abortError);
+      throw abortError;
+    });
+
+    const first = await getMemorySearchManager({ cfg, agentId: abortAgentId });
+    const manager = requireManager(first);
+
+    await expect(manager.search("hello", { signal: controller.signal })).rejects.toThrow(
+      "memory_search timed out after 15s",
+    );
+    // The abandoned search must not be silently re-run against builtin...
+    expect(fallbackSearch).not.toHaveBeenCalled();
+    // ...and the healthy QMD manager must not be torn down or evicted.
+    expect(mockPrimary.close).not.toHaveBeenCalled();
+    const second = await getMemorySearchManager({ cfg, agentId: abortAgentId });
+    requireManager(second);
+    expect(second.manager).toBe(first.manager);
+    expect(createQmdManagerMock.mock.calls).toHaveLength(1);
+  });
+
   it("keeps original qmd error when fallback manager initialization fails", async () => {
     const retryAgentId = "retry-agent-no-fallback-auth";
     const { manager: firstManager } = await createFailedQmdSearchHarness({

@@ -302,6 +302,67 @@ describe("searchMemoryWiki", () => {
     });
   });
 
+  it("includes memory results and backfills wiki capacity for all-corpus search", async () => {
+    // Wiki BM25 emits integer scores while memory emits 0-1 similarity, so a raw
+    // merge-and-slice would drop every memory hit once there are >= maxResults
+    // wiki hits.
+    const { rootDir, config } = await createQueryVault({
+      initialize: true,
+      config: {
+        search: { backend: "shared", corpus: "all" },
+      },
+    });
+    for (const index of [1, 2, 3, 4, 5]) {
+      await fs.writeFile(
+        path.join(rootDir, "entities", `alpha-${index}.md`),
+        renderWikiMarkdown({
+          frontmatter: {
+            pageType: "entity",
+            id: `entity.alpha.${index}`,
+            title: `Alpha ${index}`,
+          },
+          body: `# Alpha ${index}\n\nalpha wiki ${index}\n`,
+        }),
+        "utf8",
+      );
+    }
+    const manager = createMemoryManager({
+      searchResults: [
+        {
+          path: "MEMORY.md",
+          startLine: 4,
+          endLine: 8,
+          score: 0.9,
+          snippet: "alpha durable memory",
+          source: "memory",
+          citation: "MEMORY.md#L4-L8",
+        },
+      ],
+    });
+    getActiveMemorySearchManagerMock.mockResolvedValue({ manager });
+
+    const results = await searchMemoryWiki({
+      config,
+      appConfig: createAppConfig(),
+      query: "alpha",
+      maxResults: 5,
+    });
+
+    expect(results).toHaveLength(5);
+    expect(results.some((result) => result.corpus === "memory")).toBe(true);
+    // The single memory hit takes one slot; the other four are backfilled with
+    // the top wiki hits rather than being lost to the raw score sort.
+    expect(
+      results.filter((result) => result.corpus === "wiki").map((result) => result.path),
+    ).toEqual([
+      "entities/alpha-1.md",
+      "entities/alpha-2.md",
+      "entities/alpha-3.md",
+      "entities/alpha-4.md",
+    ]);
+    expect(manager.search).toHaveBeenCalledWith("alpha", { maxResults: 5 });
+  });
+
   it("uses the active session agent for shared memory search", async () => {
     const { config } = await createQueryVault({
       initialize: true,
