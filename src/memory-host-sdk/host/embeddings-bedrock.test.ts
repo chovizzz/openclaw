@@ -59,6 +59,55 @@ describe("bedrock embedding provider", () => {
     sendMock.mockReset();
   });
 
+  // --- Caller abort signal ---
+
+  it("forwards the caller signal to the SDK as an abortSignal", async () => {
+    sendMock.mockResolvedValue(enc({ embedding: [0.1, 0.2, 0.3] }));
+    const { provider } = await createBedrockEmbeddingProvider({
+      config: {} as never,
+      provider: "bedrock",
+      model: "amazon.titan-embed-text-v2:0",
+      fallback: "none",
+    });
+    const controller = new AbortController();
+
+    await provider.embedQuery("test", { signal: controller.signal });
+
+    // Smithy's HttpHandlerOptions.abortSignal is what actually tears the request
+    // down; without it the manager would only stop awaiting.
+    expect(sendMock.mock.calls[0][1]).toEqual({ abortSignal: controller.signal });
+  });
+
+  it("omits the SDK options object entirely when no signal is supplied", async () => {
+    sendMock.mockResolvedValue(enc({ embedding: [0.1, 0.2, 0.3] }));
+    const { provider } = await createBedrockEmbeddingProvider({
+      config: {} as never,
+      provider: "bedrock",
+      model: "amazon.titan-embed-text-v2:0",
+      fallback: "none",
+    });
+
+    await provider.embedQuery("test");
+
+    expect(sendMock.mock.calls[0][1]).toBeUndefined();
+  });
+
+  it("does not reach the SDK when the caller already aborted", async () => {
+    sendMock.mockResolvedValue(enc({ embedding: [0.1] }));
+    const { provider } = await createBedrockEmbeddingProvider({
+      config: {} as never,
+      provider: "bedrock",
+      model: "amazon.titan-embed-text-v2:0",
+      fallback: "none",
+    });
+    const controller = new AbortController();
+    const reason = new Error("caller went away");
+    controller.abort(reason);
+
+    await expect(provider.embedQuery("test", { signal: controller.signal })).rejects.toBe(reason);
+    expect(sendMock).not.toHaveBeenCalled();
+  });
+
   // --- Normalization ---
 
   it("normalizes model names with prefixes", () => {

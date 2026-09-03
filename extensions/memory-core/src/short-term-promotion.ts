@@ -34,6 +34,25 @@ const SHORT_TERM_LOCK_RETRY_DELAY_MS = 40;
 const PHASE_SIGNAL_LIGHT_BOOST_MAX = 0.05;
 const PHASE_SIGNAL_REM_BOOST_MAX = 0.08;
 const PHASE_SIGNAL_HALF_LIFE_DAYS = 14;
+// Upstream anchors this on a `dreaming-narrative-*` transcript filename inside the
+// provenance bracket. This fork names narrative subagent transcripts by UUID
+// (`dreaming-narrative.ts` passes a `sessionKey`, not a run id that reaches the
+// filename), so that anchor would never fire here.
+//
+// It is matched against the snippet AFTER `consumeDreamingLeadPrefix` has removed
+// the corpus wrapper and role label, and is anchored at `^`, so it only fires when
+// the prompt IS the message body. An unanchored match would also drop a durable
+// note that merely quotes the sentence -- including one that quotes the role token
+// too, e.g. `Assistant: the docs must quote User: Write a dream diary entry ...` --
+// and this predicate is a hard drop in five places.
+const DREAMING_TRANSCRIPT_PROMPT_LINE_RE =
+  /^Write a dream diary entry from these memory fragments:?/i;
+const DREAMING_DIFF_PREFIX_RE = /@@\s*-\d+(?:,\d+)?\s+[-*+]\s+/iy;
+// A bare qmd hunk header with no bullet after it (`@@ -1,1 ` once newlines are
+// collapsed by normalizeSnippet).
+const DREAMING_DIFF_HEADER_RE = /@@\s*-\d+(?:,\d+)?\s*(?:@@)?\s*/iy;
+// The `User: ` / `Assistant: ` label `buildSessionEntry` prepends to each message.
+const TRANSCRIPT_ROLE_LABEL_RE = /(?:User|Assistant):\s*/iy;
 const inProcessShortTermLocks = new Map<string, Promise<void>>();
 const ensuredShortTermDirs = new Map<string, Promise<void>>();
 
@@ -228,6 +247,104 @@ function normalizeSnippet(raw: string): string {
   return trimmed.replace(/\s+/g, " ");
 }
 
+/**
+ * Strips the decoration a staged dreaming line can pick up on its way into a
+ * corpus file, so the `Candidate:` / `Reflections:` lead is detectable whether it
+ * arrived as `- Candidate: ...`, `[Candidate: ...`, `> Candidate: ...`, inside a
+ * `@@ -12,3 + ` diff hunk, or — the shape this fork actually writes — behind the
+ * full session-corpus wrapper
+ * `@@ -1,1 [agent/sessions/<uuid>.jsonl#L12] Assistant: Candidate: ...`.
+ *
+ * Everything this removes is decoration, never content, so the callers can anchor
+ * their tests at `^` on the result.
+ */
+function consumeDreamingLeadPrefix(snippet: string): string {
+  let index = 0;
+  while (index < snippet.length) {
+    let consumed = false;
+    for (const pattern of [
+      DREAMING_DIFF_PREFIX_RE,
+      DREAMING_DIFF_HEADER_RE,
+      TRANSCRIPT_ROLE_LABEL_RE,
+    ]) {
+      pattern.lastIndex = index;
+      // Sticky regexes match only at `lastIndex`; a zero-width match would spin
+      // the loop forever, so require forward progress.
+      if (pattern.exec(snippet) && pattern.lastIndex > index) {
+        index = pattern.lastIndex;
+        consumed = true;
+        break;
+      }
+    }
+    if (consumed) {
+      continue;
+    }
+    const char = snippet[index];
+    if (char === "[" || char === "(") {
+      // A closed wrapper is provenance, so drop it whole: that covers both this
+      // fork's `[<agentId>/sessions/<file>.jsonl#L12] ` corpus prefix and
+      // upstream's `[dreaming-narrative-rem-...] `. An unclosed `[Candidate: ...`
+      // falls back to upstream's behavior of consuming just the delimiter.
+      const close = snippet.indexOf(char === "[" ? "]" : ")", index + 1);
+      let next = close > index ? close + 1 : index + 1;
+      while (snippet[next] === " ") {
+        next += 1;
+      }
+      index = next;
+      continue;
+    }
+    if (
+      (char === "-" || char === "*" || char === "+" || char === ">") &&
+      snippet[index + 1] === " "
+    ) {
+      index += 2;
+      continue;
+    }
+    break;
+  }
+  return snippet.slice(index);
+}
+
+function hasDreamingNarrativeLead(withoutPrefix: string): boolean {
+  return /^Candidate:/i.test(withoutPrefix) || /^Reflections?:/i.test(withoutPrefix);
+}
+
+/**
+ * True when a snippet is dreaming scratchwork rather than durable memory.
+ *
+ * `lineRangeOverlapsDreamingFence` only covers files that carry managed
+ * `openclaw:dreaming:*` fences. `isShortTermMemoryPath` also accepts
+ * `memory/.dreams/session-corpus/*.txt`, which has no fences at all, so staged
+ * `Candidate:` / `Reflections:` metadata and the dreaming-narrative subagent's own
+ * transcript would otherwise be promotable into MEMORY.md. The metadata branch
+ * requires the full staged shape (narrative lead plus confidence, evidence, status
+ * and recalls) so ordinary prose that merely starts with "Candidate:" survives.
+ */
+function isContaminatedDreamingSnippet(raw: string): boolean {
+  const snippet = normalizeSnippet(raw);
+  if (!snippet) {
+    return false;
+  }
+  // Strip the corpus wrapper once; both the prompt rule and the staged-metadata
+  // lead are anchored at the start of what is left.
+  const withoutPrefix = consumeDreamingLeadPrefix(snippet);
+  if (
+    /<!--\s*openclaw-memory-promotion:/i.test(snippet) ||
+    DREAMING_TRANSCRIPT_PROMPT_LINE_RE.test(withoutPrefix)
+  ) {
+    return true;
+  }
+
+  const hasNarrativeLead = hasDreamingNarrativeLead(withoutPrefix);
+  const hasConfidence = /\bconfidence:\s*\d/i.test(snippet);
+  const hasEvidence = /\bevidence:\s*(?:memory\/\.dreams\/session-corpus\/|memory\/)/i.test(
+    snippet,
+  );
+  const hasStatus = /\bstatus:\s*staged\b/i.test(snippet);
+  const hasRecalls = /\brecalls:\s*\d+\b/i.test(snippet);
+  return hasNarrativeLead && hasConfidence && hasEvidence && hasStatus && hasRecalls;
+}
+
 function normalizeMemoryPath(rawPath: string): string {
   return rawPath.replaceAll("\\", "/").replace(/^\.\//, "");
 }
@@ -379,6 +496,9 @@ function normalizeStore(raw: unknown, nowIso: string): ShortTermRecallStore {
         typeof entry.lastRecalledAt === "string" ? entry.lastRecalledAt : nowIso;
       const promotedAt = typeof entry.promotedAt === "string" ? entry.promotedAt : undefined;
       const snippet = typeof entry.snippet === "string" ? normalizeSnippet(entry.snippet) : "";
+      if (snippet && isContaminatedDreamingSnippet(snippet)) {
+        continue;
+      }
       const queryHashes = Array.isArray(entry.queryHashes)
         ? normalizeDistinctStrings(entry.queryHashes, MAX_QUERY_HASHES)
         : [];
@@ -816,6 +936,9 @@ export async function recordShortTermRecalls(params: {
       const normalizedPath = normalizeMemoryPath(result.path);
       const existing = store.entries[key];
       const snippet = normalizeSnippet(result.snippet);
+      if (!snippet || isContaminatedDreamingSnippet(snippet)) {
+        continue;
+      }
       const score = clampScore(result.score);
       const recallDaysBase = existing?.recallDays ?? [];
       const queryHashesBase = existing?.queryHashes ?? [];
@@ -963,6 +1086,9 @@ export async function rankShortTermPromotionCandidates(
 
   for (const entry of Object.values(store.entries)) {
     if (!entry || entry.source !== "memory" || !isShortTermMemoryPath(entry.path)) {
+      continue;
+    }
+    if (isContaminatedDreamingSnippet(entry.snippet)) {
       continue;
     }
     if (!includePromoted && entry.promotedAt) {
@@ -1343,6 +1469,9 @@ export async function applyShortTermPromotions(
     const store = await readStore(workspaceDir, nowIso);
     const selected = options.candidates
       .filter((candidate) => {
+        if (isContaminatedDreamingSnippet(candidate.snippet)) {
+          return false;
+        }
         if (candidate.promotedAt) {
           return false;
         }
@@ -1372,7 +1501,7 @@ export async function applyShortTermPromotions(
     const rehydratedSelected: PromotionCandidate[] = [];
     for (const candidate of selected) {
       const rehydrated = await rehydratePromotionCandidate(workspaceDir, candidate);
-      if (rehydrated) {
+      if (rehydrated && !isContaminatedDreamingSnippet(rehydrated.snippet)) {
         rehydratedSelected.push(rehydrated);
       }
     }
@@ -1698,4 +1827,5 @@ export const __testing = {
   calculateConsolidationComponent,
   calculatePhaseSignalBoost,
   lineRangeOverlapsDreamingFence,
+  isContaminatedDreamingSnippet,
 };

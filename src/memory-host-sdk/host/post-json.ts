@@ -8,12 +8,15 @@ export async function postJson<T>(params: {
   fetchImpl?: typeof fetch;
   body: unknown;
   errorPrefix: string;
+  /** Caller-owned abort signal; cancels the in-flight request. */
+  signal?: AbortSignal;
   attachStatus?: boolean;
   parse: (payload: unknown) => T | Promise<T>;
 }): Promise<T> {
   return await withRemoteHttpResponse({
     url: params.url,
     ssrfPolicy: params.ssrfPolicy,
+    signal: params.signal,
     fetchImpl: params.fetchImpl,
     init: {
       method: "POST",

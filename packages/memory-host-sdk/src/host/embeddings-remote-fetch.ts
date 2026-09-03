@@ -7,6 +7,8 @@ export async function fetchRemoteEmbeddingVectors(params: {
   ssrfPolicy?: SsrFPolicy;
   body: unknown;
   errorPrefix: string;
+  /** Caller-owned abort signal; cancels the in-flight request. */
+  signal?: AbortSignal;
 }): Promise<number[][]> {
   return await postJson({
     url: params.url,
@@ -14,6 +16,7 @@ export async function fetchRemoteEmbeddingVectors(params: {
     ssrfPolicy: params.ssrfPolicy,
     body: params.body,
     errorPrefix: params.errorPrefix,
+    signal: params.signal,
     parse: (payload) => {
       const typedPayload = payload as {
         data?: Array<{ embedding?: number[] }>;

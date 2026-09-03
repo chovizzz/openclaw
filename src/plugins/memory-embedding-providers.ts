@@ -27,7 +27,9 @@ export type MemoryEmbeddingProvider = {
   id: string;
   model: string;
   maxInputTokens?: number;
-  embedQuery: (text: string) => Promise<number[]>;
+  // `opts.signal` lets memory_search's deadline cancel in-flight embedding
+  // work. Optional so arity-1 providers stay assignable.
+  embedQuery: (text: string, opts?: { signal?: AbortSignal }) => Promise<number[]>;
   embedBatch: (texts: string[]) => Promise<number[][]>;
   embedBatchInputs?: (inputs: EmbeddingInput[]) => Promise<number[][]>;
 };

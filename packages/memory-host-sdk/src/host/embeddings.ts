@@ -36,7 +36,23 @@ export type EmbeddingProvider = {
   id: string;
   model: string;
   maxInputTokens?: number;
-  embedQuery: (text: string) => Promise<number[]>;
+  /**
+   * `opts.signal` is a BEST-EFFORT caller cancellation hint, not a guarantee.
+   *
+   * The built-in providers that adopted it forward it to the transport, so the
+   * in-flight request is torn down: openai, mistral, voyage and gemini reach
+   * undici's fetch and reject with the caller's own abort reason, while bedrock
+   * hands Smithy an `abortSignal`, which cancels but may surface a generic abort
+   * error rather than that reason. The local llama backend has no
+   * cancellation primitive and only refuses to start. Providers that have not
+   * adopted the parameter at all — notably the Ollama plugin, and any
+   * third-party provider written against the original one-argument contract —
+   * ignore it entirely and run to completion; only the caller's own race ends
+   * the wait there.
+   *
+   * Omitting `opts` is equivalent to the previous single-argument contract.
+   */
+  embedQuery: (text: string, opts?: { signal?: AbortSignal }) => Promise<number[]>;
   embedBatch: (texts: string[]) => Promise<number[][]>;
   embedBatchInputs?: (inputs: EmbeddingInput[]) => Promise<number[][]>;
 };
@@ -162,8 +178,13 @@ export async function createLocalEmbeddingProvider(
   return {
     id: "local",
     model: modelPath,
-    embedQuery: async (text) => {
+    // node-llama-cpp exposes no cancellation primitive for `getEmbeddingFor`, so
+    // the signal can only stop the call from starting (including after a slow
+    // cold model load). An already-running embed still runs to completion.
+    embedQuery: async (text, opts) => {
+      opts?.signal?.throwIfAborted();
       const ctx = await ensureContext();
+      opts?.signal?.throwIfAborted();
       const embedding = await ctx.getEmbeddingFor(text);
       return sanitizeAndNormalizeEmbedding(Array.from(embedding.vector));
     },

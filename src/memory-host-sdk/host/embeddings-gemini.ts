@@ -169,6 +169,8 @@ async function fetchGeminiEmbeddingPayload(params: {
   client: GeminiEmbeddingClient;
   endpoint: string;
   body: unknown;
+  /** Caller-owned abort signal; cancels the in-flight request. */
+  signal?: AbortSignal;
 }): Promise<{
   embedding?: { values?: number[] };
   embeddings?: Array<{ values?: number[] }>;
@@ -185,6 +187,7 @@ async function fetchGeminiEmbeddingPayload(params: {
       return await withRemoteHttpResponse({
         url: params.endpoint,
         ssrfPolicy: params.client.ssrfPolicy,
+        signal: params.signal,
         init: {
           method: "POST",
           headers,
@@ -228,7 +231,7 @@ export async function createGeminiEmbeddingProvider(
   const isV2 = isGeminiEmbedding2Model(client.model);
   const outputDimensionality = client.outputDimensionality;
 
-  const embedQuery = async (text: string): Promise<number[]> => {
+  const embedQuery = async (text: string, opts?: { signal?: AbortSignal }): Promise<number[]> => {
     if (!text.trim()) {
       return [];
     }
@@ -240,6 +243,7 @@ export async function createGeminiEmbeddingProvider(
         taskType: options.taskType ?? "RETRIEVAL_QUERY",
         outputDimensionality: isV2 ? outputDimensionality : undefined,
       }),
+      signal: opts?.signal,
     });
     return sanitizeAndNormalizeEmbedding(payload.embedding?.values ?? []);
   };

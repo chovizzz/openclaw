@@ -24,6 +24,13 @@ export async function withRemoteHttpResponse<T>(params: {
   init?: RequestInit;
   ssrfPolicy?: SsrFPolicy;
   fetchImpl?: typeof fetch;
+  /**
+   * Caller-owned abort signal. Forwarded as the guard's top-level `signal` (not
+   * `init.signal`, which the guard overwrites with its own derived signal) so
+   * the in-flight request is torn down and rejects with the caller's own abort
+   * reason instead of a generic AbortError.
+   */
+  signal?: AbortSignal;
   auditContext?: string;
   onResponse: (response: Response) => Promise<T>;
 }): Promise<T> {
@@ -31,6 +38,7 @@ export async function withRemoteHttpResponse<T>(params: {
     url: params.url,
     fetchImpl: params.fetchImpl,
     init: params.init,
+    signal: params.signal,
     policy: params.ssrfPolicy,
     auditContext: params.auditContext ?? "memory-remote",
   });

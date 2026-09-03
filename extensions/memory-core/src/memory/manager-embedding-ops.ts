@@ -337,8 +337,15 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
     signal?.throwIfAborted();
     const timeoutMs = this.resolveEmbeddingTimeout("query");
     log.debug("memory embeddings: query start", { provider: this.provider.id, timeoutMs });
+    // Hand the caller signal to the provider so a remote backend tears the
+    // in-flight HTTP request down instead of leaving it running unwatched. With
+    // no signal, call through the original single-argument shape so `arguments`
+    // stays byte-identical for third-party providers.
+    const pending = signal
+      ? this.provider.embedQuery(text, { signal })
+      : this.provider.embedQuery(text);
     return await this.withTimeout(
-      this.provider.embedQuery(text),
+      pending,
       timeoutMs,
       `memory embeddings query timed out after ${Math.round(timeoutMs / 1000)}s`,
       signal,
@@ -351,11 +358,14 @@ export abstract class MemoryManagerEmbeddingOps extends MemoryManagerSyncOps {
    *
    * The caller signal lets a caller that already gave up (for example the
    * memory_search 15s deadline) stop awaiting immediately instead of hanging
-   * for the full embedding timeout. Note the embedding provider contract does
-   * not accept a signal, so the underlying request itself is not cancelled;
-   * what this buys is that the search rejects with the caller's abort reason,
-   * which downstream abort guards recognize as a caller abort rather than a
-   * backend health failure.
+   * for the full embedding timeout, and the search rejects with the caller's
+   * abort reason, which downstream abort guards recognize as a caller abort
+   * rather than a backend health failure. `embedQuery` also forwards the same
+   * signal to the provider, so backends that adopted the optional parameter
+   * additionally cancel the in-flight request. This race is still load-bearing:
+   * it is the only thing that ends the wait for batch paths, for the local llama
+   * backend, and for providers that ignore the signal (the Ollama plugin and
+   * third-party providers written against the original one-argument contract).
    */
   protected async withTimeout<T>(
     promise: Promise<T>,

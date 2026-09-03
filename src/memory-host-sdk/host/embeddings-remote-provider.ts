@@ -23,7 +23,7 @@ export function createRemoteEmbeddingProvider(params: {
   const { client } = params;
   const url = `${client.baseUrl.replace(/\/$/, "")}/embeddings`;
 
-  const embed = async (input: string[]): Promise<number[][]> => {
+  const embed = async (input: string[], signal?: AbortSignal): Promise<number[][]> => {
     if (input.length === 0) {
       return [];
     }
@@ -34,6 +34,7 @@ export function createRemoteEmbeddingProvider(params: {
       fetchImpl: client.fetchImpl,
       body: { model: client.model, input },
       errorPrefix: params.errorPrefix,
+      signal,
     });
   };
 
@@ -41,11 +42,11 @@ export function createRemoteEmbeddingProvider(params: {
     id: params.id,
     model: client.model,
     ...(typeof params.maxInputTokens === "number" ? { maxInputTokens: params.maxInputTokens } : {}),
-    embedQuery: async (text) => {
-      const [vec] = await embed([text]);
+    embedQuery: async (text, opts) => {
+      const [vec] = await embed([text], opts?.signal);
       return vec ?? [];
     },
-    embedBatch: embed,
+    embedBatch: (texts) => embed(texts),
   };
 }
 

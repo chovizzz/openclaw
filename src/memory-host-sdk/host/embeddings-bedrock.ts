@@ -269,7 +269,9 @@ export async function createBedrockEmbeddingProvider(
     family,
   });
 
-  const invoke = async (body: string): Promise<string> => {
+  // `abortSignal` is the smithy HttpHandlerOptions escape hatch: it tears down the
+  // in-flight Bedrock request rather than just abandoning the promise.
+  const invoke = async (body: string, signal?: AbortSignal): Promise<string> => {
     const res = await sdk.send(
       new InvokeModelCommand({
         modelId: client.model,
@@ -277,33 +279,36 @@ export async function createBedrockEmbeddingProvider(
         contentType: "application/json",
         accept: "application/json",
       }),
+      signal ? { abortSignal: signal } : undefined,
     );
     return new TextDecoder().decode(res.body);
   };
 
   const isCohere = family === "cohere-v3" || family === "cohere-v4";
 
-  const embedSingle = async (text: string): Promise<number[]> => {
-    const raw = await invoke(buildBody(family, text, client.dimensions));
+  const embedSingle = async (text: string, signal?: AbortSignal): Promise<number[]> => {
+    const raw = await invoke(buildBody(family, text, client.dimensions), signal);
     return sanitizeAndNormalizeEmbedding(parseSingle(family, raw));
   };
 
   const embedCohere = async (
     texts: string[],
     inputType: "search_query" | "search_document",
+    signal?: AbortSignal,
   ): Promise<number[][]> => {
-    const raw = await invoke(buildCohereBody(family, texts, inputType, client.dimensions));
+    const raw = await invoke(buildCohereBody(family, texts, inputType, client.dimensions), signal);
     return parseCohereBatch(family, raw).map((e) => sanitizeAndNormalizeEmbedding(e));
   };
 
-  const embedQuery = async (text: string): Promise<number[]> => {
+  const embedQuery = async (text: string, opts?: { signal?: AbortSignal }): Promise<number[]> => {
+    opts?.signal?.throwIfAborted();
     if (!text.trim()) {
       return [];
     }
     if (isCohere) {
-      return (await embedCohere([text], "search_query"))[0] ?? [];
+      return (await embedCohere([text], "search_query", opts?.signal))[0] ?? [];
     }
-    return embedSingle(text);
+    return embedSingle(text, opts?.signal);
   };
 
   const embedBatch = async (texts: string[]): Promise<number[][]> => {

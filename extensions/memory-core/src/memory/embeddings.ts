@@ -24,7 +24,21 @@ export {
   DEFAULT_VOYAGE_EMBEDDING_MODEL,
 } from "openclaw/plugin-sdk/memory-core-host-engine-embeddings";
 
-export type EmbeddingProvider = MemoryEmbeddingProvider;
+/**
+ * Fork-local widening of the core `MemoryEmbeddingProvider` contract: `embedQuery`
+ * takes an optional caller abort signal so a caller that already gave up (for
+ * example the `memory_search` 15s deadline) can cancel the in-flight embedding
+ * request instead of merely abandoning the promise.
+ *
+ * The extra parameter is optional, so every existing arity-1 producer stays
+ * assignable and every existing arity-1 call site is unchanged. Cancellation is
+ * best-effort: the local llama backend can only refuse to start, and providers
+ * that never adopted the parameter (the Ollama plugin, third-party providers)
+ * ignore it and run to completion.
+ */
+export type EmbeddingProvider = Omit<MemoryEmbeddingProvider, "embedQuery"> & {
+  embedQuery: (text: string, opts?: { signal?: AbortSignal }) => Promise<number[]>;
+};
 export type EmbeddingProviderId = string;
 export type EmbeddingProviderRequest = string;
 export type EmbeddingProviderFallback = string;

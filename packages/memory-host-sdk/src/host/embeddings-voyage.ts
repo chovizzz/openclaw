@@ -33,7 +33,11 @@ export async function createVoyageEmbeddingProvider(
   const client = await resolveVoyageEmbeddingClient(options);
   const url = `${client.baseUrl.replace(/\/$/, "")}/embeddings`;
 
-  const embed = async (input: string[], input_type?: "query" | "document"): Promise<number[][]> => {
+  const embed = async (
+    input: string[],
+    input_type?: "query" | "document",
+    signal?: AbortSignal,
+  ): Promise<number[][]> => {
     if (input.length === 0) {
       return [];
     }
@@ -51,6 +55,7 @@ export async function createVoyageEmbeddingProvider(
       ssrfPolicy: client.ssrfPolicy,
       body,
       errorPrefix: "voyage embeddings failed",
+      signal,
     });
   };
 
@@ -59,8 +64,8 @@ export async function createVoyageEmbeddingProvider(
       id: "voyage",
       model: client.model,
       maxInputTokens: VOYAGE_MAX_INPUT_TOKENS[client.model],
-      embedQuery: async (text) => {
-        const [vec] = await embed([text], "query");
+      embedQuery: async (text, opts) => {
+        const [vec] = await embed([text], "query", opts?.signal);
         return vec ?? [];
       },
       embedBatch: async (texts) => embed(texts, "document"),

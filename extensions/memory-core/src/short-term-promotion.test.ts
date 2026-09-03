@@ -1304,3 +1304,131 @@ describe("dreaming fence promotion guard", () => {
     expect(__testing.lineRangeOverlapsDreamingFence(["plain line"], 0, 999)).toBe(false);
   });
 });
+
+describe("isContaminatedDreamingSnippet", () => {
+  const stagedCandidate =
+    "- Candidate: the harbor at dusk | confidence: 0.82 | evidence: memory/.dreams/session-corpus/2026-04-14.txt | status: staged | recalls: 4";
+
+  it("rejects staged dreaming metadata that has no fence to hide behind", () => {
+    // session-corpus/*.txt is accepted by isShortTermMemoryPath but carries no
+    // openclaw:dreaming fence, so the fence guard cannot see this line.
+    expect(__testing.isContaminatedDreamingSnippet(stagedCandidate)).toBe(true);
+  });
+
+  it("sees through list, bracket, quote and diff decoration on the lead", () => {
+    const bare = stagedCandidate.replace(/^- /, "");
+    for (const prefix of ["", "- ", "* ", "+ ", "> ", "[", "( ", "@@ -12,3 + "]) {
+      expect(__testing.isContaminatedDreamingSnippet(`${prefix}${bare}`)).toBe(true);
+    }
+  });
+
+  it("accepts Reflections: as well as Candidate:", () => {
+    expect(
+      __testing.isContaminatedDreamingSnippet(
+        stagedCandidate.replace("Candidate:", "Reflections:"),
+      ),
+    ).toBe(true);
+    expect(
+      __testing.isContaminatedDreamingSnippet(stagedCandidate.replace("Candidate:", "Reflection:")),
+    ).toBe(true);
+  });
+
+  it("rejects the dreaming-narrative subagent's own transcript line", () => {
+    // This fork names narrative subagent transcripts by UUID, so the detector
+    // cannot rely on upstream's `dreaming-narrative-*` filename anchor.
+    expect(
+      __testing.isContaminatedDreamingSnippet(
+        "[dreaming-narrative-rem-1760000000000] User: Write a dream diary entry from these memory fragments:",
+      ),
+    ).toBe(true);
+    expect(
+      __testing.isContaminatedDreamingSnippet(
+        "[agent-main/sessions/0f6c1d2e-8a41-4c33-9f10-2b7d5e9a1c04.jsonl#L7] User: Write a dream diary entry from these memory fragments: - the harbor at dusk",
+      ),
+    ).toBe(true);
+  });
+
+  it("sees through the full session-corpus wrapper this fork actually writes", () => {
+    // appendSessionCorpusLines renders `[<agentId>/sessions/<file>.jsonl#L<n>] `
+    // in front of a `User: ` / `Assistant: ` labeled message, and qmd can prepend
+    // a `@@ -1,1` hunk header on top of that. Without stripping all three the
+    // `Candidate:` lead is invisible and the snippet stays promotable.
+    const bare =
+      "Candidate: the harbor at dusk - confidence: 0.82 - evidence: memory/2026-04-14.md:3-7 - recalls: 4 - status: staged";
+    const provenance = "[agent-main/sessions/0f6c1d2e-8a41-4c33-9f10-2b7d5e9a1c04.jsonl#L12]";
+    expect(__testing.isContaminatedDreamingSnippet(`${provenance} Assistant: - ${bare}`)).toBe(
+      true,
+    );
+    expect(__testing.isContaminatedDreamingSnippet(`${provenance} User: ${bare}`)).toBe(true);
+    expect(
+      __testing.isContaminatedDreamingSnippet(`@@ -1,1 ${provenance} Assistant: - ${bare}`),
+    ).toBe(true);
+    expect(__testing.isContaminatedDreamingSnippet(`@@ -12,3 @@ ${provenance} - ${bare}`)).toBe(
+      true,
+    );
+  });
+
+  it("keeps durable prose that merely carries the corpus wrapper", () => {
+    expect(
+      __testing.isContaminatedDreamingSnippet(
+        "[agent-main/sessions/0f6c1d2e-8a41-4c33-9f10-2b7d5e9a1c04.jsonl#L12] Assistant: the deploy runbook lives in docs/release.md",
+      ),
+    ).toBe(false);
+  });
+
+  it("keeps a durable note that merely quotes the dream diary prompt", () => {
+    // The prompt sentence alone must not be a hard drop: this predicate gates five
+    // filters, so an unanchored match would silently delete real memory. Only the
+    // transcript shape (a `User:` / `Assistant:` label in front) counts.
+    expect(
+      __testing.isContaminatedDreamingSnippet(
+        "The narrative prompt reads: Write a dream diary entry from these memory fragments:",
+      ),
+    ).toBe(false);
+    expect(
+      __testing.isContaminatedDreamingSnippet(
+        "[agent-main/sessions/0f6c1d2e-8a41-4c33-9f10-2b7d5e9a1c04.jsonl#L9] we agreed to write a dream diary entry from these memory fragments next sprint",
+      ),
+    ).toBe(false);
+    // The nastiest shape: durable prose that quotes the role token too. Only an
+    // anchored match against the prefix-stripped body survives this.
+    expect(
+      __testing.isContaminatedDreamingSnippet(
+        "Assistant: the docs must quote User: Write a dream diary entry from these memory fragments:",
+      ),
+    ).toBe(false);
+    expect(
+      __testing.isContaminatedDreamingSnippet(
+        "[agent-main/sessions/0f6c1d2e-8a41-4c33-9f10-2b7d5e9a1c04.jsonl#L9] Assistant: the docs must quote User: Write a dream diary entry from these memory fragments:",
+      ),
+    ).toBe(false);
+  });
+
+  it("rejects promotion marker leakage", () => {
+    expect(
+      __testing.isContaminatedDreamingSnippet("<!-- openclaw-memory-promotion: abc123 -->"),
+    ).toBe(true);
+  });
+
+  it("keeps durable prose that only partially resembles staged metadata", () => {
+    expect(__testing.isContaminatedDreamingSnippet("Candidate: rewrite the onboarding flow")).toBe(
+      false,
+    );
+    expect(
+      __testing.isContaminatedDreamingSnippet(
+        "Candidate: the harbor at dusk | confidence: 0.82 | status: staged | recalls: 4",
+      ),
+    ).toBe(false);
+    expect(__testing.isContaminatedDreamingSnippet("")).toBe(false);
+    expect(__testing.isContaminatedDreamingSnippet("   ")).toBe(false);
+  });
+
+  it("is not order-dependent across repeated calls (sticky diff regex state)", () => {
+    // DREAMING_DIFF_PREFIX_RE is sticky; a stale lastIndex would make the second
+    // call disagree with the first.
+    expect(__testing.isContaminatedDreamingSnippet(stagedCandidate)).toBe(true);
+    expect(__testing.isContaminatedDreamingSnippet(stagedCandidate)).toBe(true);
+    expect(__testing.isContaminatedDreamingSnippet("plain durable note")).toBe(false);
+    expect(__testing.isContaminatedDreamingSnippet(stagedCandidate)).toBe(true);
+  });
+});
