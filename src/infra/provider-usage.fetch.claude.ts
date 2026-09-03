@@ -1,6 +1,22 @@
+import { readResponseWithLimit } from "../media/read-response-with-limit.js";
 import { buildUsageHttpErrorSnapshot, fetchJson } from "./provider-usage.fetch.shared.js";
 import { clampPercent, PROVIDER_LABELS } from "./provider-usage.shared.js";
 import type { ProviderUsageSnapshot, UsageWindow } from "./provider-usage.types.js";
+
+/** Cap for Anthropic usage error bodies so a hostile/broken response cannot OOM the process. */
+const CLAUDE_USAGE_ERROR_BODY_MAX_BYTES = 16 * 1024 * 1024;
+
+/** Parses a bounded JSON error body; throws when the body exceeds the cap or is malformed. */
+async function readBoundedErrorJson<T>(res: Response, label: string): Promise<T> {
+  const bytes = await readResponseWithLimit(res, CLAUDE_USAGE_ERROR_BODY_MAX_BYTES, {
+    onOverflow: ({ maxBytes }) => new Error(`${label}: JSON response exceeds ${maxBytes} bytes`),
+  });
+  try {
+    return JSON.parse(new TextDecoder().decode(bytes)) as T;
+  } catch (cause) {
+    throw new Error(`${label}: malformed JSON response`, { cause });
+  }
+}
 
 type ClaudeUsageResponse = {
   five_hour?: { utilization?: number; resets_at?: string };
@@ -135,9 +151,9 @@ export async function fetchClaudeUsage(
   if (!res.ok) {
     let message: string | undefined;
     try {
-      const data = (await res.json()) as {
+      const data = await readBoundedErrorJson<{
         error?: { message?: unknown } | null;
-      };
+      }>(res, "Anthropic usage error");
       const raw = data?.error?.message;
       if (typeof raw === "string" && raw.trim()) {
         message = raw.trim();

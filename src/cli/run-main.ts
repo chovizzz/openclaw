@@ -159,12 +159,15 @@ export async function runCli(argv: string[] = process.argv) {
     // Capture all console output into structured logs while keeping stdout/stderr behavior.
     enableConsoleCapture();
 
-    const [{ buildProgram }, { installUnhandledRejectionHandler }, { restoreTerminalState }] =
-      await Promise.all([
-        import("./program.js"),
-        import("../infra/unhandled-rejections.js"),
-        import("../terminal/restore.js"),
-      ]);
+    const [
+      { buildProgram },
+      { installUnhandledRejectionHandler, isBenignUncaughtExceptionError },
+      { restoreTerminalState },
+    ] = await Promise.all([
+      import("./program.js"),
+      import("../infra/unhandled-rejections.js"),
+      import("../terminal/restore.js"),
+    ]);
     const program = buildProgram();
 
     // Global error handlers to prevent silent crashes from unhandled rejections/exceptions.
@@ -172,6 +175,14 @@ export async function runCli(argv: string[] = process.argv) {
     installUnhandledRejectionHandler();
 
     process.on("uncaughtException", (error) => {
+      // A broken pipe means the consumer went away, not that this process is broken.
+      if (isBenignUncaughtExceptionError(error)) {
+        console.warn(
+          "[openclaw] Non-fatal uncaught exception (continuing):",
+          formatUncaughtError(error),
+        );
+        return;
+      }
       console.error("[openclaw] Uncaught exception:", formatUncaughtError(error));
       restoreTerminalState("uncaught exception", { resumeStdinIfPaused: false });
       process.exit(1);

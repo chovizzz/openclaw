@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   isAbortError,
+  isBenignUncaughtExceptionError,
   isTransientNetworkError,
   isTransientSqliteError,
   isTransientUnhandledRejectionError,
@@ -266,5 +267,195 @@ describe("isTransientUnhandledRejectionError", () => {
     });
 
     expect(isTransientUnhandledRejectionError(error)).toBe(true);
+  });
+});
+
+describe("isBenignUncaughtExceptionError", () => {
+  it("treats a broken pipe as non-fatal", () => {
+    expect(
+      isBenignUncaughtExceptionError(
+        Object.assign(new Error("write EPIPE"), {
+          code: "EPIPE",
+        }),
+      ),
+    ).toBe(true);
+    // errno spelling and nested causes must be recognized too.
+    expect(
+      isBenignUncaughtExceptionError(
+        Object.assign(new Error("write failed"), {
+          errno: "EPIPE",
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      isBenignUncaughtExceptionError(
+        new Error("send failed", {
+          cause: Object.assign(new Error("write EPIPE"), { code: "EPIPE" }),
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("keeps every other error fatal", () => {
+    // Unknown errors must still take the process down - this is the direction that
+    // protects against a silently wedged gateway.
+    expect(isBenignUncaughtExceptionError(new Error("boom"))).toBe(false);
+    expect(isBenignUncaughtExceptionError(undefined)).toBe(false);
+    expect(isBenignUncaughtExceptionError(null)).toBe(false);
+    expect(isBenignUncaughtExceptionError("write EPIPE")).toBe(false);
+
+    // Other transient-network codes are retryable for rejections but must NOT be
+    // suppressed as uncaught exceptions.
+    for (const code of ["ECONNRESET", "ETIMEDOUT", "ENOTFOUND", "EIO"]) {
+      expect(isBenignUncaughtExceptionError(Object.assign(new Error(code), { code }))).toBe(false);
+    }
+
+    // Transient SQLite errors stay fatal on the uncaught-exception path.
+    expect(
+      isBenignUncaughtExceptionError(
+        Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" }),
+      ),
+    ).toBe(false);
+
+    // AbortError stays fatal here; only the rejection path suppresses it.
+    const aborted = new Error("aborted");
+    aborted.name = "AbortError";
+    expect(isBenignUncaughtExceptionError(aborted)).toBe(false);
+
+    // A message that merely mentions EPIPE is not enough - only a real errno counts.
+    expect(isBenignUncaughtExceptionError(new Error("upstream said write EPIPE"))).toBe(false);
+
+    // Business-error shapes (for example a channel API error code) must keep exiting.
+    expect(
+      isBenignUncaughtExceptionError(Object.assign(new Error("invalid param"), { code: 99991663 })),
+    ).toBe(false);
+  });
+
+  it("never lets a nested EPIPE rescue an error that is something else", () => {
+    // A serious error that happens to carry an EPIPE underneath must still exit. This is the
+    // direction that keeps the suppression to exactly one class of error.
+    expect(
+      isBenignUncaughtExceptionError(
+        Object.assign(new Error("out of memory"), {
+          code: "ERR_OUT_OF_MEMORY",
+          cause: Object.assign(new Error("write EPIPE"), { code: "EPIPE" }),
+        }),
+      ),
+    ).toBe(false);
+
+    // Arbitrary third-party payload fields are never a suppression signal.
+    expect(
+      isBenignUncaughtExceptionError({
+        code: "feishu_api_error",
+        message: "invalid param",
+        data: { code: "EPIPE" },
+      }),
+    ).toBe(false);
+    expect(
+      isBenignUncaughtExceptionError({ message: "wrapped", original: { code: "EPIPE" } }),
+    ).toBe(false);
+    expect(isBenignUncaughtExceptionError({ message: "wrapped", error: { code: "EPIPE" } })).toBe(
+      false,
+    );
+    expect(isBenignUncaughtExceptionError({ message: "wrapped", reason: { code: "EPIPE" } })).toBe(
+      false,
+    );
+    expect(
+      isBenignUncaughtExceptionError(
+        new AggregateError([Object.assign(new Error("write EPIPE"), { code: "EPIPE" })], "many"),
+      ),
+    ).toBe(false);
+  });
+
+  it("resolves identity from the first coded node in the cause chain", () => {
+    // Untyped wrappers are transparent, however deep.
+    expect(
+      isBenignUncaughtExceptionError(
+        new Error("outer", {
+          cause: new Error("middle", {
+            cause: Object.assign(new Error("write EPIPE"), { code: "EPIPE" }),
+          }),
+        }),
+      ),
+    ).toBe(true);
+
+    // ...but the first node that declares a code decides, in both directions.
+    expect(
+      isBenignUncaughtExceptionError(
+        new Error("outer", {
+          cause: Object.assign(new Error("db down"), {
+            code: "SQLITE_BUSY",
+            cause: Object.assign(new Error("write EPIPE"), { code: "EPIPE" }),
+          }),
+        }),
+      ),
+    ).toBe(false);
+
+    // An identity supplied via errno blocks a deeper EPIPE just as a code would.
+    expect(
+      isBenignUncaughtExceptionError(
+        Object.assign(new Error("db down"), {
+          errno: "SQLITE_BUSY",
+          cause: Object.assign(new Error("write EPIPE"), { code: "EPIPE" }),
+        }),
+      ),
+    ).toBe(false);
+
+    // The outer identity wins in the benign direction too.
+    expect(
+      isBenignUncaughtExceptionError(
+        Object.assign(new Error("write EPIPE"), {
+          code: "EPIPE",
+          cause: Object.assign(new Error("out of memory"), { code: "ERR_OUT_OF_MEMORY" }),
+        }),
+      ),
+    ).toBe(true);
+
+    // A blank code carries no identity, so the wrapper stays transparent.
+    expect(
+      isBenignUncaughtExceptionError(
+        Object.assign(new Error("wrapper"), {
+          code: "   ",
+          cause: Object.assign(new Error("write EPIPE"), { code: "EPIPE" }),
+        }),
+      ),
+    ).toBe(true);
+
+    // A cyclic cause chain must terminate rather than hang the handler.
+    const cyclic = Object.assign(new Error("cyclic"), {}) as Error & { cause?: unknown };
+    cyclic.cause = cyclic;
+    expect(isBenignUncaughtExceptionError(cyclic)).toBe(false);
+
+    // A two-node cycle terminates as well.
+    const first = Object.assign(new Error("first"), {}) as Error & { cause?: unknown };
+    const second = Object.assign(new Error("second"), { cause: first }) as Error & {
+      cause?: unknown;
+    };
+    first.cause = second;
+    expect(isBenignUncaughtExceptionError(first)).toBe(false);
+
+    // A primitive cause terminates the walk instead of throwing.
+    expect(
+      isBenignUncaughtExceptionError(Object.assign(new Error("wrapper"), { cause: "EPIPE" })),
+    ).toBe(false);
+  });
+
+  it("does not confuse a numeric errno with the EPIPE symbol", () => {
+    // The real Node EPIPE shape carries both; the symbolic code must win.
+    expect(
+      isBenignUncaughtExceptionError(
+        Object.assign(new Error("write EPIPE"), { code: "EPIPE", errno: -32, syscall: "write" }),
+      ),
+    ).toBe(true);
+    // A bare numeric errno stringifies to "-32", which can never match "EPIPE".
+    expect(isBenignUncaughtExceptionError(Object.assign(new Error("write"), { errno: -32 }))).toBe(
+      false,
+    );
+    // An explicit non-EPIPE code is not overridden by an EPIPE errno.
+    expect(
+      isBenignUncaughtExceptionError(
+        Object.assign(new Error("other"), { code: "OTHER", errno: "EPIPE" }),
+      ),
+    ).toBe(false);
   });
 });

@@ -1,5 +1,12 @@
 import fs from "node:fs/promises";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+const logVerboseMock = vi.hoisted(() => vi.fn());
+vi.mock("../globals.js", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../globals.js")>()),
+  logVerbose: logVerboseMock,
+}));
+
 import {
   maintainConfigBackups,
   rotateConfigBackups,
@@ -129,6 +136,58 @@ describe("config backup rotation", () => {
       }
       // Out-of-ring orphan gets pruned.
       await expect(fs.stat(`${configPath}.bak.orphan`)).rejects.toThrow();
+    });
+  });
+
+  it("logs an orphan backup cleanup failure instead of swallowing it", async () => {
+    await withTempHome(async () => {
+      logVerboseMock.mockClear();
+      const configPath = resolveConfigPathFromTempState();
+      await fs.writeFile(configPath, JSON.stringify({ token: "secret" }), { mode: 0o600 });
+      const lockedOrphan = `${configPath}.bak.orphan`;
+      await fs.writeFile(lockedOrphan, "orphan");
+
+      // A locked/undeletable orphan: unlink rejects for this entry only, so rotate/copy/harden
+      // still run on the real fs and only the orphan prune step hits the failure path.
+      const ioFs = {
+        ...fs,
+        unlink: (target: string) =>
+          target === lockedOrphan
+            ? Promise.reject(
+                Object.assign(new Error("EPERM: operation not permitted, unlink"), {
+                  code: "EPERM",
+                }),
+              )
+            : fs.unlink(target),
+      };
+
+      // maintainConfigBackups must not throw, and the swallowed prune failure is now surfaced.
+      await maintainConfigBackups(configPath, ioFs);
+
+      const logged = logVerboseMock.mock.calls.map((call) => String(call[0]));
+      expect(logged.some((line) => line.includes(lockedOrphan) && line.includes("EPERM"))).toBe(
+        true,
+      );
+    });
+  });
+
+  it("logs a readdir failure that skips orphan cleanup", async () => {
+    await withTempHome(async () => {
+      logVerboseMock.mockClear();
+      const configPath = resolveConfigPathFromTempState();
+      await fs.writeFile(configPath, JSON.stringify({ token: "secret" }), { mode: 0o600 });
+
+      const ioFs = {
+        ...fs,
+        readdir: () => Promise.reject(new Error("EACCES: permission denied, scandir")),
+      } as unknown as typeof fs;
+
+      await cleanOrphanBackups(configPath, ioFs);
+
+      const logged = logVerboseMock.mock.calls.map((call) => String(call[0]));
+      expect(logged.some((line) => line.includes("cannot read") && line.includes("EACCES"))).toBe(
+        true,
+      );
     });
   });
 });

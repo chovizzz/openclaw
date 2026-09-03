@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { readResponseWithLimit } from "../media/read-response-with-limit.js";
 import { runCommandWithTimeout } from "../process/exec.js";
 import { buildTimeoutAbortSignal } from "../utils/fetch-timeout.js";
 import { detectPackageManager as detectPackageManagerImpl } from "./detect-package-manager.js";
@@ -302,6 +303,21 @@ export async function fetchNpmLatestVersion(params?: {
   };
 }
 
+/** Cap for npm registry JSON bodies so a hostile/broken response cannot OOM the process. */
+const NPM_REGISTRY_JSON_MAX_BYTES = 16 * 1024 * 1024;
+
+/** Parses a bounded JSON body; throws when the body exceeds the cap or is malformed. */
+async function readBoundedJson<T>(res: Response, label: string): Promise<T> {
+  const bytes = await readResponseWithLimit(res, NPM_REGISTRY_JSON_MAX_BYTES, {
+    onOverflow: ({ maxBytes }) => new Error(`${label}: JSON response exceeds ${maxBytes} bytes`),
+  });
+  try {
+    return JSON.parse(new TextDecoder().decode(bytes)) as T;
+  } catch (cause) {
+    throw new Error(`${label}: malformed JSON response`, { cause });
+  }
+}
+
 export async function fetchNpmPackageTargetStatus(params: {
   target: string;
   timeoutMs?: number;
@@ -320,10 +336,10 @@ export async function fetchNpmPackageTargetStatus(params: {
     }
     // Keep the deadline active through body consumption. Fetch resolves at
     // headers, so clearing it earlier would leave a stalled registry body unbounded.
-    const json = (await res.json()) as {
+    const json = await readBoundedJson<{
       version?: unknown;
       engines?: { node?: unknown };
-    };
+    }>(res, "npm package target status");
     const version = typeof json?.version === "string" ? json.version : null;
     const nodeEngine = typeof json?.engines?.node === "string" ? json.engines.node : null;
     return { target, version, nodeEngine };

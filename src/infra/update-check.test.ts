@@ -45,14 +45,16 @@ describe("resolveNpmChannelTag", () => {
           typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
         const tag = decodeURIComponent(url.split("/").pop() ?? "");
         const version = versionByTag[tag] ?? null;
-        return {
-          ok: version != null,
-          status: version != null ? 200 : 404,
-          json: async () => ({
+        if (version == null) {
+          return new Response(null, { status: 404 });
+        }
+        return new Response(
+          JSON.stringify({
             version,
-            engines: version != null ? { node: ">=22.14.0" } : undefined,
+            engines: { node: ">=22.14.0" },
           }),
-        } as Response;
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
       }),
     );
   });
@@ -104,17 +106,24 @@ describe("resolveNpmChannelTag", () => {
       "fetch",
       vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
         const signal = init?.signal;
-        return {
-          ok: true,
+        // A body that never delivers a chunk until the deadline aborts it.
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            signal?.addEventListener(
+              "abort",
+              () => {
+                try {
+                  controller.error(new Error("aborted by deadline"));
+                } catch {}
+              },
+              { once: true },
+            );
+          },
+        });
+        return new Response(body, {
           status: 200,
-          bodyUsed: false,
-          json: () =>
-            new Promise((_resolve, reject) => {
-              signal?.addEventListener("abort", () => reject(new Error("aborted by deadline")), {
-                once: true,
-              });
-            }),
-        } as unknown as Response;
+          headers: { "content-type": "application/json" },
+        });
       }),
     );
 
@@ -126,6 +135,66 @@ describe("resolveNpmChannelTag", () => {
       nodeEngine: null,
       error: expect.stringContaining("aborted by deadline"),
     });
+  });
+
+  it("returns an error on an oversized public registry response exceeding 16 MiB", async () => {
+    const oneMib = 1024 * 1024;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        const oversized = new Uint8Array(16 * oneMib + 1).fill(0x41);
+        return new Response(
+          new ReadableStream<Uint8Array>({
+            start(controller) {
+              controller.enqueue(oversized);
+              controller.close();
+            },
+          }),
+          { status: 200, headers: { "content-type": "application/json" } },
+        );
+      }),
+    );
+
+    const result = await fetchNpmPackageTargetStatus({ target: "latest", timeoutMs: 5000 });
+    expect(result.version).toBeNull();
+    expect(result.nodeEngine).toBeNull();
+    expect(result.error).toContain("JSON response exceeds");
+    expect(result.error).toContain("16777216");
+  });
+
+  it("parses a public registry response just under 16 MiB", async () => {
+    const targetSize = 16 * 1024 * 1024 - 1024;
+    const innerLen = targetSize - 14;
+    const body = `{"version":"${"0".repeat(innerLen)}"}`;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(body, { status: 200, headers: { "content-type": "application/json" } }),
+      ),
+    );
+
+    const result = await fetchNpmPackageTargetStatus({ target: "latest", timeoutMs: 5000 });
+    expect(result.version).toContain("0");
+    expect(result.nodeEngine).toBeNull();
+    expect(result.error).toBeUndefined();
+  });
+
+  it("returns an error on malformed JSON from the registry", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response("not-json-at-all{{{", {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          }),
+      ),
+    );
+
+    const result = await fetchNpmPackageTargetStatus({ target: "latest", timeoutMs: 1000 });
+    expect(result.version).toBeNull();
+    expect(result.error).toContain("malformed JSON");
   });
 
   it("exposes tag fetch helpers for success and http failures", async () => {

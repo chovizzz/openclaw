@@ -328,6 +328,45 @@ describe("exec approval session target", () => {
     ).toBe(false);
   });
 
+  it("rejects unbound foreign-channel fallback (cross-channel approval leak)", () => {
+    // Regression guard: a request whose turn came from another channel must not
+    // be picked up by a foreign channel just because that channel has an
+    // eligible account and nothing is explicitly bound.
+    const cfg = {} as OpenClawConfig;
+    const request = buildRequest({
+      turnSourceChannel: "whatsapp",
+      sessionKey: "agent:main:missing",
+    });
+
+    expect(resolveApprovalRequestAccountId({ cfg, request, channel: "telegram" })).toBeNull();
+    expect(
+      resolveApprovalRequestChannelAccountId({ cfg, request, channel: "telegram" }),
+    ).toBeNull();
+    expect(
+      doesApprovalRequestMatchChannelAccount({
+        cfg,
+        request,
+        channel: "telegram",
+      }),
+    ).toBe(false);
+    expect(
+      doesApprovalRequestMatchChannelAccount({
+        cfg,
+        request,
+        channel: "telegram",
+        accountId: "default",
+      }),
+    ).toBe(false);
+    // The originating channel still matches.
+    expect(
+      doesApprovalRequestMatchChannelAccount({
+        cfg,
+        request,
+        channel: "whatsapp",
+      }),
+    ).toBe(true);
+  });
+
   it("falls back to the stored session binding when turn source uses another channel", () => {
     withTempDirSync({ prefix: "openclaw-exec-approval-session-target-" }, (tmpDir) => {
       const storePath = path.join(tmpDir, "sessions.json");

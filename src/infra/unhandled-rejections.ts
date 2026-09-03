@@ -62,6 +62,13 @@ const TRANSIENT_SQLITE_CODES = new Set([
 
 const TRANSIENT_SQLITE_ERRCODES = new Set([5, 6, 10, 14]);
 
+// Uncaught exceptions that must not take the process down. Deliberately limited to broken
+// pipes: writing to a closed pipe (a piped-to `head`, a detached terminal, a socket the peer
+// already closed) is a normal end-of-consumer condition, not a fault in this process.
+// Keep this set minimal - it only relaxes the uncaughtException path, never the
+// unhandledRejection classification below.
+const BENIGN_UNCAUGHT_EXCEPTION_CODES = new Set(["EPIPE"]);
+
 const TRANSIENT_NETWORK_MESSAGE_CODE_RE =
   /\b(ECONNRESET|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|ESOCKETTIMEDOUT|ECONNABORTED|EPIPE|EHOSTUNREACH|ENETUNREACH|EAI_AGAIN|EPROTO|UND_ERR_CONNECT_TIMEOUT|UND_ERR_DNS_RESOLVE_FAILED|UND_ERR_CONNECT|UND_ERR_SOCKET|UND_ERR_HEADERS_TIMEOUT|UND_ERR_BODY_TIMEOUT)\b/i;
 
@@ -319,6 +326,40 @@ export function isTransientSqliteError(err: unknown): boolean {
 
 export function isTransientUnhandledRejectionError(err: unknown): boolean {
   return isTransientNetworkError(err) || isTransientSqliteError(err);
+}
+
+/**
+ * True only when the error's own identity is a broken pipe (`EPIPE`).
+ *
+ * Used exclusively by the `uncaughtException` handlers to skip a process exit. It is
+ * deliberately much stricter than the transient-network classification:
+ *
+ * - It resolves the error's identity from the first node in the `cause` chain that actually
+ *   carries a code/errno. If that code is not EPIPE, the error is fatal - a nested EPIPE
+ *   buried under, say, an OOM or a business error must never suppress the exit.
+ * - It never inspects `data`, `errors`, `reason`, `original` or `error`. Those carry arbitrary
+ *   third-party payloads, and a stray `{ code: "EPIPE" }` in one of them says nothing about
+ *   whether this process is still healthy.
+ *
+ * The net effect is that exactly one class of error changes exit behavior: a broken pipe.
+ */
+export function isBenignUncaughtExceptionError(err: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current: unknown = err;
+  while (current != null && !seen.has(current)) {
+    seen.add(current);
+    const code = extractErrorCodeOrErrno(current);
+    if (code) {
+      // First node that declares an identity decides, in both directions.
+      return BENIGN_UNCAUGHT_EXCEPTION_CODES.has(code);
+    }
+    if (typeof current !== "object") {
+      return false;
+    }
+    // An untyped wrapper (`new Error("send failed", { cause: epipe })`) is transparent.
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
 }
 
 export function registerUnhandledRejectionHandler(handler: UnhandledRejectionHandler): () => void {
