@@ -44,7 +44,7 @@ type BrowserProfileActions = {
     options?: { ephemeral?: boolean; signal?: AbortSignal },
   ) => Promise<boolean>;
   listTabs: () => Promise<BrowserTab[]>;
-  openTab: (url: string) => Promise<BrowserTab>;
+  openTab: (url: string, opts?: { signal?: AbortSignal }) => Promise<BrowserTab>;
   focusTab: (targetId: string) => Promise<void>;
   closeTab: (targetId: string) => Promise<void>;
   stopRunningBrowser: () => Promise<{ stopped: boolean }>;

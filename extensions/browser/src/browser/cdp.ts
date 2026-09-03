@@ -174,7 +174,10 @@ export async function createTargetViaCdp(opts: {
   cdpUrl: string;
   url: string;
   ssrfPolicy?: SsrFPolicy;
+  /** Caller cancellation, e.g. an aborted HTTP request. */
+  signal?: AbortSignal;
 }): Promise<{ targetId: string }> {
+  opts.signal?.throwIfAborted();
   await assertBrowserNavigationAllowed({
     url: opts.url,
     ...withBrowserNavigationPolicy(opts.ssrfPolicy),
@@ -188,9 +191,12 @@ export async function createTargetViaCdp(opts: {
   } else {
     // Standard HTTP(S) CDP endpoint — discover WebSocket URL via /json/version.
     await assertCdpEndpointAllowed(opts.cdpUrl, opts.ssrfPolicy);
+    // Thread the caller's signal so a canceled request cancels the pending
+    // /json/version discovery instead of hanging on to the socket.
     const version = await fetchJson<{ webSocketDebuggerUrl?: string }>(
       appendCdpPath(opts.cdpUrl, "/json/version"),
       1500,
+      { signal: opts.signal },
     );
     const wsUrlRaw = String(version?.webSocketDebuggerUrl ?? "").trim();
     wsUrl = wsUrlRaw ? normalizeCdpWsUrl(wsUrlRaw, opts.cdpUrl) : "";

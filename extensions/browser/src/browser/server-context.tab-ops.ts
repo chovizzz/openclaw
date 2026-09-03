@@ -33,7 +33,7 @@ type TabOpsDeps = {
 
 type ProfileTabOps = {
   listTabs: () => Promise<BrowserTab[]>;
-  openTab: (url: string) => Promise<BrowserTab>;
+  openTab: (url: string, opts?: { signal?: AbortSignal }) => Promise<BrowserTab>;
 };
 
 /**
@@ -137,7 +137,7 @@ export function createProfileTabOps({
     });
   };
 
-  const openTab = async (url: string): Promise<BrowserTab> => {
+  const openTab = async (url: string, opts?: { signal?: AbortSignal }): Promise<BrowserTab> => {
     const ssrfPolicyOpts = withBrowserNavigationPolicy(state().resolved.ssrfPolicy);
 
     if (capabilities.usesChromeMcp) {
@@ -176,19 +176,30 @@ export function createProfileTabOps({
       );
     }
 
-    const createdViaCdp = await createTargetViaCdp({
+    // Only the direct CDP path takes the caller's signal. The Chrome MCP and
+    // persistent-Playwright paths above share a cached session across callers,
+    // so a canceled request must not tear their transport down.
+    const createTargetOpts: Parameters<typeof createTargetViaCdp>[0] = {
       cdpUrl: profile.cdpUrl,
       url,
       ...ssrfPolicyOpts,
-    })
+    };
+    if (opts?.signal) {
+      createTargetOpts.signal = opts.signal;
+    }
+    const createdViaCdp = await createTargetViaCdp(createTargetOpts)
       .then((r) => r.targetId)
       .catch(() => null);
+    // Deliberately no throwIfAborted() here. Cancellation is only allowed to
+    // shorten the *wait*, never to abandon a target that already exists: a
+    // throw after Target.createTarget succeeded would leak an orphan tab that
+    // nothing tracks or closes.
 
     if (createdViaCdp) {
       const profileState = getProfileState();
       profileState.lastTargetId = createdViaCdp;
       const deadline = Date.now() + OPEN_TAB_DISCOVERY_WINDOW_MS;
-      while (Date.now() < deadline) {
+      while (Date.now() < deadline && !opts?.signal?.aborted) {
         const tabs = await listTabs().catch(() => [] as BrowserTab[]);
         const found = tabs.find((t) => t.targetId === createdViaCdp);
         if (found) {
@@ -198,10 +209,16 @@ export function createProfileTabOps({
         }
         await new Promise((r) => setTimeout(r, OPEN_TAB_DISCOVERY_POLL_MS));
       }
+      // Either the discovery window elapsed or the caller went away. Both end
+      // with the created target handed back so tab-limit bookkeeping owns it.
       triggerManagedTabLimit(createdViaCdp);
       return { targetId: createdViaCdp, title: "", url, type: "page" };
     }
 
+    // The direct CDP path either failed or was canceled. No target exists yet at
+    // this point, so a canceled caller must stop here rather than open a tab via
+    // the legacy fallback that nothing would wait for.
+    opts?.signal?.throwIfAborted();
     const encoded = encodeURIComponent(url);
     const endpointUrl = new URL(appendCdpPath(cdpHttpBase, "/json/new"));
     await assertBrowserNavigationAllowed({ url, ...ssrfPolicyOpts });
@@ -211,11 +228,13 @@ export function createProfileTabOps({
           return endpointUrl.toString();
         })()
       : `${endpointUrl.toString()}?${encoded}`;
+    const fallbackInit = opts?.signal ? { signal: opts.signal } : {};
     const created = await fetchJson<CdpTarget>(endpoint, CDP_JSON_NEW_TIMEOUT_MS, {
       method: "PUT",
+      ...fallbackInit,
     }).catch(async (err) => {
       if (String(err).includes("HTTP 405")) {
-        return await fetchJson<CdpTarget>(endpoint, CDP_JSON_NEW_TIMEOUT_MS);
+        return await fetchJson<CdpTarget>(endpoint, CDP_JSON_NEW_TIMEOUT_MS, fallbackInit);
       }
       throw err;
     });

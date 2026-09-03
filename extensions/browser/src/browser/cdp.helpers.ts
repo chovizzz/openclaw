@@ -289,11 +289,13 @@ export async function fetchCdpChecked(
 ): Promise<Response> {
   const ctrl = new AbortController();
   const t = setTimeout(ctrl.abort.bind(ctrl), timeoutMs);
+  // Merge the caller's signal with the request timeout so a canceled caller
+  // aborts the in-flight fetch instead of waiting out the full timeout budget.
+  // Without a caller signal this is byte-for-byte the previous behavior.
+  const signal = init?.signal ? AbortSignal.any([ctrl.signal, init.signal]) : ctrl.signal;
   try {
     const headers = getHeadersWithAuth(url, (init?.headers as Record<string, string>) || {});
-    const res = await withNoProxyForCdpUrl(url, () =>
-      fetch(url, { ...init, headers, signal: ctrl.signal }),
-    );
+    const res = await withNoProxyForCdpUrl(url, () => fetch(url, { ...init, headers, signal }));
     if (!res.ok) {
       if (res.status === 429) {
         // Do not reflect upstream response text into the error surface (log/agent injection risk)

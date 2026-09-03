@@ -177,7 +177,7 @@ export function registerBrowserTabRoutes(app: BrowserRouteRegistrar, ctx: Browse
           ...withBrowserNavigationPolicy(ctx.state().resolved.ssrfPolicy),
         });
         await profileCtx.ensureBrowserAvailable();
-        const tab = await profileCtx.openTab(url);
+        const tab = await profileCtx.openTab(url, { signal: req.signal });
         res.json(tab);
       },
     });
@@ -236,7 +236,7 @@ export function registerBrowserTabRoutes(app: BrowserRouteRegistrar, ctx: Browse
 
         if (action === "new") {
           await profileCtx.ensureBrowserAvailable();
-          const tab = await profileCtx.openTab("about:blank");
+          const tab = await profileCtx.openTab("about:blank", { signal: req.signal });
           return res.json({ ok: true, tab });
         }
 

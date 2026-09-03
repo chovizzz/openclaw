@@ -129,6 +129,30 @@ function normalizeCdpUrl(raw: string) {
   return raw.replace(/\/$/, "");
 }
 
+function getCachedPlaywrightBrowserConnection(cdpUrl: string): ConnectedBrowser | undefined {
+  return cachedByCdpUrl.get(normalizeCdpUrl(cdpUrl));
+}
+
+/**
+ * A page-selection miss against a *reused* cached connection usually means the
+ * cached Playwright attach went stale (browser restarted, target list moved on)
+ * rather than that the tab is genuinely gone. Those are worth one reconnect.
+ * A miss on a freshly created connection is real, and a blocked target is a
+ * deliberate quarantine that a reconnect must never launder away.
+ */
+function isRecoverableStalePageSelectionError(err: unknown, reusedCachedBrowser: boolean): boolean {
+  if (!reusedCachedBrowser) {
+    return false;
+  }
+  if (err instanceof BlockedBrowserTargetError) {
+    return false;
+  }
+  // The two page-selection failures this module raises itself. Anything else
+  // (connect failures, Playwright object errors) is not a stale-attach symptom
+  // and must not trigger a reconnect.
+  return err instanceof BrowserTabNotFoundError || err instanceof NoPagesAvailableError;
+}
+
 function findNetworkRequestById(state: PageState, id: string): BrowserNetworkRequest | undefined {
   for (let i = state.requests.length - 1; i >= 0; i -= 1) {
     const candidate = state.requests[i];
@@ -223,6 +247,17 @@ function hasBlockedTargetsForCdpUrl(cdpUrl: string): boolean {
     }
   }
   return false;
+}
+
+/**
+ * The connected browser exposed no usable page. Modeled as a class rather than
+ * a message string so recovery logic can branch on a closed error type.
+ */
+export class NoPagesAvailableError extends Error {
+  constructor() {
+    super("No pages available in the connected browser.");
+    this.name = "NoPagesAvailableError";
+  }
 }
 
 export class BlockedBrowserTargetError extends Error {
@@ -622,17 +657,14 @@ async function resolvePageByTargetIdOrThrow(opts: {
   return page;
 }
 
-export async function getPageForTargetId(opts: {
-  cdpUrl: string;
-  targetId?: string;
-}): Promise<Page> {
+async function getPageForTargetIdOnce(opts: { cdpUrl: string; targetId?: string }): Promise<Page> {
   if (opts.targetId && isBlockedTarget(opts.cdpUrl, opts.targetId)) {
     throw new BlockedBrowserTargetError();
   }
   const { browser } = await connectBrowser(opts.cdpUrl);
   const pages = await getAllPages(browser);
   if (!pages.length) {
-    throw new Error("No pages available in the connected browser.");
+    throw new NoPagesAvailableError();
   }
 
   const { accessible, blockedCount } = await partitionAccessiblePages({
@@ -643,7 +675,7 @@ export async function getPageForTargetId(opts: {
     if (blockedCount > 0) {
       throw new BlockedBrowserTargetError();
     }
-    throw new Error("No pages available in the connected browser.");
+    throw new NoPagesAvailableError();
   }
   const first = accessible[0];
   if (!opts.targetId) {
@@ -665,6 +697,37 @@ export async function getPageForTargetId(opts: {
     return first;
   }
   throw new BrowserTabNotFoundError();
+}
+
+/**
+ * Resolve a page, retrying exactly once against a fresh connection when a
+ * reused cached Playwright attach turned out to be stale.
+ */
+export async function getPageForTargetId(opts: {
+  cdpUrl: string;
+  targetId?: string;
+}): Promise<Page> {
+  // Capture the connection *identity*, not just "was something cached": a
+  // concurrent caller may have already replaced it by the time we fail, and
+  // evicting that replacement would break the request that just built it.
+  const cachedBefore = getCachedPlaywrightBrowserConnection(opts.cdpUrl);
+  try {
+    return await getPageForTargetIdOnce(opts);
+  } catch (err) {
+    if (!isRecoverableStalePageSelectionError(err, Boolean(cachedBefore))) {
+      throw err;
+    }
+    if (getCachedPlaywrightBrowserConnection(opts.cdpUrl) === cachedBefore) {
+      // Evict via forceDisconnect, not closePlaywrightBrowserConnection: the
+      // latter also clears this cdpUrl's blocked-target quarantine, which would
+      // let a stale-attach retry launder away an SSRF block on an unrelated tab.
+      await forceDisconnectPlaywrightForTarget({
+        cdpUrl: opts.cdpUrl,
+        reason: "stale cached Playwright attach",
+      });
+    }
+    return await getPageForTargetIdOnce(opts);
+  }
 }
 
 function isTopLevelNavigationRequest(page: Page, request: Request): boolean {
