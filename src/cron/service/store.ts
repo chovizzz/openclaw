@@ -44,10 +44,18 @@ export async function ensureLoaded(
         "cron: job used legacy jobId field; normalized id in memory (run openclaw doctor --fix to persist canonical shape)",
       );
     }
-    // Persisted legacy jobs may predate the required `enabled` field.
-    // Keep runtime behavior backward-compatible without rewriting the store.
+    // Persisted legacy jobs may store `enabled` as the string "true"/"false".
+    // Coerce those the same way the create/patch input normalizer does so a
+    // disabled job is not silently re-enabled by the fallback below. Only the
+    // `enabled` field is touched: running the full input normalizer over
+    // persisted rows would also rewrite unrelated fields (for example it floors
+    // a fractional `payload.timeoutSeconds` to 0, which means "no timeout").
     if (typeof job.enabled !== "boolean") {
-      job.enabled = true;
+      const rawEnabled = raw.enabled;
+      const asString = typeof rawEnabled === "string" ? rawEnabled.trim().toLowerCase() : undefined;
+      // Persisted legacy jobs may also predate the required `enabled` field.
+      // Keep runtime behavior backward-compatible without rewriting the store.
+      job.enabled = asString !== "false";
     }
   }
   state.store = {

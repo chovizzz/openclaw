@@ -62,8 +62,15 @@ export function inferLegacyName(job: {
 }
 
 export function normalizePayloadToSystemText(payload: CronPayload) {
+  // Legacy/malformed persisted payloads may be missing the expected text field,
+  // or may still carry the pre-rename `message` key on a systemEvent payload.
   if (payload.kind === "systemEvent") {
-    return payload.text.trim();
+    const text = (payload as { text?: unknown }).text;
+    if (typeof text === "string") {
+      return text.trim();
+    }
+    const legacyMessage = (payload as { message?: unknown }).message;
+    return typeof legacyMessage === "string" ? legacyMessage.trim() : "";
   }
-  return payload.message.trim();
+  return typeof payload.message === "string" ? payload.message.trim() : "";
 }

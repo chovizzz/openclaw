@@ -148,6 +148,14 @@ export async function appendCronRunLog(
   entry: CronRunLogEntry,
   opts?: { maxBytes?: number; keepLines?: number },
 ) {
+  // Normalize the jobId on write the same way reads do (assertSafeCronRunLogJobId
+  // trims + validates). Otherwise a jobId with surrounding whitespace is stored
+  // verbatim while reads trim the filter before comparing — the row is written but
+  // never read back — and a jobId containing "/" or "\\" is rejected on read yet
+  // silently accepted on write. Normalizing here keeps the roundtrip symmetric.
+  const normalizedJobId = assertSafeCronRunLogJobId(entry.jobId);
+  const normalizedEntry =
+    normalizedJobId === entry.jobId ? entry : { ...entry, jobId: normalizedJobId };
   const resolved = path.resolve(filePath);
   const prev = writesByPath.get(resolved) ?? Promise.resolve();
   const next = prev
@@ -156,7 +164,7 @@ export async function appendCronRunLog(
       const runDir = path.dirname(resolved);
       await fs.mkdir(runDir, { recursive: true, mode: 0o700 });
       await fs.chmod(runDir, 0o700).catch(() => undefined);
-      await fs.appendFile(resolved, `${JSON.stringify(entry)}\n`, {
+      await fs.appendFile(resolved, `${JSON.stringify(normalizedEntry)}\n`, {
         encoding: "utf-8",
         mode: 0o600,
       });

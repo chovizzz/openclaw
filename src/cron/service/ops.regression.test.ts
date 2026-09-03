@@ -16,7 +16,7 @@ import {
   waitForActiveTasks,
 } from "../../process/command-queue.js";
 import { CommandLane } from "../../process/lanes.js";
-import { enqueueRun, run } from "./ops.js";
+import { enqueueRun, run, start, stop } from "./ops.js";
 import type { CronEvent } from "./state.js";
 import { createCronServiceState } from "./state.js";
 import { onTimer } from "./timer.js";
@@ -27,6 +27,42 @@ const opsRegressionFixtures = setupCronRegressionFixtures({
 });
 
 describe("cron service ops regressions", () => {
+  it("does not crash startup when a loaded job is missing state", async () => {
+    const scheduledAt = Date.now() + 60_000;
+    const store = opsRegressionFixtures.makeStorePath();
+    const state = createCronServiceState({
+      cronEnabled: true,
+      storePath: store.storePath,
+      log: noopLogger,
+      enqueueSystemEvent: vi.fn(),
+      requestHeartbeatNow: vi.fn(),
+      runIsolatedAgentJob: vi.fn(),
+    });
+    state.store = {
+      version: 1,
+      jobs: [
+        {
+          ...createIsolatedRegressionJob({
+            id: "missing-state-startup",
+            name: "missing-state-startup",
+            scheduledAt,
+            schedule: { kind: "at", at: new Date(scheduledAt).toISOString() },
+            payload: { kind: "agentTurn", message: "noop" },
+          }),
+          state: undefined as never,
+        },
+      ],
+    };
+
+    try {
+      await expect(start(state)).resolves.toBeUndefined();
+      expect(state.store.jobs[0]?.state).toEqual(expect.any(Object));
+    } finally {
+      // start() arms the scheduler timer; disarm it so it cannot fire into later tests.
+      stop(state);
+    }
+  });
+
   it("skips forced manual runs while a timer-triggered run is in progress", async () => {
     const store = opsRegressionFixtures.makeStorePath();
     const dueAt = Date.now() - 1;

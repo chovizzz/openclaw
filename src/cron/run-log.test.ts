@@ -312,4 +312,34 @@ describe("cron run log", () => {
       await writePromise.catch(() => undefined);
     });
   });
+
+  it("normalizes the jobId on write so the write/read roundtrip is symmetric", async () => {
+    await withRunLogDir("openclaw-cron-log-roundtrip-", async (dir) => {
+      const logPath = path.join(dir, "runs", "spaced-job.jsonl");
+      await appendCronRunLog(logPath, {
+        ts: 1000,
+        jobId: "  spaced-job  ",
+        action: "finished",
+        status: "ok",
+      });
+      // Reads trim the jobId filter before comparing, so the written row must be
+      // found under both the trimmed and the whitespace-padded jobId.
+      const trimmed = await readCronRunLogEntries(logPath, { jobId: "spaced-job" });
+      expect(trimmed).toHaveLength(1);
+      expect(trimmed[0]?.jobId).toBe("spaced-job");
+      const padded = await readCronRunLogEntries(logPath, { jobId: "  spaced-job  " });
+      expect(padded).toHaveLength(1);
+    });
+  });
+
+  it("rejects unsafe job ids on write the same way reads do", async () => {
+    await withRunLogDir("openclaw-cron-log-write-reject-", async (dir) => {
+      const logPath = path.join(dir, "runs", "job-1.jsonl");
+      for (const jobId of ["nested/job", "..\\job", "   "]) {
+        await expect(
+          appendCronRunLog(logPath, { ts: 1000, jobId, action: "finished", status: "ok" }),
+        ).rejects.toThrow(/invalid cron run log job id/i);
+      }
+    });
+  });
 });

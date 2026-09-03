@@ -73,6 +73,42 @@ describe("printCronList", () => {
     expect(logs.some((line) => line.includes("isolated"))).toBe(true);
   });
 
+  it("tolerates malformed rows in human-readable output", () => {
+    const { logs, runtime } = createRuntimeLogCapture();
+    const malformedJob = {
+      id: "malformed-job",
+      name: undefined,
+      enabled: true,
+      sessionTarget: undefined,
+      payload: undefined,
+      schedule: undefined,
+      state: undefined,
+    } as unknown as CronJob;
+
+    expect(() => printCronList([malformedJob], runtime)).not.toThrow();
+    expect(logs.some((line) => line.includes("malformed-job"))).toBe(true);
+  });
+
+  it("tolerates non-string agentId and model cells", () => {
+    const { logs, runtime } = createRuntimeLogCapture();
+    const numericCells = {
+      id: "numeric-cells-job",
+      name: 42,
+      enabled: true,
+      agentId: 7,
+      sessionTarget: "main",
+      schedule: { kind: "cron", expr: "0 9 * * *", tz: "Asia/Shanghai" },
+      payload: { kind: "agentTurn", message: "x", model: 5 },
+      state: {},
+    } as unknown as CronJob;
+
+    expect(() => printCronList([numericCells], runtime)).not.toThrow();
+    expect(logs.some((line) => line.includes("numeric-cells-job"))).toBe(true);
+    // tz must still be rendered verbatim for cron schedules.
+    // The column is truncated to its pad width, so match the rendered prefix.
+    expect(logs.some((line) => line.includes("cron 0 9 * * * @ Asia/Shangha"))).toBe(true);
+  });
+
   it("shows stagger label for cron schedules", () => {
     const { logs, runtime } = createRuntimeLogCapture();
     const job = createBaseJob({
