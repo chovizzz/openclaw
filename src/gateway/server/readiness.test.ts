@@ -25,6 +25,7 @@ function createManager(snapshot: ChannelRuntimeSnapshot): ChannelManager {
     startChannels: vi.fn(),
     startChannel: vi.fn(),
     stopChannel: vi.fn(),
+    isAutoRestartScheduled: vi.fn(() => false),
     markChannelLoggedOut: vi.fn(),
     isHealthMonitorEnabled: vi.fn(() => true),
     isManuallyStopped: vi.fn(() => false),

@@ -47,11 +47,13 @@ export async function recordInboundSession(params: {
   createIfMissing?: boolean;
   updateLastRoute?: InboundLastRouteUpdate;
   onRecordError: (err: unknown) => void;
+  /** Test/diagnostic hook: receives the detached session-meta task so callers can await it. */
+  trackSessionMetaTask?: (task: Promise<unknown>) => void;
 }): Promise<void> {
   const { storePath, sessionKey, ctx, groupResolution, createIfMissing } = params;
   const canonicalSessionKey = normalizeLowercaseStringOrEmpty(sessionKey);
   const runtime = await loadInboundSessionRuntime();
-  void runtime
+  const metaTask = runtime
     .recordSessionMetaFromInbound({
       storePath,
       sessionKey: canonicalSessionKey,
@@ -59,7 +61,17 @@ export async function recordInboundSession(params: {
       groupResolution,
       createIfMissing,
     })
-    .catch(params.onRecordError);
+    .catch(async (err: unknown) => {
+      try {
+        // onRecordError may throw synchronously or return a rejected promise; either would
+        // escape this detached task as an unhandled rejection and kill the gateway process.
+        await Promise.resolve(params.onRecordError(err));
+      } catch {
+        // Error reporting must not reject the detached metadata task.
+      }
+    });
+  params.trackSessionMetaTask?.(metaTask);
+  void metaTask;
 
   const update = params.updateLastRoute;
   if (!update) {

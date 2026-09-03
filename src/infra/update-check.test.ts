@@ -97,6 +97,37 @@ describe("resolveNpmChannelTag", () => {
     });
   });
 
+  it("keeps the registry deadline active while the response body stalls", async () => {
+    // Headers arrive immediately but the body never completes: without a live
+    // deadline this would hang the unattended gateway forever.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+        const signal = init?.signal;
+        return {
+          ok: true,
+          status: 200,
+          bodyUsed: false,
+          json: () =>
+            new Promise((_resolve, reject) => {
+              signal?.addEventListener("abort", () => reject(new Error("aborted by deadline")), {
+                once: true,
+              });
+            }),
+        } as unknown as Response;
+      }),
+    );
+
+    await expect(
+      fetchNpmPackageTargetStatus({ target: "latest", timeoutMs: 250 }),
+    ).resolves.toEqual({
+      target: "latest",
+      version: null,
+      nodeEngine: null,
+      error: expect.stringContaining("aborted by deadline"),
+    });
+  });
+
   it("exposes tag fetch helpers for success and http failures", async () => {
     versionByTag.latest = "1.0.4";
 

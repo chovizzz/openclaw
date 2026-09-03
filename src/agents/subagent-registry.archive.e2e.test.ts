@@ -124,6 +124,42 @@ describe("subagent registry archive behavior", () => {
     expect(run?.archiveAtMs).toBeUndefined();
   });
 
+  it("sweeps session-mode runs once their cleanup TTL expires", async () => {
+    // Session-mode runs carry no archiveAtMs, so before the TTL sweep they stayed
+    // in the registry forever and grew the map until the gateway ran out of memory.
+    mod.registerSubagentRun({
+      runId: "run-session-live",
+      childSessionKey: "agent:main:subagent:session-live",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "still running",
+      cleanup: "keep",
+      spawnMode: "session",
+    });
+    mod.addSubagentRunForTests({
+      runId: "run-session-done",
+      childSessionKey: "agent:main:subagent:session-done",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      task: "finished",
+      cleanup: "keep",
+      spawnMode: "session",
+      createdAt: Date.now(),
+      endedAt: Date.now(),
+      cleanupCompletedAt: Date.now(),
+    });
+
+    expect(mod.listSubagentRunsForRequester("agent:main:main")).toHaveLength(2);
+
+    // Still inside the 5 minute TTL.
+    await vi.advanceTimersByTimeAsync(4 * 60_000);
+    expect(mod.listSubagentRunsForRequester("agent:main:main")).toHaveLength(2);
+
+    await vi.advanceTimersByTimeAsync(2 * 60_000);
+    const remaining = mod.listSubagentRunsForRequester("agent:main:main");
+    expect(remaining.map((entry) => entry.runId)).toEqual(["run-session-live"]);
+  });
+
   it("keeps archiveAtMs unset when replacing a keep-mode run after steer restart", () => {
     mod.registerSubagentRun({
       runId: "run-old",

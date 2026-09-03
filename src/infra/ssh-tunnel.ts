@@ -165,10 +165,11 @@ export async function startSshPortForward(opts: {
   });
 
   const stop = async () => {
-    if (child.killed) {
+    // `kill()` returns false when the process never spawned (for example ENOENT),
+    // in which case there is no "exit" event coming and waiting would just stall.
+    if (child.killed || !child.kill("SIGTERM")) {
       return;
     }
-    child.kill("SIGTERM");
     await new Promise<void>((resolve) => {
       const t = setTimeout(() => {
         try {
@@ -188,6 +189,9 @@ export async function startSshPortForward(opts: {
     await Promise.race([
       waitForLocalListener(localPort, Math.max(250, opts.timeoutMs)),
       new Promise<void>((_, reject) => {
+        // spawn() reports failures (missing binary, EACCES) asynchronously via "error";
+        // without this listener the emitted error is unhandled and kills the process.
+        child.once("error", (err) => reject(err));
         child.once("exit", (code, signal) => {
           reject(new Error(`ssh exited (${code ?? "null"}${signal ? `/${signal}` : ""})`));
         });

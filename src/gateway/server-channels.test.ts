@@ -172,6 +172,31 @@ describe("server-channels auto restart", () => {
     expect(startAccount).toHaveBeenCalledTimes(11);
   });
 
+  it("claims auto-restart ownership between crash-loop attempts", async () => {
+    const startAccount = vi.fn(async () => {});
+    installTestRegistry(
+      createTestPlugin({
+        startAccount,
+      }),
+    );
+    const manager = createManager();
+
+    await manager.startChannels();
+    // Let the first crash hand off to the retry supervisor without advancing past
+    // its backoff sleep, so ownership is observable mid-recovery.
+    await vi.advanceTimersByTimeAsync(0);
+
+    // The health monitor must see the supervisor own recovery here, otherwise it
+    // resets the attempt ladder and the give-up below never happens.
+    expect(manager.isAutoRestartScheduled?.("discord", DEFAULT_ACCOUNT_ID)).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(200);
+
+    expect(startAccount).toHaveBeenCalledTimes(11);
+    // Once the supervisor gives up it releases ownership back to the monitor.
+    expect(manager.isAutoRestartScheduled?.("discord", DEFAULT_ACCOUNT_ID)).toBe(false);
+  });
+
   it("does not auto-restart after manual stop during backoff", async () => {
     const startAccount = vi.fn(async () => {});
     installTestRegistry(

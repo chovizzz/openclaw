@@ -115,6 +115,7 @@ const hoisted = vi.hoisted(() => {
     startChannels: vi.fn(async () => {}),
     startChannel: vi.fn(async () => {}),
     stopChannel: vi.fn(async () => {}),
+    isAutoRestartScheduled: vi.fn(() => false),
     markChannelLoggedOut: vi.fn(),
     isHealthMonitorEnabled: vi.fn(() => true),
     isManuallyStopped: vi.fn(() => false),

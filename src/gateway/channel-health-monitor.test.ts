@@ -13,6 +13,7 @@ function createMockChannelManager(overrides?: Partial<ChannelManager>): ChannelM
     markChannelLoggedOut: vi.fn(),
     isHealthMonitorEnabled: vi.fn(() => true),
     isManuallyStopped: vi.fn(() => false),
+    isAutoRestartScheduled: vi.fn(() => false),
     resetRestartAttempts: vi.fn(),
     ...overrides,
   };
@@ -416,6 +417,38 @@ describe("channel-health-monitor", () => {
     expect(manager.startChannel).toHaveBeenCalledTimes(1);
     await vi.advanceTimersByTimeAsync(DEFAULT_CHECK_INTERVAL_MS);
     expect(manager.startChannel).toHaveBeenCalledTimes(2);
+    monitor.stop();
+  });
+
+  it("defers to the channel supervisor while its own auto-restart is scheduled", async () => {
+    let autoRestartScheduled = true;
+    const manager = createSnapshotManager(
+      {
+        discord: {
+          default: {
+            ...managedStoppedAccount("keeps crashing"),
+            restartPending: true,
+            reconnectAttempts: 5,
+          },
+        },
+      },
+      { isAutoRestartScheduled: vi.fn(() => autoRestartScheduled) },
+    );
+
+    const monitor = await startAndRunCheck(manager);
+    expect(manager.startChannel).not.toHaveBeenCalled();
+    // Deferring must not burn the attempt ladder the supervisor is still walking.
+    expect(manager.resetRestartAttempts).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_CHECK_INTERVAL_MS);
+    expect(manager.startChannel).not.toHaveBeenCalled();
+
+    // Once the supervisor gives up it no longer owns recovery, so the monitor
+    // becomes the account's last restart owner again. Deferred passes must not
+    // have spent the cooldown budget either.
+    autoRestartScheduled = false;
+    await vi.advanceTimersByTimeAsync(DEFAULT_CHECK_INTERVAL_MS);
+    expect(manager.startChannel).toHaveBeenCalledWith("discord", "default");
     monitor.stop();
   });
 

@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { runCommandWithTimeout } from "../process/exec.js";
-import { fetchWithTimeout } from "../utils/fetch-timeout.js";
+import { buildTimeoutAbortSignal } from "../utils/fetch-timeout.js";
 import { detectPackageManager as detectPackageManagerImpl } from "./detect-package-manager.js";
 import { compareComparableSemver, parseComparableSemver } from "./semver-compare.js";
 import { channelToNpmTag, type UpdateChannel } from "./update-channels.js";
@@ -308,15 +308,18 @@ export async function fetchNpmPackageTargetStatus(params: {
 }): Promise<NpmPackageTargetStatus> {
   const timeoutMs = params.timeoutMs ?? 3500;
   const target = params.target;
+  const url = `https://registry.npmjs.org/openclaw/${encodeURIComponent(target)}`;
+  const { signal, cleanup } = buildTimeoutAbortSignal({
+    timeoutMs: Math.max(250, timeoutMs),
+  });
+  let res: Response | undefined;
   try {
-    const res = await fetchWithTimeout(
-      `https://registry.npmjs.org/openclaw/${encodeURIComponent(target)}`,
-      {},
-      Math.max(250, timeoutMs),
-    );
+    res = await fetch(url, { signal });
     if (!res.ok) {
       return { target, version: null, nodeEngine: null, error: `HTTP ${res.status}` };
     }
+    // Keep the deadline active through body consumption. Fetch resolves at
+    // headers, so clearing it earlier would leave a stalled registry body unbounded.
     const json = (await res.json()) as {
       version?: unknown;
       engines?: { node?: unknown };
@@ -326,6 +329,11 @@ export async function fetchNpmPackageTargetStatus(params: {
     return { target, version, nodeEngine };
   } catch (err) {
     return { target, version: null, nodeEngine: null, error: String(err) };
+  } finally {
+    if (res?.bodyUsed !== true) {
+      await res?.body?.cancel().catch(() => undefined);
+    }
+    cleanup();
   }
 }
 

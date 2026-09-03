@@ -13,6 +13,12 @@ const log = createSubsystemLogger("sessions/store");
 const DEFAULT_SESSION_PRUNE_AFTER_MS = 30 * 24 * 60 * 60 * 1000;
 const DEFAULT_SESSION_MAX_ENTRIES = 500;
 const DEFAULT_SESSION_ROTATE_BYTES = 10_485_760; // 10 MB
+// Deliberately kept at "warn" (upstream flipped this to "enforce" in #6a219625520).
+// Enforce prunes entries older than 30 days on every write with no active-session
+// protection, and silently drops legacy second-granularity timestamps — too
+// destructive to change by default on unattended machines. Opt in per machine
+// with `session.maintenance.mode: "enforce"`; the load-time prune below then
+// bounds the store on startup as well.
 const DEFAULT_SESSION_MAINTENANCE_MODE: SessionMaintenanceMode = "warn";
 const DEFAULT_SESSION_DISK_BUDGET_HIGH_WATER_RATIO = 0.8;
 
