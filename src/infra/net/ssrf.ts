@@ -9,6 +9,7 @@ import {
   type Ipv4SpecialUseBlockOptions,
   isIpv4Address,
   isLegacyIpv4Literal,
+  isLoopbackIpAddress,
   parseCanonicalIpAddress,
   parseLooseIpAddress,
 } from "../../shared/net/ip.js";
@@ -67,6 +68,35 @@ function normalizeHostnameAllowlist(values?: string[]): string[] {
         .map((value) => normalizeHostname(value))
         .filter((value) => value !== "*" && value !== "*." && value.length > 0),
     ),
+  );
+}
+
+function normalizeSsrFPolicyHostnames(values?: string[]): string[] {
+  if (!values || values.length === 0) {
+    return [];
+  }
+  return Array.from(
+    new Set(values.map((value) => normalizeHostname(value)).filter(Boolean)),
+  ).toSorted();
+}
+
+function normalizeSsrFPolicyForComparison(policy?: SsrFPolicy) {
+  if (!policy) {
+    return null;
+  }
+  return {
+    allowPrivateNetwork: policy.allowPrivateNetwork === true,
+    dangerouslyAllowPrivateNetwork: policy.dangerouslyAllowPrivateNetwork === true,
+    allowRfc2544BenchmarkRange: policy.allowRfc2544BenchmarkRange === true,
+    allowedHostnames: normalizeSsrFPolicyHostnames(policy.allowedHostnames),
+    hostnameAllowlist: [...normalizeHostnameAllowlist(policy.hostnameAllowlist)].toSorted(),
+  };
+}
+
+export function isSameSsrFPolicy(a?: SsrFPolicy, b?: SsrFPolicy): boolean {
+  return (
+    JSON.stringify(normalizeSsrFPolicyForComparison(a)) ===
+    JSON.stringify(normalizeSsrFPolicyForComparison(b))
   );
 }
 
@@ -203,6 +233,47 @@ function assertAllowedResolvedAddressesOrThrow(
   }
 }
 
+function isLoopbackIpAddressIncludingEmbeddedIpv4(address: string): boolean {
+  // Keep this stricter SSRF classifier local: locality/auth callers intentionally
+  // recognize only canonical loopback forms, while DNS answers need all encodings.
+  if (isLoopbackIpAddress(address)) {
+    return true;
+  }
+  const parsed = parseCanonicalIpAddress(address);
+  if (!parsed || isIpv4Address(parsed)) {
+    return false;
+  }
+  const embeddedIpv4 = extractEmbeddedIpv4FromIpv6(parsed);
+  return embeddedIpv4?.range() === "loopback";
+}
+
+function isExplicitLoopbackHostname(hostname: string): boolean {
+  return (
+    hostname === "localhost" ||
+    hostname === "localhost.localdomain" ||
+    hostname.endsWith(".localhost") ||
+    isLoopbackIpAddressIncludingEmbeddedIpv4(hostname)
+  );
+}
+
+// Exact-host trust (`allowedHostnames`) may legitimately allow RFC1918 / tailnet /
+// private-DNS targets, but it must not turn loopback DNS rebinding into an implicit
+// allow. Hostnames that are themselves loopback literals or localhost names keep
+// resolving to loopback.
+function assertAllowedTrustedHostnameResolvedAddressesOrThrow(
+  results: readonly LookupAddress[],
+  hostname: string,
+): void {
+  if (isExplicitLoopbackHostname(hostname)) {
+    return;
+  }
+  for (const entry of results) {
+    if (isLoopbackIpAddressIncludingEmbeddedIpv4(entry.address)) {
+      throw new SsrFBlockedError(BLOCKED_RESOLVED_IP_MESSAGE);
+    }
+  }
+}
+
 function normalizeLookupResults(results: LookupResult): readonly LookupAddress[] {
   if (Array.isArray(results)) {
     return results;
@@ -233,6 +304,10 @@ export function createPinnedLookup(params: {
     address,
     family: address.includes(":") ? 6 : 4,
   }));
+  // Prefer IPv4 when the caller expresses no family preference so pinned
+  // round-robin does not drift onto IPv6 records on subsequent attempts.
+  const ipv4Records = records.filter((entry) => entry.family === 4);
+  const automaticRecords = ipv4Records.length > 0 ? ipv4Records : records;
   let index = 0;
 
   return ((host: string, options?: unknown, callback?: unknown) => {
@@ -258,8 +333,8 @@ export function createPinnedLookup(params: {
     const candidates =
       requestedFamily === 4 || requestedFamily === 6
         ? records.filter((entry) => entry.family === requestedFamily)
-        : records;
-    const usable = candidates.length > 0 ? candidates : records;
+        : automaticRecords;
+    const usable = candidates.length > 0 ? candidates : automaticRecords;
     // Match dns.lookup's asynchronous callback contract so connection errors
     // cannot fire before the socket owner attaches its error listener.
     if (opts.all) {
@@ -357,6 +432,8 @@ export async function resolvePinnedHostnameWithPolicy(
   if (!skipPrivateNetworkChecks) {
     // Phase 2: re-check DNS answers so public hostnames cannot pivot to private targets.
     assertAllowedResolvedAddressesOrThrow(results, params.policy);
+  } else if (!isPrivateNetworkAllowedByPolicy(params.policy)) {
+    assertAllowedTrustedHostnameResolvedAddressesOrThrow(results, normalized);
   }
 
   // Prefer addresses returned as IPv4 by DNS family metadata before other
@@ -407,6 +484,8 @@ function resolvePinnedDispatcherLookup(
   }));
   if (!shouldSkipPrivateNetworkChecks(pinned.hostname, policy)) {
     assertAllowedResolvedAddressesOrThrow(records, policy);
+  } else if (!isPrivateNetworkAllowedByPolicy(policy)) {
+    assertAllowedTrustedHostnameResolvedAddressesOrThrow(records, pinned.hostname);
   }
   return createPinnedLookup({
     hostname: pinned.hostname,

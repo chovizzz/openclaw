@@ -114,6 +114,39 @@ describe("browser manage output", () => {
     expect(output).not.toContain("port: 0");
   });
 
+  it("redacts remote cdpUrl details in browser profiles output", async () => {
+    getBrowserManageCallBrowserRequestMock().mockImplementation(async (_opts: unknown, req) =>
+      req.path === "/profiles"
+        ? {
+            profiles: [
+              {
+                name: "remote",
+                driver: "openclaw",
+                transport: "cdp",
+                running: true,
+                tabCount: 1,
+                isDefault: false,
+                isRemote: true,
+                cdpPort: null,
+                cdpUrl:
+                  "https://alice:supersecretpasswordvalue1234@example.com/chrome?token=supersecrettokenvalue1234567890",
+                color: "#00AA00",
+              },
+            ],
+          }
+        : {},
+    );
+
+    const program = createBrowserManageProgram();
+    await program.parseAsync(["browser", "profiles"], { from: "user" });
+
+    const output = getBrowserCliRuntime().log.mock.calls.at(-1)?.[0] as string;
+    expect(output).toContain("cdpUrl: https://example.com/chrome?token=supers\u20267890");
+    expect(output).not.toContain("alice");
+    expect(output).not.toContain("supersecretpasswordvalue1234");
+    expect(output).not.toContain("supersecrettokenvalue1234567890");
+  });
+
   it("shows chrome-mcp transport after creating an existing-session profile", async () => {
     getBrowserManageCallBrowserRequestMock().mockImplementation(async (_opts: unknown, req) =>
       req.path === "/profiles/create"

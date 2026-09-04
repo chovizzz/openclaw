@@ -192,6 +192,61 @@ describe("ensureSandboxBrowser create args", () => {
     expect(result?.noVncUrl).toBeUndefined();
   });
 
+  it("passes the browser SSRF policy to the sandbox bridge", async () => {
+    await ensureSandboxBrowser({
+      scopeKey: "session:test",
+      workspaceDir: "/tmp/workspace",
+      agentWorkspaceDir: "/tmp/workspace",
+      cfg: buildConfig(false),
+      ssrfPolicy: { dangerouslyAllowPrivateNetwork: true },
+    });
+
+    expect(bridgeMocks.startBrowserBridgeServer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        resolved: expect.objectContaining({
+          ssrfPolicy: { dangerouslyAllowPrivateNetwork: true },
+        }),
+      }),
+    );
+  });
+
+  it("recreates a cached bridge when the SSRF policy changes", async () => {
+    const existingBridge = {
+      server: {} as never,
+      port: 19000,
+      baseUrl: "http://127.0.0.1:19000",
+      state: {
+        resolved: {
+          profiles: { openclaw: { cdpPort: 49100, color: "#FF4500" } },
+          ssrfPolicy: { dangerouslyAllowPrivateNetwork: true },
+        },
+      },
+    };
+    BROWSER_BRIDGES.set("session:test", {
+      bridge: existingBridge,
+      containerName: "openclaw-sbx-browser-session-test-0661d10a",
+      authToken: "test-bridge-token",
+    });
+    dockerMocks.dockerContainerState.mockResolvedValue({ exists: true, running: true });
+
+    await ensureSandboxBrowser({
+      scopeKey: "session:test",
+      workspaceDir: "/tmp/workspace",
+      agentWorkspaceDir: "/tmp/workspace",
+      cfg: buildConfig(false),
+      ssrfPolicy: { allowedHostnames: ["example.com"] },
+    });
+
+    expect(bridgeMocks.stopBrowserBridgeServer).toHaveBeenCalledWith(existingBridge.server);
+    expect(bridgeMocks.startBrowserBridgeServer).toHaveBeenCalledWith(
+      expect.objectContaining({
+        resolved: expect.objectContaining({
+          ssrfPolicy: { allowedHostnames: ["example.com"] },
+        }),
+      }),
+    );
+  });
+
   it("mounts the main workspace read-only when workspaceAccess is none", async () => {
     const cfg = buildConfig(false);
     cfg.workspaceAccess = "none";

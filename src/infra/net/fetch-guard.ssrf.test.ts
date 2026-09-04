@@ -490,6 +490,21 @@ describe("fetchWithSsrFGuard hardening", () => {
     await result.release();
   });
 
+  it("still enforces SSRF policy when DNS pinning is disabled", async () => {
+    const lookupFn = vi.fn(async () => [{ address: "10.0.0.8", family: 4 }]) as unknown as LookupFn;
+    const fetchImpl = vi.fn(async () => okResponse());
+
+    await expect(
+      fetchWithSsrFGuard({
+        url: "https://rebind.example/resource",
+        fetchImpl,
+        lookupFn,
+        pinDns: false,
+      }),
+    ).rejects.toThrow(/private|internal|blocked/i);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("blocks redirect chains that hop to private hosts", async () => {
     const lookupFn = createPublicLookup();
     const fetchImpl = await expectRedirectFailure({

@@ -112,7 +112,7 @@ describe("browser navigation guard", () => {
   });
 
   it("allows blocked hostnames when explicitly allowed", async () => {
-    const lookupFn = createLookupFn("127.0.0.1");
+    const lookupFn = createLookupFn("10.1.2.3");
     await expect(
       assertBrowserNavigationAllowed({
         url: "http://agent.internal:3000",
@@ -123,6 +123,48 @@ describe("browser navigation guard", () => {
       }),
     ).resolves.toBeUndefined();
     expect(lookupFn).toHaveBeenCalledWith("agent.internal", { all: true });
+  });
+
+  it("blocks an explicitly allowed hostname that rebinds to loopback", async () => {
+    // Exact-host trust may reach RFC1918/tailnet targets, but must not become an
+    // implicit allow for loopback DNS rebinding.
+    const lookupFn = createLookupFn("127.0.0.1");
+    await expect(
+      assertBrowserNavigationAllowed({
+        url: "http://agent.internal:3000",
+        ssrfPolicy: {
+          allowedHostnames: ["agent.internal"],
+        },
+        lookupFn,
+      }),
+    ).rejects.toBeInstanceOf(SsrFBlockedError);
+  });
+
+  it("still allows explicitly allowed loopback hostnames to reach loopback", async () => {
+    const lookupFn = createLookupFn("127.0.0.1");
+    await expect(
+      assertBrowserNavigationAllowed({
+        url: "http://localhost:9222",
+        ssrfPolicy: {
+          allowedHostnames: ["localhost"],
+        },
+        lookupFn,
+      }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("still allows loopback when the policy allows private networks", async () => {
+    const lookupFn = createLookupFn("127.0.0.1");
+    await expect(
+      assertBrowserNavigationAllowed({
+        url: "http://agent.internal:3000",
+        ssrfPolicy: {
+          allowedHostnames: ["agent.internal"],
+          dangerouslyAllowPrivateNetwork: true,
+        },
+        lookupFn,
+      }),
+    ).resolves.toBeUndefined();
   });
 
   it("blocks hostnames that resolve to private addresses by default", async () => {

@@ -49,6 +49,115 @@ describe("ssrf pinning", () => {
     );
   });
 
+  it("keeps automatic pinned lookups on IPv4 when both address families are available", async () => {
+    const lookup = createPinnedLookup({
+      hostname: "api.anthropic.com",
+      addresses: ["160.79.104.10", "2607:6bc0::10"],
+    });
+    const lookupDefault = () =>
+      new Promise<{ address: string; family?: number }>((resolve, reject) => {
+        lookup("api.anthropic.com", (err, address, family) => {
+          if (err) {
+            reject(err);
+          } else {
+            resolve({ address: address, family });
+          }
+        });
+      });
+    const lookupWithOptions = (options: { family?: number }) =>
+      new Promise<{ address: string; family?: number }>((resolve, reject) => {
+        lookup("api.anthropic.com", options, (err, address, family) => {
+          if (err) {
+            reject(err);
+          } else {
+            resolve({ address: address, family });
+          }
+        });
+      });
+
+    await expect(lookupDefault()).resolves.toEqual({ address: "160.79.104.10", family: 4 });
+    await expect(lookupDefault()).resolves.toEqual({ address: "160.79.104.10", family: 4 });
+
+    const all = await new Promise<unknown>((resolve, reject) => {
+      lookup("api.anthropic.com", { all: true }, (err, addresses) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(addresses);
+        }
+      });
+    });
+    expect(all).toEqual([{ address: "160.79.104.10", family: 4 }]);
+
+    // Reverse check: an explicit family=6 request must still receive the IPv6 record.
+    await expect(lookupWithOptions({ family: 6 })).resolves.toEqual({
+      address: "2607:6bc0::10",
+      family: 6,
+    });
+  });
+
+  it("falls back to IPv6 records when the pin has no IPv4 address", async () => {
+    const lookup = createPinnedLookup({
+      hostname: "v6only.example",
+      addresses: ["2607:6bc0::10", "2607:6bc0::11"],
+    });
+    const all = await new Promise<unknown>((resolve, reject) => {
+      lookup("v6only.example", { all: true }, (err, addresses) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(addresses);
+        }
+      });
+    });
+    expect(all).toEqual([
+      { address: "2607:6bc0::10", family: 6 },
+      { address: "2607:6bc0::11", family: 6 },
+    ]);
+  });
+
+  it("still resolves trusted hostnames that map to non-loopback private addresses", async () => {
+    const lookup = vi.fn(async () => [{ address: "10.1.2.3", family: 4 }]) as unknown as LookupFn;
+    const pinned = await resolvePinnedHostnameWithPolicy("nas.corp.example", {
+      lookupFn: lookup,
+      policy: { allowedHostnames: ["nas.corp.example"] },
+    });
+    expect(pinned.addresses).toEqual(["10.1.2.3"]);
+  });
+
+  it("still resolves explicitly trusted loopback hostnames to loopback", async () => {
+    const lookup = vi.fn(async () => [{ address: "127.0.0.1", family: 4 }]) as unknown as LookupFn;
+    for (const host of ["localhost", "127.0.0.1", "gateway.localhost"]) {
+      const pinned = await resolvePinnedHostnameWithPolicy(host, {
+        lookupFn: lookup,
+        policy: { allowedHostnames: [host] },
+      });
+      expect(pinned.addresses).toEqual(["127.0.0.1"]);
+    }
+  });
+
+  it("blocks loopback rebinding for a trusted non-loopback hostname", async () => {
+    const lookup = vi.fn(async () => [{ address: "127.0.0.1", family: 4 }]) as unknown as LookupFn;
+    await expect(
+      resolvePinnedHostnameWithPolicy("rebind.example", {
+        lookupFn: lookup,
+        policy: { allowedHostnames: ["rebind.example"] },
+      }),
+    ).rejects.toBeInstanceOf(SsrFBlockedError);
+  });
+
+  it("keeps loopback allowed for trusted hostnames when private network is allowed", async () => {
+    const lookup = vi.fn(async () => [{ address: "127.0.0.1", family: 4 }]) as unknown as LookupFn;
+    const pinned = await resolvePinnedHostnameWithPolicy("chrome.example", {
+      lookupFn: lookup,
+      policy: {
+        allowedHostnames: ["chrome.example"],
+        dangerouslyAllowPrivateNetwork: true,
+      },
+    });
+    expect(pinned.addresses).toEqual(["127.0.0.1"]);
+  });
+
   it.each([
     { name: "RFC1918 private address", address: "10.0.0.8" },
     { name: "RFC2544 benchmarking range", address: "198.18.0.1" },
@@ -252,10 +361,9 @@ describe("ssrf pinning", () => {
 
       expect(callback).not.toHaveBeenCalled();
       await flushLookupCallback();
-      expect(callback).toHaveBeenCalledWith(null, [
-        { address: "149.154.167.220", family: 4 },
-        { address: "2001:67c:4e8:f004::9", family: 6 },
-      ]);
+      // Automatic (no explicit family) lookups prefer IPv4 records when any exist,
+      // so dual-stack pins do not drift onto IPv6 on later attempts.
+      expect(callback).toHaveBeenCalledWith(null, [{ address: "149.154.167.220", family: 4 }]);
     });
 
     it("defers callbacks for explicit address families", async () => {
