@@ -242,4 +242,29 @@ describe("memory dreaming host helpers", () => {
       },
     });
   });
+
+  it("defaults storage mode to separate so phase blocks do not pollute daily memory files", () => {
+    const resolved = resolveMemoryDreamingConfig({
+      pluginConfig: {},
+    });
+
+    expect(resolved.storage).toEqual({
+      mode: "separate",
+      separateReports: false,
+    });
+  });
+
+  it("preserves explicit inline storage mode for callers that opt in", () => {
+    const resolved = resolveMemoryDreamingConfig({
+      pluginConfig: {
+        dreaming: {
+          storage: {
+            mode: "inline",
+          },
+        },
+      },
+    });
+
+    expect(resolved.storage.mode).toBe("inline");
+  });
 });

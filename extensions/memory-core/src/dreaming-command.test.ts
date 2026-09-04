@@ -52,7 +52,10 @@ function createHarness(initialConfig: OpenClawConfig = {}) {
   };
 }
 
-function createCommandContext(args?: string): PluginCommandContext {
+function createCommandContext(
+  args?: string,
+  overrides?: Partial<PluginCommandContext>,
+): PluginCommandContext {
   return {
     channel: "webchat",
     isAuthorizedSender: true,
@@ -62,6 +65,7 @@ function createCommandContext(args?: string): PluginCommandContext {
     requestConversationBinding: async () => ({ status: "error", message: "unsupported" }),
     detachConversationBinding: async () => ({ removed: false }),
     getCurrentConversationBinding: async () => null,
+    ...overrides,
   };
 }
 
@@ -150,5 +154,41 @@ describe("memory-core /dreaming command", () => {
 
     expect(result.text).toContain("Usage: /dreaming status");
     expect(runtime.config.writeConfigFile).not.toHaveBeenCalled();
+  });
+
+  it("refuses to toggle dreaming for a gateway client without operator.admin", async () => {
+    const harness = createHarness();
+
+    const result = await harness.command.handler(
+      createCommandContext("on", { gatewayClientScopes: ["operator.read"] }),
+    );
+
+    expect(result).toEqual({
+      text: "⚠️ /dreaming on|off requires operator.admin for gateway clients.",
+    });
+    expect(harness.runtime.config.writeConfigFile).not.toHaveBeenCalled();
+    expect(resolveStoredDreaming(harness.getRuntimeConfig()).enabled).toBeUndefined();
+  });
+
+  it("allows a gateway client holding operator.admin to toggle dreaming", async () => {
+    const harness = createHarness();
+
+    await harness.command.handler(
+      createCommandContext("on", { gatewayClientScopes: ["operator.admin"] }),
+    );
+
+    expect(harness.runtime.config.writeConfigFile).toHaveBeenCalledTimes(1);
+    expect(resolveStoredDreaming(harness.getRuntimeConfig()).enabled).toBe(true);
+  });
+
+  it("leaves read-only dreaming subcommands ungated for gateway clients", async () => {
+    const harness = createHarness();
+
+    const result = await harness.command.handler(
+      createCommandContext("status", { gatewayClientScopes: ["operator.read"] }),
+    );
+
+    expect(result.text).toContain("Dreaming status:");
+    expect(harness.runtime.config.writeConfigFile).not.toHaveBeenCalled();
   });
 });

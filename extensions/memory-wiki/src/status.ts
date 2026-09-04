@@ -217,8 +217,14 @@ export async function resolveMemoryWikiStatus(
 ): Promise<MemoryWikiStatus> {
   const exists = deps?.pathExists ?? pathExists;
   const vaultExists = await exists(config.vault.path);
+  // `bridge.readMemoryArtifacts` is the documented opt-out for reading memory
+  // artifacts. The sync path (bridge.ts) already honors it; status must too,
+  // otherwise the wiki_status tool keeps enumerating artifacts with imports off.
   const bridgePublicArtifactCount =
-    deps?.appConfig && config.vaultMode === "bridge" && config.bridge.enabled
+    deps?.appConfig &&
+    config.vaultMode === "bridge" &&
+    config.bridge.enabled &&
+    config.bridge.readMemoryArtifacts
       ? (
           await (deps.listPublicArtifacts ?? listActiveMemoryPublicArtifacts)({
             cfg: deps.appConfig,

@@ -19,6 +19,8 @@ import {
   registerMemoryRuntime,
   resolveMemoryFlushPlan,
   restoreMemoryPluginState,
+  setMemorySearchManagerActive,
+  type MemoryPluginPublicArtifact,
 } from "./memory-state.js";
 
 function createMemoryRuntime() {
@@ -81,6 +83,7 @@ function registerMemoryState(params: {
 describe("memory plugin state", () => {
   afterEach(() => {
     clearMemoryPluginState();
+    setMemorySearchManagerActive(false);
   });
 
   it("returns empty defaults when no memory plugin state is registered", () => {
@@ -284,5 +287,95 @@ describe("memory plugin state", () => {
     clearMemoryPluginState();
 
     expectClearedMemoryState();
+  });
+
+  it("keeps the CLI teardown gate open across a plugin registry reload", () => {
+    registerMemoryCapability("memory-core", { runtime: createMemoryRuntime() });
+    expect(hasMemoryRuntime()).toBe(true);
+
+    // A registry reload wipes the capability while sqlite handles and embedding
+    // providers may still be open; the teardown gate must stay open.
+    setMemorySearchManagerActive(true);
+    clearMemoryPluginState();
+
+    expect(getMemoryRuntime()).toBeUndefined();
+    expect(hasMemoryRuntime()).toBe(true);
+
+    setMemorySearchManagerActive(false);
+    expect(hasMemoryRuntime()).toBe(false);
+  });
+
+  it("drops malformed public memory artifacts instead of crashing the sort", async () => {
+    // Record-shaped artifact as shipped by drifted third-party memory plugins:
+    // none of the file-backed fields the sort dereferences.
+    const recordShapedArtifact = {
+      id: "mem0:memory:1",
+      type: "memory",
+      title: "A memory",
+      content: "memory text",
+    } as unknown as MemoryPluginPublicArtifact;
+
+    registerMemoryCapability("openclaw-mem0", {
+      publicArtifacts: {
+        async listArtifacts() {
+          return [
+            recordShapedArtifact,
+            {
+              kind: "memory-root",
+              workspaceDir: "/tmp/workspace",
+              relativePath: "MEMORY.md",
+              absolutePath: "/tmp/workspace/MEMORY.md",
+              agentIds: ["main"],
+              contentType: "markdown" as const,
+            },
+          ];
+        },
+      },
+    });
+
+    await expect(listActiveMemoryPublicArtifacts({ cfg: {} as never })).resolves.toEqual([
+      {
+        kind: "memory-root",
+        workspaceDir: "/tmp/workspace",
+        relativePath: "MEMORY.md",
+        absolutePath: "/tmp/workspace/MEMORY.md",
+        agentIds: ["main"],
+        contentType: "markdown",
+      },
+    ]);
+  });
+
+  it("ignores a non-array public artifact listing", async () => {
+    registerMemoryCapability("openclaw-mem0", {
+      publicArtifacts: {
+        async listArtifacts() {
+          return { artifacts: [] } as unknown as MemoryPluginPublicArtifact[];
+        },
+      },
+    });
+
+    await expect(listActiveMemoryPublicArtifacts({ cfg: {} as never })).resolves.toEqual([]);
+  });
+
+  it("tolerates a valid artifact with a missing agentIds array", async () => {
+    registerMemoryCapability("memory-core", {
+      publicArtifacts: {
+        async listArtifacts() {
+          return [
+            {
+              kind: "memory-root",
+              workspaceDir: "/tmp/workspace",
+              relativePath: "MEMORY.md",
+              absolutePath: "/tmp/workspace/MEMORY.md",
+              contentType: "markdown" as const,
+            } as unknown as MemoryPluginPublicArtifact,
+          ];
+        },
+      },
+    });
+
+    await expect(listActiveMemoryPublicArtifacts({ cfg: {} as never })).resolves.toEqual([
+      expect.objectContaining({ agentIds: [] }),
+    ]);
   });
 });

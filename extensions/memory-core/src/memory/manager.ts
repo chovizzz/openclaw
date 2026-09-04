@@ -622,14 +622,20 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
     if (this.closed) {
       return;
     }
-    await this.ensureProviderInitialized();
     if (this.syncing) {
       if (params?.sessionFiles?.some((sessionFile) => sessionFile.trim().length > 0)) {
         return this.enqueueTargetedSessionSync(params.sessionFiles);
       }
       return this.syncing;
     }
-    this.syncing = this.runSyncWithReadonlyRecovery(params).finally(() => {
+    // Provider init must happen *inside* the tracked `this.syncing` promise.
+    // `close()` snapshots `this.syncing` to know what to wait for; if init ran
+    // before the promise existed, a provider created during shutdown would be
+    // invisible to close() and leak its process-level resources.
+    this.syncing = (async () => {
+      await this.ensureProviderInitialized();
+      await this.runSyncWithReadonlyRecovery(params);
+    })().finally(() => {
       this.syncing = null;
     });
     return this.syncing ?? Promise.resolve();
@@ -877,7 +883,6 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
       return;
     }
     this.closed = true;
-    const pendingSync = this.syncing;
     const pendingProviderInit = this.providerInitPromise;
     if (this.watchTimer) {
       clearTimeout(this.watchTimer);
@@ -899,8 +904,80 @@ export class MemoryIndexManager extends MemoryManagerEmbeddingOps implements Mem
       this.sessionUnsubscribe();
       this.sessionUnsubscribe = null;
     }
-    await awaitPendingManagerWork({ pendingSync, pendingProviderInit });
-    this.db.close();
-    INDEX_CACHE.delete(this.cacheKey);
+    // Provider fallback and readonly recovery can swap `this.provider` while
+    // close() is awaiting pending work. Remember every provider we observe and
+    // drain the set after sync has settled, so a provider created *during*
+    // shutdown is closed too instead of leaking its native/model handles.
+    const closeErrors = new Map<EmbeddingProvider, unknown>();
+    const providersToClose = new Set<EmbeddingProvider>();
+    const rememberCurrentProvider = () => {
+      const provider = this.provider;
+      if (provider) {
+        providersToClose.add(provider);
+      }
+      // Providers we already swapped away from (fallback) are unreachable via
+      // `this.provider` but still hold resources.
+      for (const retired of this.retiredProviders) {
+        providersToClose.add(retired);
+      }
+      this.retiredProviders.clear();
+    };
+    const closeProvider = async (provider: EmbeddingProvider) => {
+      try {
+        await provider.close?.();
+        closeErrors.delete(provider);
+        // Detach so the next drain pass does not re-close the same provider.
+        if (this.provider === provider) {
+          this.provider = null;
+        }
+      } catch (err) {
+        // Keep it queued: a second attempt runs in the next drain pass.
+        closeErrors.set(provider, err);
+        providersToClose.add(provider);
+      } finally {
+        rememberCurrentProvider();
+      }
+    };
+    const drainTrackedProviders = async () => {
+      // Bounded at 2 passes: one to close what we saw, one to catch providers
+      // that appeared (or failed) during the first pass. Unbounded retries
+      // could hang shutdown behind a provider that always throws.
+      for (let attempt = 0; attempt < 2 && providersToClose.size > 0; attempt += 1) {
+        const providers = Array.from(providersToClose);
+        providersToClose.clear();
+        try {
+          for (const provider of providers) {
+            await closeProvider(provider);
+          }
+        } finally {
+          rememberCurrentProvider();
+        }
+      }
+    };
+
+    await awaitPendingManagerWork({ pendingProviderInit });
+    rememberCurrentProvider();
+    try {
+      await awaitPendingManagerWork({ pendingSync: this.syncing });
+      rememberCurrentProvider();
+      await drainTrackedProviders();
+    } finally {
+      this.db.close();
+      // Only evict our own entry: draining providers widens the window in which
+      // a replacement manager could have been cached under the same key.
+      if (INDEX_CACHE.get(this.cacheKey) === this) {
+        INDEX_CACHE.delete(this.cacheKey);
+      }
+    }
+    for (const [provider, err] of closeErrors) {
+      log.warn(`memory close: provider ${provider.id} failed to close: ${formatErrorMessage(err)}`);
+    }
+    // Surface the failure to the caller: the db and cache entry are already
+    // released by the `finally` above, so this only reports the leak. Keyed on
+    // `size`, not on truthiness of the value: a provider may reject with
+    // undefined/null/0 and that must still surface.
+    if (closeErrors.size > 0) {
+      throw closeErrors.values().next().value;
+    }
   }
 }

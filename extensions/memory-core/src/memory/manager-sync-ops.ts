@@ -110,6 +110,13 @@ export abstract class MemoryManagerSyncOps {
   protected abstract readonly workspaceDir: string;
   protected abstract readonly settings: ResolvedMemorySearchConfig;
   protected provider: EmbeddingProvider | null = null;
+  /**
+   * Providers this manager has swapped away from (embedding-provider fallback).
+   * They may still hold process-level resources, and `this.provider` no longer
+   * points at them, so `close()` drains this set alongside the current provider.
+   * Not closed at swap time: in-flight embedding work may still be using them.
+   */
+  protected readonly retiredProviders: Set<EmbeddingProvider> = new Set();
   protected fallbackFrom?: EmbeddingProviderId;
   protected providerRuntime?: EmbeddingProviderRuntime;
   protected abstract batch: {
@@ -1077,6 +1084,12 @@ export abstract class MemoryManagerSyncOps {
     });
     this.fallbackFrom = fallbackState.fallbackFrom;
     this.fallbackReason = fallbackState.fallbackReason;
+    // Retire the provider we are swapping away from so close() can still reach
+    // it; otherwise the outgoing provider's resources are leaked for good.
+    const previousProvider = this.provider;
+    if (previousProvider && previousProvider !== fallbackState.provider) {
+      this.retiredProviders.add(previousProvider);
+    }
     this.provider = fallbackState.provider;
     this.providerRuntime = fallbackState.providerRuntime;
     this.providerKey = this.computeProviderKey();

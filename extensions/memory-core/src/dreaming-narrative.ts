@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
@@ -222,6 +223,29 @@ export async function appendNarrativeEntry(params: {
   return dreamsPath;
 }
 
+/**
+ * Deterministic subagent session key for a dream narrative run.
+ *
+ * Exported so the phase sweep can reconstruct the exact key and re-attempt
+ * cleanup after the phase settles: `generateAndAppendDreamNarrative` swallows a
+ * failing `deleteSession`, and without a second attempt that transient session
+ * would be leaked for the lifetime of the subagent host.
+ *
+ * Callers must pass the same `nowMs` the narrative run used, so the sweep
+ * normalizes `nowMs` once and threads it through every phase.
+ */
+export function buildNarrativeSessionKey(params: {
+  workspaceDir: string;
+  phase: NarrativePhaseData["phase"];
+  nowMs: number;
+}): string {
+  // Namespaced by workspace: two workspaces sweeping at the same normalized
+  // timestamp would otherwise share one session key, and the sweep's follow-up
+  // delete would tear down the other workspace's live narrative session.
+  const workspaceHash = createHash("sha1").update(params.workspaceDir).digest("hex").slice(0, 12);
+  return `dreaming-narrative-${params.phase}-${workspaceHash}-${params.nowMs}`;
+}
+
 // ── Orchestrator ───────────────────────────────────────────────────────
 
 export async function generateAndAppendDreamNarrative(params: {
@@ -238,7 +262,11 @@ export async function generateAndAppendDreamNarrative(params: {
     return;
   }
 
-  const sessionKey = `dreaming-narrative-${params.data.phase}-${nowMs}`;
+  const sessionKey = buildNarrativeSessionKey({
+    workspaceDir: params.workspaceDir,
+    phase: params.data.phase,
+    nowMs,
+  });
   const message = buildNarrativePrompt(params.data);
 
   try {
@@ -290,11 +318,16 @@ export async function generateAndAppendDreamNarrative(params: {
       `memory-core: narrative generation failed for ${params.data.phase} phase: ${formatErrorMessage(err)}`,
     );
   } finally {
-    // Clean up the transient session.
+    // Clean up the transient session. Never rethrow: narrative generation is
+    // best-effort. But do log — a swallowed failure here leaks the session, and
+    // the phase sweep's follow-up delete is the only remaining chance to
+    // reclaim it.
     try {
       await params.subagent.deleteSession({ sessionKey });
-    } catch {
-      // Ignore cleanup failures.
+    } catch (cleanupErr) {
+      params.logger.warn(
+        `memory-core: narrative session cleanup failed for ${params.data.phase} phase: ${formatErrorMessage(cleanupErr)}`,
+      );
     }
   }
 }

@@ -1,6 +1,9 @@
 import type { OpenClawConfig } from "../config/config.js";
 import type { MemoryCitationsMode } from "../config/types.memory.js";
+import { createSubsystemLogger } from "../logging/subsystem.js";
 import type { MemorySearchManager } from "../memory-host-sdk/runtime-files.js";
+
+const log = createSubsystemLogger("plugins/memory-state");
 
 export type MemoryPromptSectionBuilder = (params: {
   availableTools: Set<string>;
@@ -258,24 +261,65 @@ export function getMemoryRuntime(): MemoryPluginRuntime | undefined {
   return memoryPluginState.capability?.capability.runtime ?? memoryPluginState.runtime;
 }
 
+// Armed once this process has handed out a memory search manager, and only
+// disarmed by a successful `closeActiveMemorySearchManagers()`. A plugin
+// registry reload clears the memory capability (`clearMemoryPluginState()`),
+// which would otherwise make `getMemoryRuntime()` undefined while sqlite
+// handles and embedding providers are still open — and the CLI teardown in
+// `src/cli/run-main.ts` gates on `hasMemoryRuntime()`, so it would skip the
+// cleanup and leak them for the rest of the process. Deliberately NOT reset by
+// `clearMemoryPluginState()`: surviving that reset is the whole point.
+let memorySearchManagerActive = false;
+
+export function setMemorySearchManagerActive(active: boolean): void {
+  memorySearchManagerActive = active;
+}
+
 export function hasMemoryRuntime(): boolean {
-  return getMemoryRuntime() !== undefined;
+  return memorySearchManagerActive || getMemoryRuntime() !== undefined;
 }
 
 function cloneMemoryPublicArtifact(
   artifact: MemoryPluginPublicArtifact,
 ): MemoryPluginPublicArtifact {
+  const agentIds = Array.isArray(artifact.agentIds) ? artifact.agentIds : [];
   return {
     ...artifact,
-    agentIds: [...artifact.agentIds],
+    agentIds: [...agentIds],
   };
+}
+
+// The sort below dereferences these fields, so a plugin-supplied artifact
+// missing any of them would crash every status/bridge consumer with
+// "Cannot read properties of undefined (reading 'localeCompare')".
+function isValidMemoryPublicArtifact(
+  artifact: MemoryPluginPublicArtifact | null | undefined,
+): artifact is MemoryPluginPublicArtifact {
+  return (
+    typeof artifact?.kind === "string" &&
+    typeof artifact.workspaceDir === "string" &&
+    typeof artifact.relativePath === "string" &&
+    typeof artifact.absolutePath === "string" &&
+    typeof artifact.contentType === "string"
+  );
 }
 
 export async function listActiveMemoryPublicArtifacts(params: {
   cfg: OpenClawConfig;
 }): Promise<MemoryPluginPublicArtifact[]> {
-  const artifacts =
+  const pluginId = memoryPluginState.capability?.pluginId;
+  const listed =
     (await memoryPluginState.capability?.capability.publicArtifacts?.listArtifacts(params)) ?? [];
+  if (!Array.isArray(listed)) {
+    log.warn(`ignoring public memory artifacts from plugin "${pluginId}": not an array`);
+    return [];
+  }
+  const artifacts = listed.filter(isValidMemoryPublicArtifact);
+  if (artifacts.length < listed.length) {
+    log.warn(
+      `ignoring ${listed.length - artifacts.length} malformed public memory artifact(s) from plugin "${pluginId}": artifacts must include string kind, workspaceDir, relativePath, absolutePath, and contentType`,
+    );
+  }
   return artifacts.map(cloneMemoryPublicArtifact).toSorted((left, right) => {
     const workspaceOrder = left.workspaceDir.localeCompare(right.workspaceDir);
     if (workspaceOrder !== 0) {

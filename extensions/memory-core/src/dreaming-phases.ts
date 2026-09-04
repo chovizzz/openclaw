@@ -23,7 +23,11 @@ import {
   normalizeLowercaseStringOrEmpty,
 } from "openclaw/plugin-sdk/text-runtime";
 import { writeDailyDreamingPhaseBlock } from "./dreaming-markdown.js";
-import { generateAndAppendDreamNarrative, type NarrativePhaseData } from "./dreaming-narrative.js";
+import {
+  buildNarrativeSessionKey,
+  generateAndAppendDreamNarrative,
+  type NarrativePhaseData,
+} from "./dreaming-narrative.js";
 import {
   asRecord,
   formatErrorMessage,
@@ -1479,19 +1483,52 @@ export async function runDreamingSweepPhases(params: {
   subagent?: Parameters<typeof generateAndAppendDreamNarrative>[0]["subagent"];
   nowMs?: number;
 }): Promise<void> {
+  // Normalize once so every phase timestamp - and therefore every narrative
+  // session key - is known to this function and can be cleaned up below.
+  const sweepNowMs: number = Number.isFinite(params.nowMs) ? (params.nowMs as number) : Date.now();
+  const subagent = params.subagent;
+
+  // Best-effort second attempt at deleting a phase's narrative session.
+  // `generateAndAppendDreamNarrative` already tries once in its `finally` and
+  // swallows failures; running again after the phase has fully settled reclaims
+  // sessions that were still busy at that moment. Deleting an already-deleted
+  // (or never-created) key is a no-op.
+  const deleteNarrativeSession = async (phase: NarrativePhaseData["phase"]) => {
+    if (!subagent) {
+      return;
+    }
+    try {
+      // try/catch, not `.catch()`: an unavailable subagent surface throws
+      // synchronously, and that must not replace the phase's own error.
+      await subagent.deleteSession({
+        sessionKey: buildNarrativeSessionKey({
+          workspaceDir: params.workspaceDir,
+          phase,
+          nowMs: sweepNowMs,
+        }),
+      });
+    } catch {
+      // Swallow: this is the defensive pass, not the primary one.
+    }
+  };
+
   const light = resolveMemoryLightDreamingConfig({
     pluginConfig: params.pluginConfig,
     cfg: params.cfg,
   });
   if (light.enabled && light.limit > 0) {
-    await runLightDreaming({
-      workspaceDir: params.workspaceDir,
-      cfg: params.cfg,
-      config: light,
-      logger: params.logger,
-      subagent: params.subagent,
-      nowMs: params.nowMs,
-    });
+    try {
+      await runLightDreaming({
+        workspaceDir: params.workspaceDir,
+        cfg: params.cfg,
+        config: light,
+        logger: params.logger,
+        subagent: params.subagent,
+        nowMs: sweepNowMs,
+      });
+    } finally {
+      await deleteNarrativeSession("light");
+    }
   }
 
   const rem = resolveMemoryRemDreamingConfig({
@@ -1499,14 +1536,18 @@ export async function runDreamingSweepPhases(params: {
     cfg: params.cfg,
   });
   if (rem.enabled && rem.limit > 0) {
-    await runRemDreaming({
-      workspaceDir: params.workspaceDir,
-      cfg: params.cfg,
-      config: rem,
-      logger: params.logger,
-      subagent: params.subagent,
-      nowMs: params.nowMs,
-    });
+    try {
+      await runRemDreaming({
+        workspaceDir: params.workspaceDir,
+        cfg: params.cfg,
+        config: rem,
+        logger: params.logger,
+        subagent: params.subagent,
+        nowMs: sweepNowMs,
+      });
+    } finally {
+      await deleteNarrativeSession("rem");
+    }
   }
 }
 

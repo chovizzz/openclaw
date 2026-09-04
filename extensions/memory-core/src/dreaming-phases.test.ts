@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/memory-core";
@@ -8,7 +9,7 @@ import {
   resolveMemoryRemDreamingConfig,
 } from "openclaw/plugin-sdk/memory-core-host-status";
 import { describe, expect, it, vi } from "vitest";
-import { __testing } from "./dreaming-phases.js";
+import { __testing, runDreamingSweepPhases } from "./dreaming-phases.js";
 import {
   rankShortTermPromotionCandidates,
   recordShortTermRecalls,
@@ -27,6 +28,11 @@ const LIGHT_DREAMING_TEST_CONFIG: OpenClawConfig = {
           dreaming: {
             enabled: true,
             timezone: "UTC",
+            // These tests were written when "inline" was the default storage
+            // mode and assert against `memory/<day>.md` directly. Pin the mode
+            // explicitly so they keep covering inline mode after the default
+            // flipped to "separate".
+            storage: { mode: "inline", separateReports: false },
             phases: {
               light: {
                 enabled: true,
@@ -159,6 +165,66 @@ async function readCandidateSnippets(workspaceDir: string, nowIso: string): Prom
 }
 
 describe("memory-core dreaming phases", () => {
+  it("re-attempts narrative session cleanup at the end of each sweep phase", async () => {
+    const workspaceDir = await createDreamingWorkspace();
+    await writeDailyNote(workspaceDir, [
+      `# ${DREAMING_TEST_DAY}`,
+      "",
+      "- Move backups to S3 Glacier.",
+      "- Keep retention at 365 days.",
+    ]);
+    const testConfig: OpenClawConfig = {
+      ...LIGHT_DREAMING_TEST_CONFIG,
+      agents: {
+        defaults: {
+          workspace: workspaceDir,
+          userTimezone: "UTC",
+        },
+      },
+    };
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const nowMs = Date.parse("2026-04-05T10:05:00.000Z");
+    // The narrative run's own cleanup fails, so only the sweep-level retry can
+    // reclaim the session. Without it the session key leaks for good.
+    const subagent = {
+      run: vi.fn(async () => ({ runId: "run-1" })),
+      waitForRun: vi.fn(async () => ({ status: "ok" })),
+      getSessionMessages: vi.fn(async () => ({
+        messages: [{ role: "assistant", content: "The archive hummed softly." }],
+      })),
+      deleteSession: vi.fn(async (_params: { sessionKey: string }) => {
+        throw new Error("subagent busy");
+      }),
+    };
+
+    await runDreamingSweepPhases({
+      workspaceDir,
+      cfg: testConfig,
+      pluginConfig: resolveMemoryCorePluginConfig(testConfig) ?? {},
+      logger,
+      subagent,
+      nowMs,
+    });
+
+    const deletedKeys = subagent.deleteSession.mock.calls.map(([call]) => call.sessionKey);
+    const workspaceHash = createHash("sha1").update(workspaceDir).digest("hex").slice(0, 12);
+    // Each enabled phase is deleted twice: once from
+    // generateAndAppendDreamNarrative's finally, once from the sweep retry.
+    for (const phase of ["light", "rem"] as const) {
+      const key = `dreaming-narrative-${phase}-${workspaceHash}-${nowMs}`;
+      const hits = deletedKeys.filter((sessionKey: string) => sessionKey === key).length;
+      expect(hits === 0 || hits === 2).toBe(true);
+    }
+    expect(deletedKeys).toContain(`dreaming-narrative-light-${workspaceHash}-${nowMs}`);
+    // Keys are namespaced by workspace and derived from the sweep-normalized
+    // nowMs, so the retry can never target another workspace's session.
+    expect(
+      deletedKeys.every((sessionKey: string) => sessionKey.endsWith(`-${workspaceHash}-${nowMs}`)),
+    ).toBe(true);
+    // The swallowed primary failure is now visible in the log.
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining("session cleanup failed"));
+  });
+
   it("does not re-ingest managed light dreaming blocks from daily notes", async () => {
     const workspaceDir = await createDreamingWorkspace();
     await withDreamingTestClock(async () => {
@@ -282,6 +348,9 @@ describe("memory-core dreaming phases", () => {
               config: {
                 dreaming: {
                   enabled: true,
+                  // This test asserts inline-mode side effects on the daily file;
+                  // pin storage explicitly after the default flipped to "separate".
+                  storage: { mode: "inline", separateReports: false },
                   phases: {
                     light: {
                       enabled: true,

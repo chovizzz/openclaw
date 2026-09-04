@@ -17,6 +17,9 @@ let embedBatchCalls = 0;
 let embedBatchInputCalls = 0;
 let providerCalls: Array<{ provider?: string; model?: string; outputDimensionality?: number }> = [];
 let forceNoProvider = false;
+let providerCloseCalls = 0;
+let providerCloseFailuresRemaining = 0;
+let providerInitGate: Promise<void> | null = null;
 
 vi.mock("./embeddings.js", () => {
   const embedText = (text: string) => {
@@ -38,6 +41,7 @@ vi.mock("./embeddings.js", () => {
         model: options.model,
         outputDimensionality: options.outputDimensionality,
       });
+      await providerInitGate;
       if (forceNoProvider) {
         return {
           provider: null,
@@ -53,6 +57,13 @@ vi.mock("./embeddings.js", () => {
           id: providerId,
           model,
           embedQuery: async (text: string) => embedText(text),
+          close: async () => {
+            providerCloseCalls += 1;
+            if (providerCloseFailuresRemaining > 0) {
+              providerCloseFailuresRemaining -= 1;
+              throw new Error("provider close failed");
+            }
+          },
           embedBatch: async (texts: string[]) => {
             embedBatchCalls += 1;
             return texts.map(embedText);
@@ -147,6 +158,9 @@ describe("memory index", () => {
     embedBatchInputCalls = 0;
     providerCalls = [];
     forceNoProvider = false;
+    providerCloseCalls = 0;
+    providerCloseFailuresRemaining = 0;
+    providerInitGate = null;
 
     rmSync(workspaceDir, { recursive: true, force: true });
     mkdirSync(memoryDir, { recursive: true });
@@ -496,5 +510,95 @@ describe("memory index", () => {
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+
+  it("closes the embedding provider when the manager closes", async () => {
+    const cfg = createCfg({
+      storePath: indexMainPath,
+      hybrid: { enabled: true, vectorWeight: 0.5, textWeight: 0.5 },
+    });
+    const manager = await getFreshManager(cfg);
+    await manager.sync({ reason: "test" });
+    expect(providerCloseCalls).toBe(0);
+
+    await manager.close();
+    expect(providerCloseCalls).toBe(1);
+  });
+
+  it("retries a provider close that throws instead of leaking it", async () => {
+    const cfg = createCfg({
+      storePath: indexMainPath,
+      hybrid: { enabled: true, vectorWeight: 0.5, textWeight: 0.5 },
+    });
+    const manager = await getFreshManager(cfg);
+    await manager.sync({ reason: "test" });
+    providerCloseFailuresRemaining = 1;
+
+    await expect(manager.close()).resolves.toBeUndefined();
+    // First attempt threw, the bounded drain re-queued and retried it.
+    expect(providerCloseCalls).toBe(2);
+  });
+
+  it("closes a provider whose initialization only lands during shutdown", async () => {
+    let releaseProviderInit: () => void = () => {};
+    providerInitGate = new Promise<void>((resolve) => {
+      releaseProviderInit = resolve;
+    });
+    const cfg = createCfg({
+      storePath: indexMainPath,
+      hybrid: { enabled: true, vectorWeight: 0.5, textWeight: 0.5 },
+    });
+    try {
+      const manager = await getFreshManager(cfg);
+      // Provider init is gated, so `sync()` parks inside the tracked
+      // `this.syncing` promise with `this.provider` still null.
+      const syncPromise = manager.sync({ reason: "test" });
+      await vi.waitFor(() => {
+        expect(providerCalls.length).toBeGreaterThan(0);
+      });
+      expect((manager as unknown as { provider: unknown }).provider).toBeNull();
+
+      const closePromise = manager.close();
+      releaseProviderInit();
+
+      await syncPromise;
+      await closePromise;
+      // The provider was created after close() started; it must still be closed.
+      expect(providerCloseCalls).toBe(1);
+    } finally {
+      // Never leave the gate closed: a failed assertion above would otherwise
+      // hang the afterEach teardown forever.
+      releaseProviderInit();
+    }
+  });
+
+  it("closes providers retired by an embedding-provider fallback", async () => {
+    const cfg = createCfg({
+      storePath: indexMainPath,
+      hybrid: { enabled: true, vectorWeight: 0.5, textWeight: 0.5 },
+    });
+    const manager = await getFreshManager(cfg);
+    await manager.sync({ reason: "test" });
+
+    // Simulate what activateFallbackProvider does: the manager swaps
+    // `this.provider` and parks the outgoing one in `retiredProviders`.
+    // Without draining that set the outgoing provider is leaked for good.
+    let retiredCloseCalls = 0;
+    const retired = {
+      id: "retired-provider",
+      model: "retired-model",
+      embedQuery: async () => [0, 0, 0, 0],
+      embedBatch: async (texts: string[]) => texts.map(() => [0, 0, 0, 0]),
+      close: async () => {
+        retiredCloseCalls += 1;
+      },
+    };
+    (manager as unknown as { retiredProviders: Set<unknown> }).retiredProviders.add(retired);
+
+    await manager.close();
+
+    expect(retiredCloseCalls).toBe(1);
+    // The still-current provider is closed too.
+    expect(providerCloseCalls).toBe(1);
   });
 });

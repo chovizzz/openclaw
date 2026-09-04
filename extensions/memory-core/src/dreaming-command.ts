@@ -63,6 +63,24 @@ function formatStatus(cfg: OpenClawConfig): string {
   ].join("\n");
 }
 
+/**
+ * `/dreaming on|off` persists a config-file mutation, so a caller that only
+ * cleared the command allowlist should not be able to flip it.
+ *
+ * Scope: this rejects a caller that presents a scope list without
+ * `operator.admin`. A caller with no `gatewayClientScopes` at all (the usual
+ * channel path) is NOT rejected here -- it still passes the normal
+ * `isAuthorizedSender` allowlist check in `executePluginCommand`, but there is
+ * no owner-specific gate on top of it. Adding one needs a Plugin SDK seam:
+ * this fork's `PluginCommandContext` has no `senderIsOwner` (that field exists
+ * only on the tool context) and command registration has no
+ * `exposeSenderIsOwner` opt-in, so a plugin handler cannot ask whether the
+ * channel sender is an owner.
+ */
+function lacksAdminScopeForDreamingMutation(gatewayClientScopes?: readonly string[]): boolean {
+  return Array.isArray(gatewayClientScopes) && !gatewayClientScopes.includes("operator.admin");
+}
+
 function formatUsage(includeStatus: string): string {
   return [
     "Usage: /dreaming status",
@@ -102,6 +120,11 @@ export function registerDreamingCommand(api: OpenClawPluginApi): void {
       }
 
       if (firstToken === "on" || firstToken === "off") {
+        if (lacksAdminScopeForDreamingMutation(ctx.gatewayClientScopes)) {
+          return {
+            text: "⚠️ /dreaming on|off requires operator.admin for gateway clients.",
+          };
+        }
         const enabled = firstToken === "on";
         const nextConfig = updateDreamingEnabledInConfig(currentConfig, enabled);
         await api.runtime.config.writeConfigFile(nextConfig);

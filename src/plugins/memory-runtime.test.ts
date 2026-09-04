@@ -5,6 +5,8 @@ const resolveRuntimePluginRegistryMock =
 const applyPluginAutoEnableMock =
   vi.fn<typeof import("../config/plugin-auto-enable.js").applyPluginAutoEnable>();
 const getMemoryRuntimeMock = vi.fn<typeof import("./memory-state.js").getMemoryRuntime>();
+const setMemorySearchManagerActiveMock =
+  vi.fn<typeof import("./memory-state.js").setMemorySearchManagerActive>();
 const resolveAgentWorkspaceDirMock =
   vi.fn<typeof import("../agents/agent-scope.js").resolveAgentWorkspaceDir>();
 const resolveDefaultAgentIdMock = vi.fn<
@@ -26,6 +28,7 @@ vi.mock("./loader.js", () => ({
 
 vi.mock("./memory-state.js", () => ({
   getMemoryRuntime: () => getMemoryRuntimeMock(),
+  setMemorySearchManagerActive: (active: boolean) => setMemorySearchManagerActiveMock(active),
 }));
 
 let getActiveMemorySearchManager: typeof import("./memory-runtime.js").getActiveMemorySearchManager;
@@ -126,6 +129,7 @@ describe("memory runtime auto-enable loading", () => {
     resolveRuntimePluginRegistryMock.mockReset();
     applyPluginAutoEnableMock.mockReset();
     getMemoryRuntimeMock.mockReset();
+    setMemorySearchManagerActiveMock.mockReset();
     resolveAgentWorkspaceDirMock.mockReset();
     resolveDefaultAgentIdMock.mockClear();
     applyPluginAutoEnableMock.mockImplementation((params) => ({
@@ -186,5 +190,54 @@ describe("memory runtime auto-enable loading", () => {
     },
   ] as const)("$name", async ({ config, setup }) => {
     await expectCloseMemoryRuntimeCase({ config, setup });
+  });
+
+  it("arms CLI memory teardown as soon as a manager is handed out", async () => {
+    setAutoEnabledMemoryRuntime();
+
+    await getActiveMemorySearchManager({ cfg: {} as never, agentId: "main" });
+
+    expect(setMemorySearchManagerActiveMock).toHaveBeenCalledWith(true);
+  });
+
+  it("keeps teardown armed when manager acquisition rejects", async () => {
+    const runtime = createMemoryRuntimeFixture();
+    runtime.getMemorySearchManager.mockRejectedValueOnce(new Error("manager init failed"));
+    getMemoryRuntimeMock.mockReturnValue(runtime);
+
+    await expect(
+      getActiveMemorySearchManager({ cfg: {} as never, agentId: "main" }),
+    ).rejects.toThrow("manager init failed");
+
+    expect(setMemorySearchManagerActiveMock).toHaveBeenCalledWith(true);
+    expect(setMemorySearchManagerActiveMock).not.toHaveBeenCalledWith(false);
+  });
+
+  it("does not arm teardown for config-only backend lookups", async () => {
+    const { rawConfig } = setAutoEnabledMemoryRuntime();
+
+    resolveActiveMemoryBackendConfig({ cfg: rawConfig as never, agentId: "main" });
+
+    expect(setMemorySearchManagerActiveMock).not.toHaveBeenCalled();
+  });
+
+  it("disarms teardown only after close-all settles", async () => {
+    const runtime = {
+      getMemorySearchManager: vi.fn(async () => ({ manager: null, error: "no index" })),
+      resolveMemoryBackendConfig: vi.fn(() => ({ backend: "builtin" as const })),
+      // Annotated so the later mockImplementation (a normal resolve) is
+      // assignable; an inferred `Promise<never>` would reject it.
+      closeAllMemorySearchManagers: vi.fn(async (): Promise<void> => {
+        throw new Error("teardown failed");
+      }),
+    };
+    getMemoryRuntimeMock.mockReturnValue(runtime);
+
+    await expect(closeActiveMemorySearchManagers()).rejects.toThrow("teardown failed");
+    expect(setMemorySearchManagerActiveMock).not.toHaveBeenCalledWith(false);
+
+    runtime.closeAllMemorySearchManagers.mockImplementation(async () => {});
+    await closeActiveMemorySearchManagers();
+    expect(setMemorySearchManagerActiveMock).toHaveBeenCalledWith(false);
   });
 });

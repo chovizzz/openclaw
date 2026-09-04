@@ -38,6 +38,13 @@ export {
  */
 export type EmbeddingProvider = Omit<MemoryEmbeddingProvider, "embedQuery"> & {
   embedQuery: (text: string, opts?: { signal?: AbortSignal }) => Promise<number[]>;
+  /**
+   * Optional shutdown hook so a provider can release process-level resources
+   * (native model handles, sockets, child processes) when the owning
+   * `MemoryIndexManager` closes. Optional so every existing provider stays
+   * assignable; `MemoryIndexManager.close()` calls it only when present.
+   */
+  close?: () => Promise<void> | void;
 };
 export type EmbeddingProviderId = string;
 export type EmbeddingProviderRequest = string;
