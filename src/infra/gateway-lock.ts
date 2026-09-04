@@ -272,16 +272,25 @@ export async function acquireGatewayLock(
   while (now() - startedAt < timeoutMs) {
     try {
       const handle = await fs.open(lockPath, "wx");
-      const startTime = platform === "linux" ? readLinuxStartTime(process.pid) : null;
-      const payload: LockPayload = {
-        pid: process.pid,
-        createdAt: new Date(now()).toISOString(),
-        configPath,
-      };
-      if (typeof startTime === "number" && Number.isFinite(startTime)) {
-        payload.startTime = startTime;
+      try {
+        const startTime = platform === "linux" ? readLinuxStartTime(process.pid) : null;
+        const payload: LockPayload = {
+          pid: process.pid,
+          createdAt: new Date(now()).toISOString(),
+          configPath,
+        };
+        if (typeof startTime === "number" && Number.isFinite(startTime)) {
+          payload.startTime = startTime;
+        }
+        await handle.writeFile(JSON.stringify(payload), "utf8");
+      } catch (error) {
+        // Acquisition owns both the fd and the lock file until the release
+        // callback below exists. If payload preparation/write fails before
+        // ownership transfers, unwind both here or they leak.
+        await handle.close().catch(() => undefined);
+        await fs.rm(lockPath, { force: true }).catch(() => undefined);
+        throw error;
       }
-      await handle.writeFile(JSON.stringify(payload), "utf8");
       return {
         lockPath,
         configPath,

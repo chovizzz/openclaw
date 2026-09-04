@@ -114,6 +114,229 @@ describe("createChannelApprovalHandlerFromCapability", () => {
     );
   });
 
+  it("unbinds an in-flight delivery when stop() fires between deliverPending and bindPending", async () => {
+    const unbindPending = vi.fn();
+    const bindPending = vi.fn().mockResolvedValue({ bindingId: "bound-in-flight" });
+    let releaseDeliver: (() => void) | undefined;
+    const deliverGate = new Promise<void>((resolve) => {
+      releaseDeliver = resolve;
+    });
+    const deliverPending = vi.fn(async () => {
+      await deliverGate;
+      return { messageId: "in-flight" };
+    });
+
+    const runtime = await createChannelApprovalHandlerFromCapability({
+      capability: {
+        native: {
+          describeDeliveryCapabilities: vi.fn().mockReturnValue({
+            enabled: true,
+            preferredSurface: "origin",
+            supportsOriginSurface: true,
+            supportsApproverDmSurface: false,
+            notifyOriginWhenDmOnly: false,
+          }),
+          resolveOriginTarget: vi.fn().mockReturnValue({ to: "origin-chat" }),
+        },
+        nativeRuntime: {
+          availability: {
+            isConfigured: vi.fn().mockReturnValue(true),
+            shouldHandle: vi.fn().mockReturnValue(true),
+          },
+          presentation: {
+            buildPendingPayload: vi.fn().mockResolvedValue({ text: "pending" }),
+            buildResolvedResult: vi.fn(),
+            buildExpiredResult: vi.fn(),
+          },
+          transport: {
+            prepareTarget: vi.fn().mockResolvedValue({
+              dedupeKey: "origin-chat",
+              target: { to: "origin-chat" },
+            }),
+            deliverPending,
+          },
+          interactions: {
+            bindPending,
+            unbindPending,
+          },
+        },
+      },
+      label: "test/approval-handler",
+      clientDisplayName: "Test Approval Handler",
+      channel: "test",
+      channelLabel: "Test",
+      cfg: { channels: {} } as never,
+    });
+
+    expect(runtime).not.toBeNull();
+    const request = {
+      id: "exec:in-flight",
+      expiresAtMs: Date.now() + 60_000,
+      request: {
+        turnSourceChannel: "test",
+        turnSourceTo: "origin-chat",
+      },
+    } as never;
+
+    const inflight = runtime?.handleRequested(request);
+    // Let the pipeline reach the parked deliverPending await.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // stop() runs while the delivery is still in flight: activeEntries is
+    // cleared here, so nothing else would ever unbind this entry.
+    await runtime?.stop();
+    releaseDeliver?.();
+    await inflight;
+
+    // No binding was ever created, so there is nothing to unbind - and crucially
+    // no orphaned binding is left behind on the native side.
+    expect(bindPending).not.toHaveBeenCalled();
+    expect(unbindPending).not.toHaveBeenCalled();
+  });
+
+  it("keeps delivering after a stop() followed by a fresh request", async () => {
+    const bindPending = vi.fn().mockResolvedValue({ bindingId: "bound" });
+    const unbindPending = vi.fn();
+    const deliverPending = vi.fn().mockResolvedValue({ messageId: "1" });
+
+    const runtime = await createChannelApprovalHandlerFromCapability({
+      capability: {
+        native: {
+          describeDeliveryCapabilities: vi.fn().mockReturnValue({
+            enabled: true,
+            preferredSurface: "origin",
+            supportsOriginSurface: true,
+            supportsApproverDmSurface: false,
+            notifyOriginWhenDmOnly: false,
+          }),
+          resolveOriginTarget: vi.fn().mockReturnValue({ to: "origin-chat" }),
+        },
+        nativeRuntime: {
+          availability: {
+            isConfigured: vi.fn().mockReturnValue(true),
+            shouldHandle: vi.fn().mockReturnValue(true),
+          },
+          presentation: {
+            buildPendingPayload: vi.fn().mockResolvedValue({ text: "pending" }),
+            buildResolvedResult: vi.fn(),
+            buildExpiredResult: vi.fn(),
+          },
+          transport: {
+            prepareTarget: vi.fn().mockResolvedValue({
+              dedupeKey: "origin-chat",
+              target: { to: "origin-chat" },
+            }),
+            deliverPending,
+          },
+          interactions: { bindPending, unbindPending },
+        },
+      },
+      label: "test/approval-handler",
+      clientDisplayName: "Test Approval Handler",
+      channel: "test",
+      channelLabel: "Test",
+      cfg: { channels: {} } as never,
+    });
+
+    const makeRequest = (id: string) =>
+      ({
+        id,
+        expiresAtMs: Date.now() + 60_000,
+        request: { turnSourceChannel: "test", turnSourceTo: "origin-chat" },
+      }) as never;
+
+    await runtime?.handleRequested(makeRequest("exec:before"));
+    await runtime?.stop();
+    bindPending.mockClear();
+
+    // The runtime supports start() after stop(); a stop must not permanently
+    // disable delivery, only abort the deliveries in flight when it happened.
+    await runtime?.handleRequested(makeRequest("exec:after"));
+
+    expect(bindPending).toHaveBeenCalledTimes(1);
+  });
+
+  it("unbinds a binding created after stop() when bindPending was in flight", async () => {
+    const unbindPending = vi.fn();
+    let releaseBind: (() => void) | undefined;
+    const bindGate = new Promise<void>((resolve) => {
+      releaseBind = resolve;
+    });
+    const bindPending = vi.fn(async () => {
+      await bindGate;
+      return { bindingId: "bound-in-flight" };
+    });
+
+    const runtime = await createChannelApprovalHandlerFromCapability({
+      capability: {
+        native: {
+          describeDeliveryCapabilities: vi.fn().mockReturnValue({
+            enabled: true,
+            preferredSurface: "origin",
+            supportsOriginSurface: true,
+            supportsApproverDmSurface: false,
+            notifyOriginWhenDmOnly: false,
+          }),
+          resolveOriginTarget: vi.fn().mockReturnValue({ to: "origin-chat" }),
+        },
+        nativeRuntime: {
+          availability: {
+            isConfigured: vi.fn().mockReturnValue(true),
+            shouldHandle: vi.fn().mockReturnValue(true),
+          },
+          presentation: {
+            buildPendingPayload: vi.fn().mockResolvedValue({ text: "pending" }),
+            buildResolvedResult: vi.fn(),
+            buildExpiredResult: vi.fn(),
+          },
+          transport: {
+            prepareTarget: vi.fn().mockResolvedValue({
+              dedupeKey: "origin-chat",
+              target: { to: "origin-chat" },
+            }),
+            deliverPending: vi.fn().mockResolvedValue({ messageId: "in-flight" }),
+          },
+          interactions: {
+            bindPending,
+            unbindPending,
+          },
+        },
+      },
+      label: "test/approval-handler",
+      clientDisplayName: "Test Approval Handler",
+      channel: "test",
+      channelLabel: "Test",
+      cfg: { channels: {} } as never,
+    });
+
+    const request = {
+      id: "exec:bind-in-flight",
+      expiresAtMs: Date.now() + 60_000,
+      request: {
+        turnSourceChannel: "test",
+        turnSourceTo: "origin-chat",
+      },
+    } as never;
+
+    const inflight = runtime?.handleRequested(request);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // stop() runs while bindPending is parked: activeEntries is cleared here, so
+    // the binding this call is about to return would never be unbound by anyone.
+    await runtime?.stop();
+    releaseBind?.();
+    await inflight;
+
+    expect(unbindPending).toHaveBeenCalledTimes(1);
+    expect(unbindPending).toHaveBeenCalledWith(
+      expect.objectContaining({
+        entry: { messageId: "in-flight" },
+        binding: { bindingId: "bound-in-flight" },
+        request,
+      }),
+    );
+  });
+
   it("ignores duplicate pending request ids before finalization", async () => {
     const unbindPending = vi.fn();
     const buildResolvedResult = vi.fn().mockResolvedValue({ kind: "leave" });

@@ -788,6 +788,17 @@ export async function createChannelApprovalHandlerFromCapability(params: {
   }
   const log = createSubsystemLogger(params.label);
   const activeEntries = new Map<string, ActiveApprovalEntries>();
+  // deliverTarget's two awaits bracket a read-modify-write on activeEntries.
+  // If onStopped clears the map in between, the wrapped entry lands in an
+  // already-cleared map and never reaches unbindPending, so the native side
+  // keeps its listener/channel binding open forever.
+  //
+  // A generation counter rather than a sticky boolean: the runtime can be
+  // start()ed again after stop() (see exec-approval-channel-runtime), and a
+  // sticky flag would silently disable every later delivery. Each delivery
+  // compares against the generation it began in, so it only aborts for a stop
+  // that happened while it was in flight.
+  let stopGeneration = 0;
   const resolveApprovalKind =
     nativeRuntime.resolveApprovalKind ??
     ((request: ApprovalRequest) =>
@@ -848,6 +859,7 @@ export async function createChannelApprovalHandlerFromCapability(params: {
         approvalKind,
         pendingContent,
       }) => {
+        const deliveryGeneration = stopGeneration;
         const entry = await nativeRuntime.transport.deliverPending({
           ...baseContext,
           plannedTarget,
@@ -860,6 +872,13 @@ export async function createChannelApprovalHandlerFromCapability(params: {
         if (!entry) {
           return null;
         }
+        if (stopGeneration !== deliveryGeneration) {
+          // Stopped while deliverPending was in flight. No binding exists yet, and
+          // this fork's unbindPending contract is binding-scoped (stop-time cleanup
+          // in unbindWrappedEntries likewise skips binding-less entries), so the
+          // correct move is to not create one at all.
+          return null;
+        }
         const binding = await nativeRuntime.interactions?.bindPending?.({
           ...baseContext,
           entry,
@@ -868,6 +887,20 @@ export async function createChannelApprovalHandlerFromCapability(params: {
           view: pendingContent.view,
           pendingPayload: pendingContent.payload,
         });
+        if (stopGeneration !== deliveryGeneration) {
+          // Stopped while bindPending was in flight: onStopped already walked
+          // activeEntries, so this binding would never be unbound by anyone else.
+          if (binding !== undefined && binding !== null) {
+            await nativeRuntime.interactions?.unbindPending?.({
+              ...baseContext,
+              entry,
+              binding,
+              request,
+              approvalKind,
+            });
+          }
+          return null;
+        }
         const wrapped: WrappedPendingEntry = {
           entry,
           ...(binding === undefined || binding === null ? {} : { binding }),
@@ -1000,6 +1033,7 @@ export async function createChannelApprovalHandlerFromCapability(params: {
         });
       },
       onStopped: async () => {
+        stopGeneration += 1;
         if (activeEntries.size === 0) {
           activeEntries.clear();
           return;

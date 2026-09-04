@@ -6,6 +6,7 @@ import {
   isTransientNetworkError,
   isTransientSqliteError,
   isTransientUnhandledRejectionError,
+  isWsPreHandshakeCloseError,
 } from "./unhandled-rejections.js";
 
 describe("isAbortError", () => {
@@ -268,6 +269,83 @@ describe("isTransientUnhandledRejectionError", () => {
     });
 
     expect(isTransientUnhandledRejectionError(error)).toBe(true);
+  });
+
+  it("treats the ws pre-handshake close as transient, directly and through a wrapper", () => {
+    const wsPreHandshakeClose = new Error(
+      "WebSocket was closed before the connection was established",
+    );
+    const wrapped = Object.assign(new Error("feishu reconnect failed"), {
+      cause: wsPreHandshakeClose,
+    });
+
+    expect(isTransientUnhandledRejectionError(wsPreHandshakeClose)).toBe(true);
+    expect(isTransientUnhandledRejectionError(wrapped)).toBe(true);
+  });
+
+  it("keeps non-exact WebSocket messages on the fatal path", () => {
+    expect(
+      isTransientUnhandledRejectionError(
+        new Error("WebSocket error: WebSocket was closed before the connection was established"),
+      ),
+    ).toBe(false);
+    expect(isTransientUnhandledRejectionError(new Error("WebSocket was closed"))).toBe(false);
+    expect(isTransientUnhandledRejectionError(new Error("boom"))).toBe(false);
+  });
+
+  it("does not let a nested payload smuggle in the ws message", () => {
+    // Only the cause chain is walked; data/errors/reason/original/error are ignored.
+    expect(
+      isWsPreHandshakeCloseError(
+        Object.assign(new Error("boom"), {
+          data: new Error("WebSocket was closed before the connection was established"),
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      isWsPreHandshakeCloseError(
+        Object.assign(new Error("boom"), {
+          errors: [new Error("WebSocket was closed before the connection was established")],
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("lets a wrapper that declares its own code decide, not the nested ws cause", () => {
+    const wsPreHandshakeClose = new Error(
+      "WebSocket was closed before the connection was established",
+    );
+    expect(
+      isTransientUnhandledRejectionError(
+        Object.assign(new Error("denied"), { code: "EACCES", cause: wsPreHandshakeClose }),
+      ),
+    ).toBe(false);
+    expect(
+      isTransientUnhandledRejectionError(
+        Object.assign(new Error("oom"), {
+          code: "ERR_OUT_OF_MEMORY",
+          cause: wsPreHandshakeClose,
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("lets a code on the ws-message node itself decide", () => {
+    // Same message, but it declares an identity `ws` never sets: not our error.
+    expect(
+      isTransientUnhandledRejectionError(
+        Object.assign(new Error("WebSocket was closed before the connection was established"), {
+          code: "EACCES",
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("does not widen the uncaughtException path", () => {
+    const wsPreHandshakeClose = new Error(
+      "WebSocket was closed before the connection was established",
+    );
+    expect(isBenignUncaughtExceptionError(wsPreHandshakeClose)).toBe(false);
   });
 });
 

@@ -115,6 +115,16 @@ describe("agent event handler", () => {
     return harness;
   }
 
+  function chatPayloadTexts(broadcast: ReturnType<typeof vi.fn>) {
+    return chatBroadcastCalls(broadcast).map(([, payload]) => {
+      const typed = payload as {
+        state?: string;
+        message?: { content?: Array<{ text?: string }> };
+      };
+      return { state: typed.state, text: typed.message?.content?.[0]?.text };
+    });
+  }
+
   function chatBroadcastCalls(broadcast: ReturnType<typeof vi.fn>) {
     return broadcast.mock.calls.filter(([event]) => event === "chat");
   }
@@ -1355,5 +1365,112 @@ describe("agent event handler", () => {
     expect(payload.message?.content?.[0]?.text).toBe(
       "Disk usage crossed 95 percent on /data and needs cleanup now.",
     );
+  });
+
+  it("flushes the throttle-withheld tail before an immediate error terminal (#119556)", () => {
+    let now = 10_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const { broadcast, chatRunState, handler } = createHarness({ lifecycleErrorRetryGraceMs: 0 });
+    chatRunState.registry.add("run-err", { sessionKey: "session-err", clientRunId: "client-err" });
+
+    handler({ runId: "run-err", seq: 1, stream: "assistant", ts: now, data: { text: "Hello" } });
+    // Inside the 150ms delta throttle: this chunk is buffered but not broadcast.
+    now = 10_100;
+    handler({
+      runId: "run-err",
+      seq: 2,
+      stream: "assistant",
+      ts: now,
+      data: { text: "Hello world" },
+    });
+
+    const beforeTerminal = chatPayloadTexts(broadcast);
+    expect(beforeTerminal.map((p) => p.text)).toEqual(["Hello"]);
+
+    handler({
+      runId: "run-err",
+      seq: 3,
+      stream: "lifecycle",
+      ts: now,
+      data: { phase: "error", error: "provider failed" },
+    });
+
+    const payloads = chatPayloadTexts(broadcast);
+    // The withheld tail is delivered as a delta, and the error terminal carries it.
+    expect(payloads.filter((p) => p.state === "delta").at(-1)?.text).toBe("Hello world");
+    expect(payloads.at(-1)?.state).toBe("error");
+    // This fork's error terminal carries only errorMessage (no message body),
+    // so the flushed delta is the only path the tail can reach the client on.
+    nowSpy.mockRestore();
+  });
+
+  it("flushes the throttle-withheld tail before deferring a retryable error terminal", () => {
+    vi.useFakeTimers();
+    let now = 10_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const { broadcast, chatRunState, handler } = createHarness({
+      lifecycleErrorRetryGraceMs: 100,
+    });
+    chatRunState.registry.add("run-grace", {
+      sessionKey: "session-grace",
+      clientRunId: "client-grace",
+    });
+
+    handler({ runId: "run-grace", seq: 1, stream: "assistant", ts: now, data: { text: "Hello" } });
+    now = 10_100;
+    handler({
+      runId: "run-grace",
+      seq: 2,
+      stream: "assistant",
+      ts: now,
+      data: { text: "Hello world" },
+    });
+
+    handler({
+      runId: "run-grace",
+      seq: 3,
+      stream: "lifecycle",
+      ts: now,
+      data: { phase: "error", error: "retryable provider failure" },
+    });
+
+    // Terminal is still deferred behind the retry grace, but the tail already shipped.
+    expect(vi.getTimerCount()).toBe(1);
+    const deltas = chatPayloadTexts(broadcast).filter((p) => p.state === "delta");
+    expect(deltas.at(-1)?.text).toBe("Hello world");
+    // The buffer is isolated so a fallback attempt cannot merge onto this text.
+    expect(chatRunState.buffers.get("client-grace")).toBeUndefined();
+
+    vi.clearAllTimers();
+    vi.useRealTimers();
+    nowSpy.mockRestore();
+  });
+
+  it("clears the run buffer on an error terminal that skips the chat final", () => {
+    let now = 10_000;
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const { chatRunState, handler } = createHarness({
+      lifecycleErrorRetryGraceMs: 0,
+      isChatSendRunActive: () => true,
+      resolveSessionKeyForRun: () => "session-skip",
+    });
+
+    handler({ runId: "run-skip", seq: 1, stream: "assistant", ts: now, data: { text: "Hello" } });
+    expect(chatRunState.buffers.get("run-skip")).toBe("Hello");
+
+    handler({
+      runId: "run-skip",
+      seq: 2,
+      stream: "lifecycle",
+      ts: now,
+      data: { phase: "error", error: "provider failed" },
+    });
+
+    // No chat final ran on this path, so the unconditional clear in
+    // finalizeLifecycleEvent is what keeps the buffer from leaking.
+    expect(chatRunState.buffers.get("run-skip")).toBeUndefined();
+    expect(chatRunState.deltaSentAt.get("run-skip")).toBeUndefined();
+    expect(chatRunState.deltaLastBroadcastLen.get("run-skip")).toBeUndefined();
+    nowSpy.mockRestore();
   });
 });

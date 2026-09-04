@@ -72,6 +72,13 @@ const TRANSIENT_SQLITE_ERRCODES = new Set([5, 6, 10, 14]);
 // console.ts (`isEpipeError`) already treat them as one family.
 const BENIGN_UNCAUGHT_EXCEPTION_CODES = new Set(["EPIPE", "EIO"]);
 
+// `ws` rejects with exactly this Error when close()/terminate() aborts a socket that is
+// still CONNECTING. It carries no code, no errno and no recognizable name, so none of the
+// transient-network signals above match it, and the unhandledRejection handler would exit
+// the process. Matched exactly (never as a substring or prefix) so that arbitrary
+// WebSocket failures keep taking the fatal path.
+const WS_PRE_HANDSHAKE_CLOSE_MESSAGE = "websocket was closed before the connection was established";
+
 const TRANSIENT_NETWORK_MESSAGE_CODE_RE =
   /\b(ECONNRESET|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|ESOCKETTIMEDOUT|ECONNABORTED|EPIPE|EHOSTUNREACH|ENETUNREACH|EAI_AGAIN|EPROTO|UND_ERR_CONNECT_TIMEOUT|UND_ERR_DNS_RESOLVE_FAILED|UND_ERR_CONNECT|UND_ERR_SOCKET|UND_ERR_HEADERS_TIMEOUT|UND_ERR_BODY_TIMEOUT)\b/i;
 
@@ -327,8 +334,44 @@ export function isTransientSqliteError(err: unknown): boolean {
   return false;
 }
 
+/**
+ * True when the error (or an untyped wrapper around it) is `ws`'s pre-handshake close.
+ *
+ * Scope is deliberately narrow in three ways:
+ * - only the `cause` chain is walked, never `data`/`errors`/`reason`/`original`/`error`,
+ *   so a third-party payload cannot smuggle this message in;
+ * - the message must match exactly, so "WebSocket error: <message>" stays fatal;
+ * - it feeds the unhandledRejection classification only. The uncaughtException path
+ *   (`isBenignUncaughtExceptionError`) is code-based and stays untouched.
+ */
+export function isWsPreHandshakeCloseError(err: unknown): boolean {
+  const seen = new Set<unknown>();
+  let current: unknown = err;
+  while (current != null && !seen.has(current)) {
+    seen.add(current);
+    if (typeof current !== "object") {
+      return false;
+    }
+    // Same identity rule as isBenignUncaughtExceptionError, and it must run
+    // BEFORE the message check: the first node that declares a code/errno
+    // decides. `ws` never sets one on this error, so anything that does is a
+    // different error wearing the same message.
+    if (extractErrorCodeOrErrno(current)) {
+      return false;
+    }
+    const message = normalizeLowercaseStringOrEmpty((current as { message?: unknown }).message);
+    if (message === WS_PRE_HANDSHAKE_CLOSE_MESSAGE) {
+      return true;
+    }
+    current = (current as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
 export function isTransientUnhandledRejectionError(err: unknown): boolean {
-  return isTransientNetworkError(err) || isTransientSqliteError(err);
+  return (
+    isTransientNetworkError(err) || isTransientSqliteError(err) || isWsPreHandshakeCloseError(err)
+  );
 }
 
 /**

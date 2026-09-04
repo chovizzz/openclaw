@@ -623,6 +623,10 @@ export function createAgentEventHandler({
     }
 
     toolEventRecipients.markFinal(evt.runId);
+    // Safety net: emitChatFinal clears the buffer on the paths it runs on, but
+    // skipChatErrorFinal, a hidden control UI, or a missing sessionKey all skip
+    // it. Clearing here unconditionally keeps the run buffers from leaking.
+    clearBufferedChatState(clientRunId);
     clearAgentRunContext(evt.runId);
     agentRunSeq.delete(evt.runId);
     agentRunSeq.delete(clientRunId);
@@ -952,11 +956,19 @@ export function createAgentEventHandler({
     }
 
     if (lifecyclePhase === "error") {
-      clearBufferedChatState(clientRunId);
       const skipChatErrorFinal = isChatSendRunActive(evt.runId) && !chatLink;
       if (isAborted || lifecycleErrorRetryGraceMs <= 0) {
+        // Do not clear the buffer here: emitChatFinal still has to flush the
+        // tail withheld by the 150ms delta throttle and resolve the terminal
+        // message from it. finalizeLifecycleEvent clears the buffer afterwards.
         finalizeLifecycleEvent(evt, { skipChatErrorFinal });
       } else {
+        // Deferred retry grace: deliver the throttled tail before isolating the
+        // buffer, so a fallback attempt cannot merge onto the failed attempt's text.
+        if (sessionKey) {
+          flushBufferedChatDeltaIfNeeded(sessionKey, clientRunId, evt.runId, evt.seq);
+        }
+        clearBufferedChatState(clientRunId);
         scheduleTerminalLifecycleError(evt, { skipChatErrorFinal });
       }
       return;
