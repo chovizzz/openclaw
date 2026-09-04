@@ -577,6 +577,20 @@ function sanitizeChatHistoryContentBlock(
     entry.bytes = bytes;
     changed = true;
   }
+  // Audio blocks carry the raw recording as base64 under `source`, which is a
+  // different shape from image blocks and was previously replayed verbatim into
+  // chat history responses.
+  if (type === "audio" && entry.source && typeof entry.source === "object") {
+    const source = { ...(entry.source as Record<string, unknown>) };
+    if (source.type === "base64" && typeof source.data === "string") {
+      const bytes = Buffer.byteLength(source.data, "utf8");
+      delete source.data;
+      source.omitted = true;
+      source.bytes = bytes;
+      entry.source = source;
+      changed = true;
+    }
+  }
   return { block: changed ? entry : block, changed };
 }
 
