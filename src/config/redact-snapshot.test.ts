@@ -561,13 +561,27 @@ describe("redactConfigSnapshot", () => {
   it("redacts parsed and resolved objects", () => {
     const snapshot = makeSnapshot({
       channels: { discord: { token: "MTIzNDU2Nzg5MDEyMzQ1Njc4.GaBcDe.FgH" } },
-      gateway: { auth: { token: "supersecrettoken123456" } },
+      gateway: { auth: { token: "supersecrettoken123456" }, mode: "default" },
     });
     const result = redactConfigSnapshot(snapshot);
-    const parsed = result.parsed as Record<string, Record<string, Record<string, string>>>;
-    const resolved = result.resolved as Record<string, Record<string, Record<string, string>>>;
+    type Nested = Record<string, Record<string, Record<string, string>>>;
+    const parsed = result.parsed as Nested;
+    const resolved = result.resolved as Nested;
+    const sourceConfig = result.sourceConfig as unknown as Nested;
+    const runtimeConfig = result.runtimeConfig as unknown as Nested;
     expect(parsed.channels.discord.token).toBe(REDACTED_SENTINEL);
     expect(resolved.gateway.auth.token).toBe(REDACTED_SENTINEL);
+    // Alias fields must not carry the unredacted originals through the spread.
+    expect(sourceConfig.gateway.auth.token).toBe(REDACTED_SENTINEL);
+    expect(runtimeConfig.channels.discord.token).toBe(REDACTED_SENTINEL);
+    expect(JSON.stringify(result)).not.toContain("supersecrettoken123456");
+    expect(JSON.stringify(result)).not.toContain("MTIzNDU2Nzg5MDEyMzQ1Njc4.GaBcDe.FgH");
+    // Negative half: non-sensitive neighbors survive on every alias.
+    expect(result.config.gateway?.mode).toBe("default");
+    expect(sourceConfig.gateway.mode as unknown as string).toBe("default");
+    expect(runtimeConfig.gateway.mode as unknown as string).toBe("default");
+    expect(result.sourceConfig).toBe(result.resolved);
+    expect(result.runtimeConfig).toBe(result.config);
   });
 
   it("handles null raw gracefully", () => {

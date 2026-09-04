@@ -1,5 +1,6 @@
 import { getChannelPlugin, normalizeChannelId } from "../channels/plugins/index.js";
 import { normalizeTargetForProvider } from "../infra/outbound/target-normalization.js";
+import { redactToolPayloadText } from "../logging/redact.js";
 import { splitMediaFromOutput } from "../media/parse.js";
 import { pluginRegistrationContractRegistry } from "../plugins/contracts/registry.js";
 import {
@@ -89,34 +90,89 @@ function extractErrorField(value: unknown): string | undefined {
   return normalizeToolErrorText(status);
 }
 
+// `ancestors` tracks only the current path, not every object ever visited: a
+// WeakSet of all visited nodes would report a repeated sibling reference (the
+// same object appearing twice in a list) as a cycle and replace the second copy
+// with "[Circular]", silently losing data.
+function redactStringsDeep(value: unknown, ancestors: Set<object> = new Set()): unknown {
+  if (typeof value === "string") {
+    return redactToolPayloadText(value);
+  }
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+  if (ancestors.has(value)) {
+    return "[Circular]";
+  }
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      return value.map((item) => redactStringsDeep(item, ancestors));
+    }
+    const out: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      // Keys can carry secrets too (a URL used as a map key).
+      out[redactToolPayloadText(key)] = redactStringsDeep(child, ancestors);
+    }
+    return out;
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
+export function sanitizeToolArgs(args: unknown): unknown {
+  return redactStringsDeep(args);
+}
+
 export function sanitizeToolResult(result: unknown): unknown {
+  if (typeof result === "string") {
+    return redactToolPayloadText(result);
+  }
+  if (Array.isArray(result)) {
+    return redactStringsDeep(result);
+  }
   if (!result || typeof result !== "object") {
     return result;
   }
   const record = result as Record<string, unknown>;
-  const content = Array.isArray(record.content) ? record.content : null;
-  if (!content) {
-    return record;
+  // Strip image data first so the deep redaction pass doesn't waste work
+  // scanning base64 payloads (and so we capture the original byte counts).
+  const preCleaned: Record<string, unknown> = { ...record };
+  const originalContent = Array.isArray(record.content) ? record.content : null;
+  if (originalContent) {
+    preCleaned.content = originalContent.map((item) => {
+      if (!item || typeof item !== "object") {
+        return item;
+      }
+      const entry = item as Record<string, unknown>;
+      if (readStringValue(entry.type) === "image") {
+        const data = readStringValue(entry.data);
+        const bytes = data ? data.length : undefined;
+        const cleaned = { ...entry };
+        delete cleaned.data;
+        return { ...cleaned, bytes, omitted: true };
+      }
+      return entry;
+    });
   }
-  const sanitized = content.map((item) => {
-    if (!item || typeof item !== "object") {
-      return item;
-    }
-    const entry = item as Record<string, unknown>;
-    const type = readStringValue(entry.type);
-    if (type === "text" && typeof entry.text === "string") {
-      return { ...entry, text: truncateToolText(entry.text) };
-    }
-    if (type === "image") {
-      const data = readStringValue(entry.data);
-      const bytes = data ? data.length : undefined;
-      const cleaned = { ...entry };
-      delete cleaned.data;
-      return { ...cleaned, bytes, omitted: true };
-    }
-    return entry;
-  });
-  return { ...record, content: sanitized };
+  // Deep-redact the entire result so any top-level or nested string is
+  // protected, not just `details` and text content blocks.
+  const baseline = redactStringsDeep(preCleaned) as Record<string, unknown>;
+  const out: Record<string, unknown> = { ...baseline };
+  const content = Array.isArray(baseline.content) ? baseline.content : null;
+  if (content) {
+    out.content = content.map((item) => {
+      if (!item || typeof item !== "object") {
+        return item;
+      }
+      const entry = item as Record<string, unknown>;
+      if (readStringValue(entry.type) === "text" && typeof entry.text === "string") {
+        return { ...entry, text: truncateToolText(entry.text) };
+      }
+      return entry;
+    });
+  }
+  return out;
 }
 
 export function extractToolResultText(result: unknown): string | undefined {

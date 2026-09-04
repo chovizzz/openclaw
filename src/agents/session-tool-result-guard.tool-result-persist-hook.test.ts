@@ -268,3 +268,131 @@ describe("before_message_write hook", () => {
     expect(text).toContain("truncated");
   });
 });
+
+describe("persisted toolResult detail redaction", () => {
+  function appendDetails(
+    sm: ReturnType<typeof guardSessionManager>,
+    details: Record<string, unknown>,
+  ) {
+    const appendMessage = sm.appendMessage.bind(sm) as unknown as (message: AgentMessage) => void;
+    appendMessage({
+      role: "assistant",
+      content: [{ type: "toolCall", id: "call_1", name: "exec", arguments: {} }],
+    } as AgentMessage);
+    appendMessage({
+      role: "toolResult",
+      toolCallId: "call_1",
+      isError: false,
+      content: [{ type: "text", text: "visible output stays small" }],
+      details,
+    } as never);
+  }
+
+  it("redacts toolResult details before persistence", () => {
+    const tokenValue = "abcdefghijklmnopqrstuvwx1234567890";
+    const bearerValue = "bearerdiagnosticvalue1234567890";
+    const sm = guardSessionManager(SessionManager.inMemory(), {
+      agentId: "main",
+      sessionKey: "main",
+    });
+    appendDetails(sm, {
+      status: "completed",
+      exitCode: 0,
+      cwd: "/tmp/work",
+      token: tokenValue,
+      GITHUB_TOKEN: tokenValue,
+      aggregated: `GITHUB_TOKEN=${tokenValue}`,
+      nested: {
+        apiKey: { value: bearerValue },
+        stdout: `Authorization: Bearer ${bearerValue}`,
+        items: [`curl --token ${tokenValue} https://example.test`],
+      },
+    });
+
+    const toolResult = getPersistedToolResult(sm);
+    const serialized = JSON.stringify(toolResult.details);
+    expect(serialized).not.toContain(tokenValue);
+    expect(serialized).not.toContain(bearerValue);
+    // Negative half: non-secret diagnostics and the visible content survive.
+    expect(toolResult.content[0]?.text).toBe("visible output stays small");
+    expect(serialized).toContain('"status":"completed"');
+    expect(serialized).toContain('"exitCode":0');
+    expect(serialized).toContain("/tmp/work");
+    expect(serialized).toContain("GITHUB_TOKEN=");
+    expect(serialized).toContain("Bearer");
+    expect(serialized).toContain("https://example.test");
+  });
+
+  it("masks values under credential-named keys even when no pattern matches", () => {
+    const sm = guardSessionManager(SessionManager.inMemory(), {
+      agentId: "main",
+      sessionKey: "main",
+    });
+    appendDetails(sm, {
+      token: { value: "shortsecret" },
+      hostname: "build-07",
+    });
+
+    const toolResult = getPersistedToolResult(sm);
+    const serialized = JSON.stringify(toolResult.details);
+    expect(serialized).not.toContain("shortsecret");
+    expect(serialized).toContain("***");
+    expect(serialized).toContain("build-07");
+  });
+
+  it("redacts secrets embedded in detail keys and caps recursion depth", () => {
+    const tokenValue = "abcdefghijklmnopqrstuvwx1234567890";
+    const sm = guardSessionManager(SessionManager.inMemory(), {
+      agentId: "main",
+      sessionKey: "main",
+    });
+    let deepDetails: Record<string, unknown> = { token: tokenValue };
+    for (let index = 0; index < 10; index += 1) {
+      deepDetails = { child: deepDetails };
+    }
+    appendDetails(sm, {
+      [`https://example.test/callback?token=${tokenValue}`]: "ok",
+      deepDetails,
+    });
+
+    const toolResult = getPersistedToolResult(sm);
+    const serialized = JSON.stringify(toolResult.details);
+    expect(serialized).not.toContain(tokenValue);
+    expect(serialized).toContain("max depth exceeded");
+    // Negative half: the non-secret part of the key survives.
+    expect(serialized).toContain("https://example.test/callback?token=");
+    expect(serialized).toContain('"ok"');
+  });
+
+  it("applies configured redactPatterns supplied through the wrapper config", () => {
+    const customSecret = "customsecret=abcdef1234567890ghij";
+    const sm = guardSessionManager(SessionManager.inMemory(), {
+      agentId: "main",
+      sessionKey: "main",
+      config: {
+        logging: { redactPatterns: [String.raw`customsecret=([^\s]+)`] },
+      } as never,
+    });
+    appendDetails(sm, { diagnostic: customSecret, hostname: "build-07" });
+
+    const toolResult = getPersistedToolResult(sm);
+    const serialized = JSON.stringify(toolResult.details);
+    expect(serialized).not.toContain(customSecret);
+    // Custom patterns run first, then the built-in ENV-assignment pattern masks
+    // the already-shortened hint again; either way the key name survives.
+    expect(serialized).toContain("customsecret=");
+    expect(serialized).toContain("build-07");
+  });
+
+  it("leaves details without secrets byte-identical", () => {
+    const sm = guardSessionManager(SessionManager.inMemory(), {
+      agentId: "main",
+      sessionKey: "main",
+    });
+    const details = { status: "completed", exitCode: 0, cwd: "/tmp/work", durationMs: 12 };
+    appendDetails(sm, details);
+
+    const toolResult = getPersistedToolResult(sm);
+    expect(toolResult.details).toEqual(details);
+  });
+});

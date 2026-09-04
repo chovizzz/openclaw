@@ -1,6 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { normalizeResolvedSecretInputString } from "../config/types.secrets.js";
 import {
   loadOrCreateDeviceIdentity,
   publicKeyRawBase64UrlFromPem,
@@ -306,6 +307,72 @@ describe("gateway talk.config", () => {
               voiceId: "voice-from-config",
               providerApiKey: undefined,
             });
+          });
+        },
+      );
+    });
+  });
+
+  it("does not throw when SecretRef apiKey flows through a strict provider resolver", async () => {
+    // Regression: speech providers call the strict normalizeResolvedSecretInputString
+    // helper inside resolveTalkConfig. The discovery path used to hand them the raw
+    // source config with the SecretRef wrapper still intact, so talk.config threw
+    // "unresolved SecretRef" instead of returning a redacted payload.
+    const apiKeyPath = `talk.providers.${GENERIC_TALK_PROVIDER_ID}.apiKey`;
+    await writeTalkConfig({
+      apiKey: { source: "env", provider: "default", id: GENERIC_TALK_API_ENV },
+      voiceId: "voice-secretref",
+    });
+
+    await withEnvAsync({ [GENERIC_TALK_API_ENV]: "env-acme-key" }, async () => {
+      await withSpeechProviders(
+        [
+          {
+            pluginId: "acme-strict-talk-provider-test",
+            source: "test",
+            provider: {
+              id: GENERIC_TALK_PROVIDER_ID,
+              label: "Acme Strict Speech",
+              isConfigured: () => true,
+              resolveTalkConfig: ({
+                talkProviderConfig,
+              }: {
+                talkProviderConfig: { apiKey?: unknown };
+              }) => {
+                const apiKey = normalizeResolvedSecretInputString({
+                  value: talkProviderConfig.apiKey,
+                  path: apiKeyPath,
+                });
+                return {
+                  ...talkProviderConfig,
+                  ...(apiKey === undefined ? {} : { apiKey }),
+                };
+              },
+              synthesize: async () => ({
+                audioBuffer: Buffer.from([1]),
+                outputFormat: "mp3",
+                fileExtension: ".mp3",
+                voiceCompatible: false,
+              }),
+            },
+          },
+        ] as never,
+        async () => {
+          await withServer(async (ws) => {
+            await connectOperator(ws, ["operator.read"]);
+            const res = await fetchTalkConfig(ws);
+            // Positive half: the call must not throw, and no credential material
+            // reaches a read-scope caller.
+            expect(res.ok, JSON.stringify(res.error)).toBe(true);
+            const talk = res.payload?.config?.talk;
+            expect(JSON.stringify(res.payload)).not.toContain("env-acme-key");
+            const redactedApiKey = talk?.providers?.[GENERIC_TALK_PROVIDER_ID]?.apiKey;
+            expect(redactedApiKey).toBeTypeOf("object");
+            expect((redactedApiKey as SecretRef).id).toBe("__OPENCLAW_REDACTED__");
+            expect(talk?.resolved?.config?.apiKey).toEqual(redactedApiKey);
+            // Negative half: non-secret discovery data still reaches the UI.
+            expect(talk?.provider).toBe(GENERIC_TALK_PROVIDER_ID);
+            expect(talk?.providers?.[GENERIC_TALK_PROVIDER_ID]?.voiceId).toBe("voice-secretref");
           });
         },
       );

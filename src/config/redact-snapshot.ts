@@ -418,12 +418,19 @@ export function redactConfigSnapshot(
     // properly redacted all sensitive data. Handing out a partially or, worse,
     // unredacted config string would be bad.
     // Therefore, the only safe route is to reject handling out broken configs.
+    // `sourceConfig`/`runtimeConfig` are aliases of `resolved`/`config`. They must be
+    // overwritten explicitly: the `...snapshot` spread would otherwise carry the
+    // unredacted originals straight through.
+    const redactedConfig = {} as ConfigFileSnapshot["config"];
+    const redactedResolved = {} as ConfigFileSnapshot["resolved"];
     return {
       ...snapshot,
-      config: {},
+      sourceConfig: redactedResolved,
+      runtimeConfig: redactedConfig,
+      config: redactedConfig,
       raw: null,
       parsed: null,
-      resolved: {},
+      resolved: redactedResolved,
     };
   }
   // else: snapshot.config must be valid and populated, as that is what
@@ -450,6 +457,9 @@ export function redactConfigSnapshot(
 
   return {
     ...snapshot,
+    // Alias fields must be replaced too; the spread above would leak the originals.
+    sourceConfig: redactedResolved,
+    runtimeConfig: redactedConfig,
     config: redactedConfig,
     raw: redactedRaw,
     parsed: redactedParsed,

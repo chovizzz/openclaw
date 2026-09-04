@@ -3,6 +3,7 @@ import {
   sanitizeAssistantVisibleText,
   sanitizeAssistantVisibleTextWithProfile,
   stripAssistantInternalScaffolding,
+  stripToolCallXmlTags,
 } from "./assistant-visible-text.js";
 import { stripModelSpecialTokens } from "./model-special-tokens.js";
 
@@ -441,5 +442,66 @@ describe("sanitizeAssistantVisibleTextWithProfile", () => {
     expect(sanitizeAssistantVisibleTextWithProfile(input, "internal-scaffolding")).toContain(
       "[Tool Call: read (ID: toolu_1)]",
     );
+  });
+});
+
+describe("plural function-call response leaks", () => {
+  it("keeps prose that follows a response body quoting the close tag", () => {
+    // A plain indexOf would stop at the quoted literal and delete the real
+    // answer after it — dropping a real reply is worse than the leak.
+    const input =
+      '<function_calls><invoke name="exec">internal</invoke></function_calls>' +
+      "<function_response>the doc shows &lt;/function_response&gt; verbatim</function_response>" +
+      "\nThe real answer.";
+    expect(stripToolCallXmlTags(input, { stripFunctionResponseAfterPluralToolCalls: true })).toBe(
+      "\nThe real answer.",
+    );
+  });
+
+  it("strips a nested response pair without truncating the tail", () => {
+    const input =
+      '<function_calls><invoke name="exec">internal</invoke></function_calls>' +
+      "<function_response>outer<function_response>inner</function_response>rest</function_response>" +
+      "\nTail kept.";
+    expect(stripToolCallXmlTags(input, { stripFunctionResponseAfterPluralToolCalls: true })).toBe(
+      "\nTail kept.",
+    );
+  });
+
+  it("strips plural function-call XML before function_response without stripping prose examples", () => {
+    const leak =
+      '<function_calls><invoke name="exec">internal</invoke></function_calls><function_response>raw</function_response>\nAfter';
+    const prose =
+      'prefix <function_calls><invoke name="find">secret</invoke></function_calls> suffix';
+
+    expect(stripToolCallXmlTags(leak, { stripFunctionResponseAfterPluralToolCalls: true })).toBe(
+      "\nAfter",
+    );
+    // Negative half: a bare wrapper with no adjacent response is prose, not a leak.
+    expect(stripToolCallXmlTags(prose, { stripFunctionResponseAfterPluralToolCalls: true })).toBe(
+      prose,
+    );
+  });
+
+  it("strips adjacent plural function-call XML on the delivery path", () => {
+    const input = [
+      '<function_calls><invoke name="exec">internal</invoke></function_calls><function_response>',
+      'Searching for: "what skills matter most in the age of AI"',
+      "</function_response>",
+      "Visible answer",
+    ].join("\n");
+
+    const output = sanitizeAssistantVisibleText(input);
+    expect(output).not.toContain("function_response");
+    expect(output).not.toContain("Searching for:");
+    // Negative half: the actual answer survives.
+    expect(output).toBe("Visible answer");
+  });
+
+  it("preserves prose examples of plural function-call XML on the delivery path", () => {
+    const input =
+      'prefix <function_calls><invoke name="find">secret</invoke></function_calls> suffix';
+
+    expect(sanitizeAssistantVisibleText(input)).toBe(input);
   });
 });

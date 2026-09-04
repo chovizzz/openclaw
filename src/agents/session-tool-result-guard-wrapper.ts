@@ -77,6 +77,9 @@ export function guardSessionManager(
     allowSyntheticToolResults: opts?.allowSyntheticToolResults,
     allowedToolNames: opts?.allowedToolNames,
     beforeMessageWriteHook: beforeMessageWrite,
+    // Pass the already-resolved config through: persisted-detail redaction runs
+    // inside the session write path and must not re-enter config loading.
+    redactLoggingConfig: opts?.config?.logging,
     maxToolResultChars:
       typeof opts?.contextWindowTokens === "number"
         ? resolveLiveToolResultMaxChars({

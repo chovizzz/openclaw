@@ -30,6 +30,42 @@ export type OutboundPayloadJson = {
   channelData?: Record<string, unknown>;
 };
 
+// Relay housekeeping strings the agent emits to describe what it did on the
+// internal side. They are not answers, and they leak local workspace paths when
+// delivered to an external channel, so drop them before delivery. Every pattern
+// is fully anchored so ordinary prose that merely mentions the same words is
+// kept.
+function isSuppressedRelayStatusText(text: string): boolean {
+  const normalized = text.trim();
+  if (!normalized) {
+    return false;
+  }
+  if (/^no channel reply\.?$/i.test(normalized)) {
+    return true;
+  }
+  if (/^replied in-thread\.?$/i.test(normalized)) {
+    return true;
+  }
+  if (/^replied in #[-\w]+\.?$/i.test(normalized)) {
+    return true;
+  }
+  // Relay wiki-update notices. Narrowed from upstream on purpose: the trailing
+  // "No channel reply." marker is REQUIRED here. Upstream made it optional, which
+  // silently drops legitimate replies like
+  // `Updated [wiki/roadmap.md] with the launch notes.` - dropping a real answer is
+  // worse than the leak this suppresses. The bracket body is length-bounded and
+  // excludes `]`, and the tail excludes `[` so there is no ambiguous overlap
+  // between the two quantified spans; matching stays linear on adversarial input.
+  if (
+    /^updated\s+\[[^\]]{0,512}wiki\/[^\]]{1,512}\](?:\([^)]{0,1024}\))?(?:\s+with[^[]{0,2048}?)?\.?\s*no channel reply\.?$/i.test(
+      normalized,
+    )
+  ) {
+    return true;
+  }
+  return false;
+}
+
 function mergeMediaUrls(...lists: Array<ReadonlyArray<string | undefined> | undefined>): string[] {
   const seen = new Set<string>();
   const merged: string[] = [];
@@ -67,6 +103,12 @@ export function normalizeReplyPayloadsForDelivery(
       explicitMediaUrls,
       explicitMediaUrl ? [explicitMediaUrl] : undefined,
     );
+    const parsedText = parsed.text ?? "";
+    // Checked before the payload is built so relay status text with no media is
+    // dropped rather than delivered.
+    if (isSuppressedRelayStatusText(parsedText) && mergedMedia.length === 0) {
+      continue;
+    }
     const hasMultipleMedia = (explicitMediaUrls?.length ?? 0) > 1;
     const resolvedMediaUrl = hasMultipleMedia ? undefined : explicitMediaUrl;
     const next: ReplyPayload = {
@@ -74,7 +116,7 @@ export function normalizeReplyPayloadsForDelivery(
       text:
         formatBtwTextForExternalDelivery({
           ...payload,
-          text: parsed.text ?? "",
+          text: parsedText,
         }) ?? "",
       mediaUrls: mergedMedia.length ? mergedMedia : undefined,
       mediaUrl: resolvedMediaUrl,

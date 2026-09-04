@@ -151,12 +151,16 @@ export async function runCli(argv: string[] = process.argv) {
       return;
     }
 
+    // Capture all console output into structured logs while keeping stdout/stderr behavior.
+    // Installed before the routed-command fast path: routed commands return without ever
+    // reaching the Commander path below, so leaving the capture there let their console
+    // output bypass the logging sink (no file-transport redaction, and no suppression of
+    // libsignal session dumps). enableConsoleCapture() is idempotent.
+    enableConsoleCapture();
+
     if (await tryRouteCli(normalizedArgv)) {
       return;
     }
-
-    // Capture all console output into structured logs while keeping stdout/stderr behavior.
-    enableConsoleCapture();
 
     const [
       { buildProgram },

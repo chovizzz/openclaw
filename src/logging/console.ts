@@ -7,6 +7,7 @@ import { resolveEnvLogLevelOverride } from "./env-log-level.js";
 import { type LogLevel, normalizeLogLevel } from "./levels.js";
 import { getLogger, type LoggerSettings } from "./logger.js";
 import { resolveNodeRequireFromMeta } from "./node-require.js";
+import { redactSensitiveText } from "./redact.js";
 import { loggingState } from "./state.js";
 import { formatLocalIsoWithOffset, formatTimestamp } from "./timestamps.js";
 
@@ -152,11 +153,14 @@ const SUPPRESSED_DISCORD_EVENTQUEUE_LISTENERS = [
 ] as const;
 
 function shouldSuppressConsoleMessage(message: string): boolean {
-  if (isVerbose()) {
-    return false;
-  }
+  // Checked before the verbose bail-out on purpose: these libsignal session
+  // dumps carry ratchet root keys and private keys in their formatted meta, so
+  // `--verbose` must not turn them back on.
   if (SUPPRESSED_CONSOLE_PREFIXES.some((prefix) => message.startsWith(prefix))) {
     return true;
+  }
+  if (isVerbose()) {
+    return false;
   }
   if (
     message.startsWith("[EventQueue] Slow listener detected") &&
@@ -240,10 +244,18 @@ export function enableConsoleCapture(): void {
   const forward =
     (level: LogLevel, orig: (...args: unknown[]) => void) =>
     (...args: unknown[]) => {
-      const formatted = util.format(...args);
-      if (shouldSuppressConsoleMessage(formatted)) {
+      const raw = util.format(...args);
+      if (shouldSuppressConsoleMessage(raw)) {
         return;
       }
+      // Sink-boundary redaction. Everything below this point either persists the
+      // line to the rolling log file or prints it to the terminal, and console.*
+      // callers include third-party libraries that dump credentials verbatim.
+      // When nothing matched we keep forwarding the original `args` so object
+      // inspection and colors are untouched; only a line that actually contained
+      // a secret collapses to the redacted string.
+      const formatted = redactSensitiveText(raw);
+      const wasRedacted = formatted !== raw;
       const trimmed = stripAnsi(formatted).trimStart();
       const shouldPrefixTimestamp =
         loggingState.consoleTimestampPrefix && trimmed.length > 0 && !hasTimestampPrefix(trimmed);
@@ -282,6 +294,10 @@ export function enableConsoleCapture(): void {
         }
       } else {
         try {
+          if (wasRedacted) {
+            orig.call(console, timestamp ? `${timestamp} ${formatted}` : formatted);
+            return;
+          }
           if (!timestamp) {
             orig.apply(console, args as []);
             return;

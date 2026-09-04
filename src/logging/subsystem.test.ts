@@ -4,10 +4,10 @@ import { resetLogger, setLoggerOverride } from "./logger.js";
 import { loggingState } from "./state.js";
 import { createSubsystemLogger } from "./subsystem.js";
 
-function installConsoleMethodSpy(method: "warn" | "error") {
+function installConsoleMethodSpy(method: "log" | "warn" | "error") {
   const spy = vi.fn();
   loggingState.rawConsole = {
-    log: vi.fn(),
+    log: method === "log" ? spy : vi.fn(),
     info: vi.fn(),
     warn: method === "warn" ? spy : vi.fn(),
     error: method === "error" ? spy : vi.fn(),
@@ -20,6 +20,7 @@ afterEach(() => {
   setLoggerOverride(null);
   loggingState.rawConsole = null;
   resetLogger();
+  vi.unstubAllEnvs();
 });
 
 describe("createSubsystemLogger().isEnabled", () => {
@@ -163,5 +164,90 @@ describe("createSubsystemLogger().isEnabled", () => {
     });
 
     expect(warn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("createSubsystemLogger() console redaction", () => {
+  it("redacts sensitive tokens at the console sink so subsystem writes do not leak secrets", () => {
+    setLoggerOverride({ level: "silent", consoleLevel: "warn" });
+    const warn = installConsoleMethodSpy("warn");
+    const log = createSubsystemLogger("gateway");
+    const secret = "sk-supersecretvaluefortest12345";
+
+    log.warn(`connect failed token=${secret} host=build-07`);
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    const written = String(warn.mock.calls[0]?.[0] ?? "");
+    expect(written).not.toContain(secret);
+    // Negative half: the surrounding diagnostic text survives.
+    expect(written).toContain("connect failed");
+    expect(written).toContain("host=build-07");
+    expect(written).toContain("[gateway]");
+  });
+
+  it("redacts Bearer tokens on subsystem error console writes", () => {
+    setLoggerOverride({ level: "silent", consoleLevel: "error" });
+    const error = installConsoleMethodSpy("error");
+    const log = createSubsystemLogger("gateway").child("auth");
+
+    log.error("Authorization failed: Bearer abcdefghijklmnopqrstuvwxyz");
+
+    expect(error).toHaveBeenCalledTimes(1);
+    const written = String(error.mock.calls[0]?.[0] ?? "");
+    expect(written).not.toContain("abcdefghijklmnopqrstuvwxyz");
+    expect(written).toContain("Authorization failed: ");
+    expect(written).toContain("Bearer ");
+  });
+
+  it("redacts before colorizing so the trailing ANSI reset survives", () => {
+    vi.stubEnv("FORCE_COLOR", "1");
+    setLoggerOverride({ level: "silent", consoleLevel: "info" });
+    const logSpy = installConsoleMethodSpy("log");
+    const log = createSubsystemLogger("gateway/auth");
+    const secret = "sk-abcdefghijklmnopqrstuvwxyz123456";
+
+    log.info(`provider API_KEY=${secret} ready`);
+
+    expect(logSpy).toHaveBeenCalledTimes(1);
+    const written = String(logSpy.mock.calls[0]?.[0] ?? "");
+    expect(written).not.toContain(secret);
+    expect(written).toContain("provider API_KEY=");
+    expect(written).toContain(" ready");
+    // Colorization wraps the already-redacted message, so the reset code is last.
+    expect(written.endsWith("\u001B[39m")).toBe(true);
+  });
+
+  it("redacts sensitive tokens from raw subsystem console output", () => {
+    setLoggerOverride({ level: "silent", consoleLevel: "info" });
+    const logSpy = installConsoleMethodSpy("log");
+    const log = createSubsystemLogger("gateway/auth");
+    const secret = "sk-rawtokenabcdefghijklmnopqrstuvwxyz123456";
+
+    log.raw(`raw token ${secret} tail`);
+
+    expect(logSpy).toHaveBeenCalledTimes(1);
+    const written = String(logSpy.mock.calls[0]?.[0] ?? "");
+    expect(written).not.toContain(secret);
+    expect(written).toContain("raw token ");
+    expect(written).toContain(" tail");
+  });
+
+  it("redacts json-style console lines including formatted meta", () => {
+    setLoggerOverride({ level: "silent", consoleLevel: "info", consoleStyle: "json" });
+    const logSpy = installConsoleMethodSpy("log");
+    const log = createSubsystemLogger("gateway");
+    const secret = "sk-jsonmetasecretvalue0123456789";
+
+    log.info("startup", { apiKey: secret, host: "build-07" });
+
+    expect(logSpy).toHaveBeenCalledTimes(1);
+    const written = String(logSpy.mock.calls[0]?.[0] ?? "");
+    expect(written).not.toContain(secret);
+    // Negative half: the line must still be valid JSON with its fields intact.
+    const parsed = JSON.parse(written) as Record<string, unknown>;
+    expect(parsed.message).toBe("startup");
+    expect(parsed.host).toBe("build-07");
+    expect(parsed.subsystem).toBe("gateway");
+    expect(String(parsed.apiKey)).not.toContain(secret);
   });
 });

@@ -52,6 +52,55 @@ describe("normalizeReplyPayloadsForDelivery", () => {
     ]);
   });
 
+  it("suppresses relay status placeholder payloads", () => {
+    expect(
+      normalizeReplyPayloadsForDelivery([
+        { text: "No channel reply." },
+        { text: "Replied in-thread." },
+        { text: "Replied in #maintainers." },
+        {
+          text: "Updated [wiki/providers.md](/home/agent/.openclaw/workspace/wiki/providers.md:33). No channel reply.",
+        },
+        {
+          text: "Updated [wiki/tools.md] with the rollback failure-mode nuance. No channel reply.",
+        },
+      ]),
+    ).toEqual([]);
+  });
+
+  it("keeps normal payloads that mention wiki without matching relay placeholders", () => {
+    const result = normalizeReplyPayloadsForDelivery([
+      { text: "Please update wiki/tools.md after this ships." },
+      { text: "I replied in #maintainers and then finished the migration." },
+      // Near-misses of the relay shape that are real answers: the suppression
+      // pattern requires the trailing "No channel reply." marker.
+      { text: "Updated [wiki/roadmap.md] with the launch notes." },
+      { text: "Updated [wiki/providers.md](/home/agent/workspace/wiki/providers.md:33)." },
+    ]);
+    // Negative half: prose that merely contains the same words is delivered.
+    expect(result.map((entry) => entry.text)).toEqual([
+      "Please update wiki/tools.md after this ships.",
+      "I replied in #maintainers and then finished the migration.",
+      "Updated [wiki/roadmap.md] with the launch notes.",
+      "Updated [wiki/providers.md](/home/agent/workspace/wiki/providers.md:33).",
+    ]);
+  });
+
+  it("stays linear on adversarial relay-shaped input", () => {
+    const started = Date.now();
+    const hostile = `Updated [${"wiki/".repeat(10_000)}`;
+    expect(normalizeReplyPayloadsForDelivery([{ text: hostile }])[0]?.text).toBe(hostile);
+    expect(Date.now() - started).toBeLessThan(2_000);
+  });
+
+  it("keeps relay status text when it carries media", () => {
+    const result = normalizeReplyPayloadsForDelivery([
+      { text: "No channel reply.", mediaUrl: "https://example.test/a.png" },
+    ]);
+    expect(result).toHaveLength(1);
+    expect(result[0]?.mediaUrl).toBe("https://example.test/a.png");
+  });
+
   it("drops JSON NO_REPLY action payloads without media", () => {
     expect(
       normalizeReplyPayloadsForDelivery([

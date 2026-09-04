@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { setVerbose } from "../global-state.js";
 import {
   enableConsoleCapture,
   resetLogger,
@@ -28,6 +29,7 @@ beforeEach(() => {
   loggingState.forceConsoleToStderr = false;
   loggingState.consoleTimestampPrefix = false;
   loggingState.rawConsole = null;
+  setVerbose(false);
   resetLogger();
 });
 
@@ -37,6 +39,7 @@ afterEach(() => {
   loggingState.forceConsoleToStderr = false;
   loggingState.consoleTimestampPrefix = false;
   loggingState.rawConsole = null;
+  setVerbose(false);
   resetLogger();
   setLoggerOverride(null);
   vi.restoreAllMocks();
@@ -154,6 +157,66 @@ describe("enableConsoleCapture", () => {
     const other = new Error("EACCES") as NodeJS.ErrnoException;
     other.code = "EACCES";
     expect(() => process.stdout.emit("error", other)).toThrow("EACCES");
+  });
+
+  it("suppresses libsignal session dumps even in verbose mode", () => {
+    setLoggerOverride({ level: "info", file: tempLogPath() });
+    const info = vi.fn();
+    console.info = info;
+    setVerbose(true);
+    enableConsoleCapture();
+
+    console.info("Closing session:", {
+      currentRatchet: { rootKey: "root-key-material" },
+      privKey: "private-key-material",
+    });
+
+    expect(info).not.toHaveBeenCalled();
+  });
+
+  it("redacts secrets at the console-capture sink before the terminal write", () => {
+    setLoggerOverride({ level: "info", file: tempLogPath() });
+    const info = vi.fn();
+    console.info = info;
+    enableConsoleCapture();
+
+    console.info("provider ready OPENAI_API_KEY=sk-consolecapture0123456789 host=build-07");
+
+    expect(info).toHaveBeenCalledTimes(1);
+    const written = String(info.mock.calls[0]?.[0] ?? "");
+    expect(written).not.toContain("sk-consolecapture0123456789");
+    // Negative half: the diagnostic context around the secret is preserved.
+    expect(written).toContain("provider ready OPENAI_API_KEY=");
+    expect(written).toContain("host=build-07");
+  });
+
+  it("passes non-secret console arguments through untouched", () => {
+    setLoggerOverride({ level: "info", file: tempLogPath() });
+    const info = vi.fn();
+    console.info = info;
+    enableConsoleCapture();
+
+    const payload = { host: "build-07", retries: 3 };
+    console.info("startup", payload);
+
+    expect(info).toHaveBeenCalledTimes(1);
+    // Nothing matched, so the original argument list is forwarded verbatim
+    // (object inspection and colors stay intact).
+    expect(info.mock.calls[0]?.[0]).toBe("startup");
+    expect(info.mock.calls[0]?.[1]).toBe(payload);
+  });
+
+  it("still forwards ordinary verbose console output", () => {
+    setLoggerOverride({ level: "info", file: tempLogPath() });
+    const info = vi.fn();
+    console.info = info;
+    setVerbose(true);
+    enableConsoleCapture();
+
+    console.info("gateway listening on port 18789");
+
+    expect(info).toHaveBeenCalledTimes(1);
+    expect(String(info.mock.calls[0]?.[0] ?? "")).toContain("gateway listening on port 18789");
   });
 });
 

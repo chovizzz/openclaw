@@ -5,6 +5,7 @@ import { resetUncaughtExceptionHandlerForTest } from "../infra/unhandled-rejecti
 import { runCli } from "./run-main.js";
 
 const tryRouteCliMock = vi.hoisted(() => vi.fn());
+const enableConsoleCaptureMock = vi.hoisted(() => vi.fn());
 const loadDotEnvMock = vi.hoisted(() => vi.fn());
 const normalizeEnvMock = vi.hoisted(() => vi.fn());
 const ensurePathMock = vi.hoisted(() => vi.fn());
@@ -25,6 +26,11 @@ const maybeRunCliInContainerMock = vi.hoisted(() =>
     (argv: string[]) => { handled: true; exitCode: number } | { handled: false; argv: string[] }
   >((argv: string[]) => ({ handled: false, argv })),
 );
+
+vi.mock("../logging.js", async () => ({
+  ...(await vi.importActual<typeof import("../logging.js")>("../logging.js")),
+  enableConsoleCapture: enableConsoleCaptureMock,
+}));
 
 vi.mock("./route.js", () => ({
   tryRouteCli: tryRouteCliMock,
@@ -121,6 +127,27 @@ describe("runCli exit behavior", () => {
     expect(startTaskRegistryMaintenanceMock).not.toHaveBeenCalled();
     expect(exitSpy).not.toHaveBeenCalled();
     exitSpy.mockRestore();
+  });
+
+  it("installs console capture before the routed-command fast path", async () => {
+    tryRouteCliMock.mockResolvedValueOnce(true);
+
+    await runCli(["node", "openclaw", "status"]);
+
+    expect(enableConsoleCaptureMock).toHaveBeenCalledTimes(1);
+    expect(tryRouteCliMock).toHaveBeenCalledTimes(1);
+    const captureOrder = enableConsoleCaptureMock.mock.invocationCallOrder[0] ?? 0;
+    const routeOrder = tryRouteCliMock.mock.invocationCallOrder[0] ?? 0;
+    expect(captureOrder).toBeGreaterThan(0);
+    expect(routeOrder).toBeGreaterThan(captureOrder);
+  });
+
+  it("does not install console capture on the root-help fast path", async () => {
+    await runCli(["node", "openclaw", "--help"]);
+
+    // Negative half: the pre-route help path still returns before any capture install.
+    expect(enableConsoleCaptureMock).not.toHaveBeenCalled();
+    expect(outputRootHelpMock).toHaveBeenCalledTimes(1);
   });
 
   it("renders root help without building the full program", async () => {

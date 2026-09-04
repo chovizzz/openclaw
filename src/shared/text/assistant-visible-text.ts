@@ -162,11 +162,112 @@ function parseToolCallTagAt(text: string, start: number): ParsedToolCallTag | nu
   };
 }
 
-export function stripToolCallXmlTags(text: string): string {
+const PLURAL_TOOL_CALL_WRAPPER_TAGS = new Set(["function_calls", "tool_calls"]);
+
+/** Index of the close tag that balances an opening tool-call tag, or -1. */
+function findMatchingToolCallCloseIndex(text: string, start: number, tagName: string): number {
+  let depth = 1;
+  for (let idx = start; idx < text.length; idx += 1) {
+    if (text[idx] !== "<") {
+      continue;
+    }
+    const tag = parseToolCallTagAt(text, idx);
+    if (!tag || tag.tagName !== tagName || tag.isTruncated) {
+      continue;
+    }
+    if (tag.isSelfClosing) {
+      idx = Math.max(idx, tag.end - 1);
+      continue;
+    }
+    depth += tag.isClose ? -1 : 1;
+    if (depth === 0) {
+      return idx;
+    }
+    idx = Math.max(idx, tag.end - 1);
+  }
+  return -1;
+}
+
+const FUNCTION_RESPONSE_CLOSE_TAG = "</function_response>";
+const FUNCTION_RESPONSE_OPEN_RE = /^\s*<function_response(?:\s[^>]*)?>/i;
+const FUNCTION_RESPONSE_OPEN_TAG_RE = /<function_response(?:\s[^>]*)?>/gi;
+
+/**
+ * Depth-aware close finder. A plain `indexOf` returns the *first* literal
+ * `</function_response>`, so a response body that legitimately quotes that
+ * string would end the strip early and delete the real prose that follows it.
+ */
+function findFunctionResponseCloseIndex(text: string, from: number): number {
+  let depth = 1;
+  let cursor = from;
+  while (cursor < text.length) {
+    const close = text.indexOf(FUNCTION_RESPONSE_CLOSE_TAG, cursor);
+    if (close === -1) {
+      return -1;
+    }
+    FUNCTION_RESPONSE_OPEN_TAG_RE.lastIndex = cursor;
+    let nested = 0;
+    let match: RegExpExecArray | null;
+    while ((match = FUNCTION_RESPONSE_OPEN_TAG_RE.exec(text)) !== null && match.index < close) {
+      nested++;
+    }
+    depth += nested - 1;
+    if (depth === 0) {
+      return close;
+    }
+    cursor = close + FUNCTION_RESPONSE_CLOSE_TAG.length;
+  }
+  return -1;
+}
+
+/**
+ * End offset of a leaked `<function_calls>...</function_calls><function_response>...
+ * </function_response>` pair starting at `tag`, or -1 when this is not that shape.
+ *
+ * A bare plural wrapper is left alone: models legitimately quote it as a prose
+ * example. It is only treated as a leak when a `function_response` block follows
+ * immediately, which no prose example does.
+ *
+ * `function_response` is deliberately NOT added to TOOL_CALL_TAG_NAMES (that would
+ * change unrelated stripping behavior), so it is matched with literal scans here.
+ * Both scans are `indexOf`/anchored-prefix only, so this stays linear per wrapper.
+ */
+function findPluralToolCallResponseLeakEnd(text: string, tag: ParsedToolCallTag): number {
+  if (!PLURAL_TOOL_CALL_WRAPPER_TAGS.has(tag.tagName) || tag.isTruncated) {
+    return -1;
+  }
+  const wrapperCloseStart = findMatchingToolCallCloseIndex(text, tag.end, tag.tagName);
+  if (wrapperCloseStart === -1) {
+    return -1;
+  }
+  const wrapperCloseTag = parseToolCallTagAt(text, wrapperCloseStart);
+  if (!wrapperCloseTag) {
+    return -1;
+  }
+  const afterWrapper = text.slice(wrapperCloseTag.end);
+  const openMatch = FUNCTION_RESPONSE_OPEN_RE.exec(afterWrapper);
+  if (!openMatch) {
+    return -1;
+  }
+  const responseBodyStart = wrapperCloseTag.end + openMatch[0].length;
+  const responseCloseStart = findFunctionResponseCloseIndex(text, responseBodyStart);
+  if (responseCloseStart === -1) {
+    return -1;
+  }
+  return responseCloseStart + FUNCTION_RESPONSE_CLOSE_TAG.length;
+}
+
+export function stripToolCallXmlTags(
+  text: string,
+  options: { stripFunctionResponseAfterPluralToolCalls?: boolean } = {},
+): string {
   if (!text || !TOOL_CALL_QUICK_RE.test(text)) {
     return text;
   }
 
+  const hasFunctionResponse =
+    options.stripFunctionResponseAfterPluralToolCalls === true &&
+    text.includes(FUNCTION_RESPONSE_CLOSE_TAG);
   const codeRegions = findCodeRegions(text);
   let result = "";
   let lastIndex = 0;
@@ -211,6 +312,14 @@ export function stripToolCallXmlTags(text: string): string {
         lastIndex = tag.end;
         idx = Math.max(idx, tag.end - 1);
         continue;
+      }
+      if (options.stripFunctionResponseAfterPluralToolCalls === true && hasFunctionResponse) {
+        const leakEnd = findPluralToolCallResponseLeakEnd(text, tag);
+        if (leakEnd !== -1) {
+          lastIndex = leakEnd;
+          idx = Math.max(idx, leakEnd - 1);
+          continue;
+        }
       }
       if (
         !tag.isClose &&
@@ -477,6 +586,7 @@ type AssistantVisibleTextPipelineOptions = {
   finalTrim: ReasoningTagTrim;
   preserveDowngradedToolText?: boolean;
   preserveMinimaxToolXml?: boolean;
+  stripFunctionResponseAfterPluralToolCalls?: boolean;
   reasoningMode: ReasoningTagMode;
   reasoningTrim: ReasoningTagTrim;
   stageOrder: "reasoning-first" | "reasoning-last";
@@ -488,6 +598,7 @@ const ASSISTANT_VISIBLE_TEXT_PIPELINE_OPTIONS: Record<
 > = {
   delivery: {
     finalTrim: "both",
+    stripFunctionResponseAfterPluralToolCalls: true,
     reasoningMode: "strict",
     reasoningTrim: "both",
     stageOrder: "reasoning-last",
@@ -537,7 +648,9 @@ function applyAssistantVisibleTextStagePipeline(
     }
     cleaned = stripModelSpecialTokens(cleaned);
     cleaned = stripRelevantMemoriesTags(cleaned);
-    cleaned = stripToolCallXmlTags(cleaned);
+    cleaned = stripToolCallXmlTags(cleaned, {
+      stripFunctionResponseAfterPluralToolCalls: options.stripFunctionResponseAfterPluralToolCalls,
+    });
     if (!options.preserveDowngradedToolText) {
       cleaned = stripDowngradedToolCallText(cleaned);
     }

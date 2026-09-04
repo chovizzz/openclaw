@@ -1,5 +1,10 @@
 import type { AgentMessage } from "@mariozechner/pi-agent-core";
 import type { SessionManager } from "@mariozechner/pi-coding-agent";
+import {
+  isSensitiveFieldKey,
+  redactSensitiveFieldValueWithConfig,
+  redactToolPayloadTextWithConfig,
+} from "../logging/redact.js";
 import type {
   PluginHookBeforeMessageWriteEvent,
   PluginHookBeforeMessageWriteResult,
@@ -33,6 +38,104 @@ function capToolResultSize(msg: AgentMessage, maxChars: number): AgentMessage {
     suffix: (truncatedChars) => formatContextLimitTruncationNotice(truncatedChars),
     minKeepChars: 2_000,
   });
+}
+
+const MAX_PERSISTED_DETAIL_REDACTION_DEPTH = 8;
+
+type ToolResultDetailRedactionConfig = Parameters<typeof redactToolPayloadTextWithConfig>[1];
+
+function selectPersistedDetailRedactionKey(
+  key: string,
+  inheritedKey: string | undefined,
+): string | undefined {
+  return isSensitiveFieldKey(key) ? key : inheritedKey;
+}
+
+/**
+ * Deep-redact tool result `details` before they are written to the session
+ * transcript. Details are the raw shape returned by a tool (exec env maps,
+ * provider responses, config dumps) and are persisted verbatim, so pattern
+ * redaction alone is not enough: a value sitting under a credential-named key
+ * carries no `KEY=value` text for the patterns to latch onto, and is masked by
+ * key name instead. Depth is capped so a hostile/cyclic detail tree cannot
+ * make persistence unbounded.
+ */
+function redactPersistedDetailValue(
+  value: unknown,
+  depth = 0,
+  redactionKey?: string,
+  redactionConfig?: ToolResultDetailRedactionConfig,
+): unknown {
+  if (typeof value === "string") {
+    return redactionKey
+      ? redactSensitiveFieldValueWithConfig(redactionKey, value, redactionConfig)
+      : redactToolPayloadTextWithConfig(value, redactionConfig);
+  }
+  if (
+    redactionKey &&
+    (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint")
+  ) {
+    return redactSensitiveFieldValueWithConfig(redactionKey, String(value), redactionConfig);
+  }
+  if (value === null || value === undefined || typeof value !== "object") {
+    return value;
+  }
+  if (depth >= MAX_PERSISTED_DETAIL_REDACTION_DEPTH) {
+    return "[OpenClaw persisted detail redacted: max depth exceeded]";
+  }
+  if (Array.isArray(value)) {
+    let changed = false;
+    const next = value.map((item) => {
+      const redacted = redactPersistedDetailValue(item, depth + 1, redactionKey, redactionConfig);
+      changed ||= redacted !== item;
+      return redacted;
+    });
+    return changed ? next : value;
+  }
+  const source = value as Record<string, unknown>;
+  let changed = false;
+  const next: Record<string, unknown> = {};
+  for (const [key, field] of Object.entries(source)) {
+    // Keys themselves can embed secrets (a URL used as a map key, for example).
+    const redactedKey = redactToolPayloadTextWithConfig(key, redactionConfig);
+    const redacted = redactPersistedDetailValue(
+      field,
+      depth + 1,
+      selectPersistedDetailRedactionKey(key, redactionKey),
+      redactionConfig,
+    );
+    changed ||= redactedKey !== key || redacted !== field;
+    next[redactedKey] = redacted;
+  }
+  return changed ? next : value;
+}
+
+function capToolResultDetails(
+  msg: AgentMessage,
+  redactionConfig?: ToolResultDetailRedactionConfig,
+): AgentMessage {
+  if ((msg as { role?: string }).role !== "toolResult") {
+    return msg;
+  }
+  const details = (msg as { details?: unknown }).details;
+  if (details === undefined || details === null) {
+    return msg;
+  }
+  const redactedDetails = redactPersistedDetailValue(details, 0, undefined, redactionConfig);
+  if (redactedDetails === details) {
+    return msg;
+  }
+  const next = { ...(msg as unknown as Record<string, unknown>) } as unknown as AgentMessage;
+  (next as { details?: unknown }).details = redactedDetails;
+  return next;
+}
+
+function capToolResultForPersistence(
+  msg: AgentMessage,
+  maxChars: number,
+  redactionConfig?: ToolResultDetailRedactionConfig,
+): AgentMessage {
+  return capToolResultDetails(capToolResultSize(msg, maxChars), redactionConfig);
 }
 
 function resolveMaxToolResultChars(opts?: { maxToolResultChars?: number }): number {
@@ -112,6 +215,7 @@ export function installSessionToolResultGuard(
     beforeMessageWriteHook?: (
       event: PluginHookBeforeMessageWriteEvent,
     ) => PluginHookBeforeMessageWriteResult | undefined;
+    redactLoggingConfig?: ToolResultDetailRedactionConfig;
     maxToolResultChars?: number;
   },
 ): {
@@ -137,6 +241,7 @@ export function installSessionToolResultGuard(
 
   const allowSyntheticToolResults = opts?.allowSyntheticToolResults ?? true;
   const beforeWrite = opts?.beforeMessageWriteHook;
+  const redactionConfig = opts?.redactLoggingConfig;
   const maxToolResultChars = resolveMaxToolResultChars(opts);
 
   /**
@@ -172,7 +277,9 @@ export function installSessionToolResultGuard(
           }),
         );
         if (flushed) {
-          originalAppend(capToolResultSize(flushed, maxToolResultChars) as never);
+          originalAppend(
+            capToolResultForPersistence(flushed, maxToolResultChars, redactionConfig) as never,
+          );
         }
       }
     }
@@ -209,7 +316,11 @@ export function installSessionToolResultGuard(
       const normalizedToolResult = normalizePersistedToolResultName(nextMessage, toolName);
       // Apply hard size cap before persistence to prevent oversized tool results
       // from consuming the entire context window on subsequent LLM calls.
-      const capped = capToolResultSize(persistMessage(normalizedToolResult), maxToolResultChars);
+      const capped = capToolResultForPersistence(
+        persistMessage(normalizedToolResult),
+        maxToolResultChars,
+        redactionConfig,
+      );
       const persisted = applyBeforeWriteHook(
         persistToolResult(capped, {
           toolCallId: id ?? undefined,
@@ -220,7 +331,9 @@ export function installSessionToolResultGuard(
       if (!persisted) {
         return undefined;
       }
-      return originalAppend(capToolResultSize(persisted, maxToolResultChars) as never);
+      return originalAppend(
+        capToolResultForPersistence(persisted, maxToolResultChars, redactionConfig) as never,
+      );
     }
 
     // Skip tool call extraction for aborted/errored assistant messages.
