@@ -4,7 +4,10 @@ import {
 } from "../infra/outbound/best-effort-delivery.js";
 import { sendMessage } from "../infra/outbound/message.js";
 import { isCronSessionKey, isSubagentSessionKey } from "../sessions/session-key-utils.js";
-import { normalizeLowercaseStringOrEmpty } from "../shared/string-coerce.js";
+import {
+  normalizeLowercaseStringOrEmpty,
+  normalizeOptionalString,
+} from "../shared/string-coerce.js";
 import { isGatewayMessageChannel, normalizeMessageChannel } from "../utils/message-channel.js";
 import {
   formatExecDeniedUserMessage,
@@ -160,6 +163,51 @@ function buildAgentFollowupArgs(params: {
   };
 }
 
+function readGatewayStatus(value: unknown): string | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? normalizeOptionalString((value as { status?: unknown }).status)
+    : undefined;
+}
+
+function readGatewayRunId(value: unknown): string | undefined {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? normalizeOptionalString((value as { runId?: unknown }).runId)
+    : undefined;
+}
+
+function buildFollowupWaitError(params: { status?: string; error?: unknown }): Error {
+  const suffix =
+    typeof params.error === "string" && params.error.trim()
+      ? `: ${params.error.trim()}`
+      : params.status
+        ? `: ${params.status}`
+        : "";
+  return new Error(`exec approval followup session resume failed${suffix}`);
+}
+
+function isSuccessfulFollowupStatus(status: string | undefined): boolean {
+  return status === "ok";
+}
+
+async function waitForAgentFollowupRun(params: {
+  runId: string;
+  timeoutMs: number;
+}): Promise<void> {
+  const wait = await callGatewayTool(
+    "agent.wait",
+    { timeoutMs: params.timeoutMs + 2_000 },
+    {
+      runId: params.runId,
+      timeoutMs: params.timeoutMs,
+    },
+  );
+  const status = readGatewayStatus(wait);
+  if (isSuccessfulFollowupStatus(status)) {
+    return;
+  }
+  throw buildFollowupWaitError({ status, error: wait.error });
+}
+
 async function sendDirectFollowupFallback(params: {
   approvalId: string;
   deliveryTarget: ExternalBestEffortDeliveryTarget;
@@ -215,22 +263,43 @@ export async function sendExecApprovalFollowup(
 
   if (sessionKey) {
     try {
-      await callGatewayTool(
-        "agent",
-        { timeoutMs: 60_000 },
-        buildAgentFollowupArgs({
-          approvalId: params.approvalId,
-          sessionKey,
-          resultText,
-          deliveryTarget,
-          sessionOnlyOriginChannel,
-          turnSourceTo: params.turnSourceTo,
-          turnSourceAccountId: params.turnSourceAccountId,
-          turnSourceThreadId: params.turnSourceThreadId,
-        }),
-        { expectFinal: true },
-      );
-      return true;
+      const agentArgs = buildAgentFollowupArgs({
+        approvalId: params.approvalId,
+        sessionKey,
+        resultText,
+        deliveryTarget,
+        sessionOnlyOriginChannel,
+        turnSourceTo: params.turnSourceTo,
+        turnSourceAccountId: params.turnSourceAccountId,
+        turnSourceThreadId: params.turnSourceThreadId,
+      });
+      // Do not use expectFinal here. A retried followup hits the gateway
+      // idempotency cache, which replays the stored `accepted` ack without ever
+      // sending a second final frame; waiting for one would time out and make
+      // the caller resend, delivering the continuation twice. Take the ack, then
+      // join the existing run through `agent.wait` on its runId.
+      const accepted = await callGatewayTool("agent", { timeoutMs: 60_000 }, agentArgs);
+      const status = readGatewayStatus(accepted);
+      if (isSuccessfulFollowupStatus(status)) {
+        return true;
+      }
+      if (status === "accepted" || status === "in_flight" || status === "pending") {
+        const runId =
+          readGatewayRunId(accepted) ?? normalizeOptionalString(agentArgs.idempotencyKey);
+        if (!runId) {
+          throw buildFollowupWaitError({ status: "missing-run-id" });
+        }
+        try {
+          await waitForAgentFollowupRun({ runId, timeoutMs: 60_000 });
+        } catch {
+          // The gateway already accepted the run, so it owns delivery of this
+          // followup. A wait timeout/error only means we stopped watching it;
+          // falling through to the direct fallback here would deliver the
+          // status a second time once the accepted run finishes.
+        }
+        return true;
+      }
+      throw buildFollowupWaitError({ status, error: accepted.error });
     } catch (err) {
       sessionError = err;
     }

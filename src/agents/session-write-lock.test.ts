@@ -1,3 +1,4 @@
+import type { PathLike } from "node:fs";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -189,6 +190,23 @@ describe("acquireSessionWriteLock", () => {
     } finally {
       await fs.rm(root, { recursive: true, force: true });
     }
+  });
+
+  it("reclaims payload-less orphan lock files after the short init grace", async () => {
+    await withTempSessionLockFile(async ({ sessionFile, lockPath }) => {
+      await fs.writeFile(lockPath, "", "utf8");
+      const orphanDate = new Date(Date.now() - 10_000);
+      await fs.utimes(lockPath, orphanDate, orphanDate);
+
+      const lock = await acquireSessionWriteLock({
+        sessionFile,
+        timeoutMs: 10_000,
+        staleMs: 60_000,
+      });
+      const raw = await fs.readFile(lockPath, "utf8");
+      expect(JSON.parse(raw)).toMatchObject({ pid: process.pid });
+      await lock.release();
+    });
   });
 
   it("reclaims malformed lock files once they are old enough", async () => {
@@ -426,13 +444,79 @@ describe("acquireSessionWriteLock", () => {
       await expect(fs.access(lockPath)).rejects.toThrow();
     });
   });
+
+  it("does not accumulate exit listeners across reset cycles", async () => {
+    const baselineExitListeners = process.listenerCount("exit");
+
+    await withTempSessionLockFile(async ({ sessionFile }) => {
+      for (let i = 0; i < 3; i += 1) {
+        const lock = await acquireSessionWriteLock({ sessionFile, timeoutMs: 500 });
+        await lock.release();
+        resetSessionWriteLockStateForTest();
+        expect(process.listenerCount("exit")).toBe(baselineExitListeners);
+      }
+    });
+  });
+
+  it("keeps a reentrant lock usable when the owner's payload write fails", async () => {
+    await withTempSessionLockFile(async ({ sessionFile, lockPath }) => {
+      // The held entry is published before the payload write, so a reentrant
+      // acquire can attach while that write is still in flight. If the write
+      // then fails, the failed owner must not close the handle or delete the
+      // lock file out from under the reentrant holder.
+      let releaseWrite: () => void = () => {};
+      const writeGate = new Promise<void>((resolve) => {
+        releaseWrite = resolve;
+      });
+      let signalOpened: () => void = () => {};
+      const opened = new Promise<void>((resolve) => {
+        signalOpened = resolve;
+      });
+      const realOpen = fs.open.bind(fs);
+      const openSpy = vi
+        .spyOn(fs, "open")
+        .mockImplementation(async (target: PathLike, flags?: string | number) => {
+          const handle = await realOpen(target, flags);
+          handle.writeFile = (async () => {
+            await writeGate;
+            throw Object.assign(new Error("simulated ENOSPC"), { code: "ENOSPC" });
+          }) as typeof handle.writeFile;
+          signalOpened();
+          return handle;
+        });
+
+      try {
+        const ownerPromise = acquireSessionWriteLock({ sessionFile, timeoutMs: 2_000 });
+        // Let the owner publish its held entry and reach the gated payload write.
+        await opened;
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        const reentrant = await acquireSessionWriteLock({ sessionFile, timeoutMs: 2_000 });
+
+        releaseWrite();
+        await expect(ownerPromise).rejects.toThrow(/simulated ENOSPC/);
+
+        // The reentrant holder still owns a real lock file.
+        await expect(fs.access(lockPath)).resolves.toBeUndefined();
+        await reentrant.release();
+        await expect(fs.access(lockPath)).rejects.toThrow();
+      } finally {
+        openSpy.mockRestore();
+      }
+    });
+  });
+
   it("keeps other signal listeners registered", () => {
     const keepAlive = () => {};
+    const originalKill = process.kill.bind(process);
+    process.kill = ((_pid: number, _signal?: NodeJS.Signals) => true) as typeof process.kill;
     process.on("SIGINT", keepAlive);
 
-    __testing.handleTerminationSignal("SIGINT");
-
-    expect(process.listeners("SIGINT")).toContain(keepAlive);
-    process.off("SIGINT", keepAlive);
+    try {
+      __testing.handleTerminationSignal("SIGINT");
+      expect(process.listeners("SIGINT")).toContain(keepAlive);
+    } finally {
+      process.off("SIGINT", keepAlive);
+      process.kill = originalKill;
+    }
   });
 });

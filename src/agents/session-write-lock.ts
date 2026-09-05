@@ -45,10 +45,14 @@ const DEFAULT_STALE_MS = 30 * 60 * 1000;
 const DEFAULT_MAX_HOLD_MS = 5 * 60 * 1000;
 const DEFAULT_WATCHDOG_INTERVAL_MS = 60_000;
 const DEFAULT_TIMEOUT_GRACE_MS = 2 * 60 * 1000;
+// A payload-less lock can be left behind if shutdown lands between open("wx")
+// and the owner metadata write. Keep the grace short so 10s callers recover.
+const ORPHAN_LOCK_PAYLOAD_GRACE_MS = 5_000;
 const MAX_LOCK_HOLD_MS = 2_147_000_000;
 
 type CleanupState = {
   registered: boolean;
+  exitHandler?: () => void;
   cleanupHandlers: Map<CleanupSignal, () => void>;
 };
 
@@ -72,6 +76,7 @@ function resolveCleanupState(): CleanupState {
   if (!proc[CLEANUP_STATE_KEY]) {
     proc[CLEANUP_STATE_KEY] = {
       registered: false,
+      exitHandler: undefined,
       cleanupHandlers: new Map<CleanupSignal, () => void>(),
     };
   }
@@ -254,12 +259,13 @@ function handleTerminationSignal(signal: CleanupSignal): void {
 
 function registerCleanupHandlers(): void {
   const cleanupState = resolveCleanupState();
-  if (!cleanupState.registered) {
-    cleanupState.registered = true;
+  cleanupState.registered = true;
+  if (!cleanupState.exitHandler) {
     // Cleanup on normal exit and process.exit() calls
-    process.on("exit", () => {
+    cleanupState.exitHandler = () => {
       releaseAllLocksSync();
-    });
+    };
+    process.on("exit", cleanupState.exitHandler);
   }
 
   ensureWatchdogStarted(DEFAULT_WATCHDOG_INTERVAL_MS);
@@ -281,6 +287,10 @@ function registerCleanupHandlers(): void {
 
 function unregisterCleanupHandlers(): void {
   const cleanupState = resolveCleanupState();
+  if (cleanupState.exitHandler) {
+    process.off("exit", cleanupState.exitHandler);
+    cleanupState.exitHandler = undefined;
+  }
   for (const [signal, handler] of cleanupState.cleanupHandlers) {
     process.off(signal, handler);
   }
@@ -379,7 +389,7 @@ async function shouldReclaimContendedLockFile(
   try {
     const stat = await fs.stat(lockPath);
     const ageMs = Math.max(0, nowMs - stat.mtimeMs);
-    return ageMs > staleMs;
+    return ageMs > Math.min(staleMs, ORPHAN_LOCK_PAYLOAD_GRACE_MS);
   } catch (error) {
     const code = (error as { code?: string } | null)?.code;
     return code !== "ENOENT";
@@ -501,13 +511,6 @@ export async function acquireSessionWriteLock(params: {
     let handle: fs.FileHandle | null = null;
     try {
       handle = await fs.open(lockPath, "wx");
-      const createdAt = new Date().toISOString();
-      const starttime = getProcessStartTime(process.pid);
-      const lockPayload: LockFilePayload = { pid: process.pid, createdAt };
-      if (starttime !== null) {
-        lockPayload.starttime = starttime;
-      }
-      await handle.writeFile(JSON.stringify(lockPayload, null, 2), "utf8");
       const createdHeld: HeldLock = {
         count: 1,
         handle,
@@ -516,6 +519,13 @@ export async function acquireSessionWriteLock(params: {
         maxHoldMs,
       };
       HELD_LOCKS.set(normalizedSessionFile, createdHeld);
+      const createdAt = new Date().toISOString();
+      const starttime = getProcessStartTime(process.pid);
+      const lockPayload: LockFilePayload = { pid: process.pid, createdAt };
+      if (starttime !== null) {
+        lockPayload.starttime = starttime;
+      }
+      await handle.writeFile(JSON.stringify(lockPayload, null, 2), "utf8");
       return {
         release: async () => {
           await releaseHeldLock(normalizedSessionFile, createdHeld);
@@ -523,15 +533,38 @@ export async function acquireSessionWriteLock(params: {
       };
     } catch (err) {
       if (handle) {
-        try {
-          await handle.close();
-        } catch {
-          // Ignore cleanup errors on failed lock initialization.
+        const currentHeld = HELD_LOCKS.get(normalizedSessionFile);
+        // The entry is published before the payload write above so a hard exit
+        // in that window still leaves a lock the exit handler can clean up.
+        // That also means a reentrant acquire can attach to this entry while
+        // the write is in flight. Only tear the lock down when this failed
+        // initialization is still its sole owner: closing the handle and
+        // removing the lock file underneath a reentrant caller would leave it
+        // believing it holds a lock that is already gone.
+        const isOwnEntry = currentHeld?.handle === handle;
+        const hasOtherHolders = isOwnEntry && (currentHeld?.count ?? 0) > 1;
+        if (hasOtherHolders && currentHeld) {
+          // Hand the lock to the reentrant holders: drop only this failed
+          // acquire's reference so their release still frees the lock.
+          currentHeld.count -= 1;
         }
-        try {
-          await fs.rm(lockPath, { force: true });
-        } catch {
-          // Ignore cleanup errors on failed lock initialization.
+        if (isOwnEntry && !hasOtherHolders) {
+          HELD_LOCKS.delete(normalizedSessionFile);
+          if (HELD_LOCKS.size === 0) {
+            stopWatchdogTimer();
+          }
+        }
+        if (!hasOtherHolders) {
+          try {
+            await handle.close();
+          } catch {
+            // Ignore cleanup errors on failed lock initialization.
+          }
+          try {
+            await fs.rm(lockPath, { force: true });
+          } catch {
+            // Ignore cleanup errors on failed lock initialization.
+          }
         }
       }
       const code = (err as { code?: unknown }).code;

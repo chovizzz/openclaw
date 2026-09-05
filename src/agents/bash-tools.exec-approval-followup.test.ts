@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("./tools/gateway.js", () => ({
-  callGatewayTool: vi.fn(async () => ({ ok: true })),
+  callGatewayTool: vi.fn(async () => ({ status: "ok" })),
 }));
 
 vi.mock("../infra/outbound/message.js", () => ({
@@ -53,7 +53,6 @@ describe("exec approval followup", () => {
         channel: undefined,
         to: undefined,
       }),
-      { expectFinal: true },
     );
     expect(sendMessage).not.toHaveBeenCalled();
   });
@@ -104,8 +103,78 @@ describe("exec approval followup", () => {
         threadId: target.threadId,
         idempotencyKey: `exec-approval-followup:req-${target.channel}`,
       }),
-      { expectFinal: true },
     );
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("waits for accepted agent followups without direct fallback", async () => {
+    vi.mocked(callGatewayTool)
+      .mockResolvedValueOnce({
+        runId: "exec-approval-followup:req-wait",
+        status: "accepted",
+      })
+      .mockResolvedValueOnce({
+        runId: "exec-approval-followup:req-wait",
+        status: "ok",
+      });
+
+    await sendExecApprovalFollowup({
+      approvalId: "req-wait",
+      sessionKey: "agent:main:telegram:direct:123",
+      turnSourceChannel: "telegram",
+      turnSourceTo: "123",
+      turnSourceAccountId: "default",
+      resultText: "Exec finished (gateway id=req-wait, session=sess_1, code 0)\nall good",
+    });
+
+    const calls = vi.mocked(callGatewayTool).mock.calls;
+    expect(calls[0]?.[0]).toBe("agent");
+    expect(calls[1]?.[0]).toBe("agent.wait");
+    expect(calls[1]?.[2]).toMatchObject({
+      runId: "exec-approval-followup:req-wait",
+      timeoutMs: 60_000,
+    });
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not double-send when the agent.wait on an accepted run fails", async () => {
+    vi.mocked(callGatewayTool)
+      .mockResolvedValueOnce({ runId: "exec-approval-followup:req-wait-fail", status: "accepted" })
+      .mockRejectedValueOnce(new Error("wait timed out"));
+
+    await sendExecApprovalFollowup({
+      approvalId: "req-wait-fail",
+      sessionKey: "agent:main:telegram:direct:123",
+      turnSourceChannel: "telegram",
+      turnSourceTo: "123",
+      turnSourceAccountId: "default",
+      resultText: "Exec finished (gateway id=req-wait-fail, code 0)\nall good",
+    });
+
+    // The gateway already accepted the run and owns delivery; a failed wait
+    // must not trigger the direct fallback on top of it.
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("falls back to the idempotency key when an accepted ack omits the runId", async () => {
+    vi.mocked(callGatewayTool)
+      .mockResolvedValueOnce({ status: "accepted" })
+      .mockResolvedValueOnce({ status: "ok" });
+
+    await sendExecApprovalFollowup({
+      approvalId: "req-no-run-id",
+      sessionKey: "agent:main:telegram:direct:123",
+      turnSourceChannel: "telegram",
+      turnSourceTo: "123",
+      turnSourceAccountId: "default",
+      resultText: "Exec finished (gateway id=req-no-run-id, code 0)\nall good",
+    });
+
+    const calls = vi.mocked(callGatewayTool).mock.calls;
+    expect(calls[1]?.[0]).toBe("agent.wait");
+    expect(calls[1]?.[2]).toMatchObject({
+      runId: "exec-approval-followup:req-no-run-id",
+    });
     expect(sendMessage).not.toHaveBeenCalled();
   });
 
