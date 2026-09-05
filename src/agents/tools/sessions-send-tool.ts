@@ -1,9 +1,14 @@
 import crypto from "node:crypto";
 import { Type } from "@sinclair/typebox";
 import type { OpenClawConfig } from "../../config/config.js";
+import type { SessionEntry } from "../../config/sessions/types.js";
 import { callGateway } from "../../gateway/call.js";
 import { formatErrorMessage } from "../../infra/errors.js";
-import { normalizeAgentId, resolveAgentIdFromSessionKey } from "../../routing/session-key.js";
+import {
+  isSubagentSessionKey,
+  normalizeAgentId,
+  resolveAgentIdFromSessionKey,
+} from "../../routing/session-key.js";
 import { SESSION_LABEL_MAX_LENGTH } from "../../sessions/session-label.js";
 import { normalizeOptionalString } from "../../shared/string-coerce.js";
 import {
@@ -15,6 +20,7 @@ import {
   readLatestAssistantReplySnapshot,
   waitForAgentRunAndReadUpdatedAssistantReply,
 } from "../run-wait.js";
+import { loadSessionEntryByKey } from "../subagent-announce-delivery.js";
 import {
   describeSessionsSendTool,
   SESSIONS_SEND_TOOL_DISPLAY_SUMMARY,
@@ -42,6 +48,33 @@ const SessionsSendToolSchema = Type.Object({
 
 type GatewayCaller = typeof callGateway;
 const SESSIONS_SEND_REPLY_HISTORY_LIMIT = 50;
+
+type SessionsSendRouteEntry = Pick<SessionEntry, "acp" | "parentSessionKey" | "spawnedBy">;
+
+/**
+ * True when the caller is the parent that spawned this native (non-ACP)
+ * subagent session. The dedupe key is the (requester, target) ownership pair
+ * plus the native-subagent target shape, not the target session alone: an
+ * unrelated sender that can see the same target under
+ * `tools.sessions.visibility=all` still needs the normal A2A follow-up
+ * delivery, so it must not match here.
+ */
+function isRequesterParentOfNativeSubagentSession(params: {
+  entry: SessionsSendRouteEntry | null | undefined;
+  requesterSessionKey: string | null | undefined;
+  targetSessionKey: string;
+}): boolean {
+  if (!params.entry || params.entry.acp || !isSubagentSessionKey(params.targetSessionKey)) {
+    return false;
+  }
+  const requester = normalizeOptionalString(params.requesterSessionKey);
+  if (!requester) {
+    return false;
+  }
+  const spawnedBy = normalizeOptionalString(params.entry.spawnedBy);
+  const parentSessionKey = normalizeOptionalString(params.entry.parentSessionKey);
+  return requester === spawnedBy || requester === parentSessionKey;
+}
 
 async function startAgentRun(params: {
   callGateway: GatewayCaller;
@@ -288,8 +321,37 @@ export function createSessionsSendTool(opts?: {
       const requesterSessionKey = opts?.agentSessionKey;
       const requesterChannel = opts?.agentChannel;
       const maxPingPongTurns = resolvePingPongTurns(cfg);
-      const delivery = { status: "pending", mode: "announce" as const };
+
+      // Skip the A2A ping-pong + announce flow when the caller is the parent of
+      // a native subagent it spawned itself and the send is waited
+      // (`timeoutSeconds !== 0`), because the child reply is already returned
+      // inline below via the `reply` field. Running the A2A flow on top of that
+      // announces the same reply to the parent a second time, and can wake the
+      // parent to produce a response that gets forwarded back to the child as a
+      // new message (bounded by maxPingPongTurns, but user-visible as duplicate
+      // conversation output).
+      //
+      // Fire-and-forget sends (`timeoutSeconds === 0`) return no inline reply,
+      // so they still need the announce path and are deliberately excluded.
+      const targetSessionEntry = loadSessionEntryByKey(resolvedKey);
+      const skipA2AFlow =
+        timeoutSeconds !== 0 &&
+        isRequesterParentOfNativeSubagentSession({
+          entry: targetSessionEntry,
+          requesterSessionKey: effectiveRequesterKey,
+          targetSessionKey: resolvedKey,
+        });
+      // When the A2A flow is skipped, no follow-up announcement will fire and
+      // the reply (when present) is returned inline via the `reply` field.
+      // Reflect that in the metadata so the parent LLM does not wait for a
+      // second result that will never arrive.
+      const delivery = skipA2AFlow
+        ? ({ status: "skipped", mode: "announce" } as const)
+        : ({ status: "pending", mode: "announce" } as const);
       const startA2AFlow = (roundOneReply?: string, waitRunId?: string) => {
+        if (skipA2AFlow) {
+          return;
+        }
         void runSessionsSendA2AFlow({
           targetSessionKey: resolvedKey,
           displayKey,

@@ -278,6 +278,12 @@ async function emitSubagentEndedHookForRun(params: {
   sendFarewell?: boolean;
   accountId?: string;
 }) {
+  // emitSubagentEndedHookOnce() dedupes on the same per-run field, but only
+  // after the plugin runtime load below. Short-circuit here so a second caller
+  // for an already-emitted run does not redundantly reload the plugin runtime.
+  if (params.entry.endedHookEmittedAt) {
+    return;
+  }
   const cfg = subagentRegistryDeps.loadConfig();
   await ensureSubagentRegistryPluginRuntimeLoaded({
     config: cfg,

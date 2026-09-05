@@ -125,6 +125,9 @@ describe("subagent registry seam flow", () => {
       },
     });
     mocks.getGlobalHookRunner.mockReturnValue(null);
+    // vi.clearAllMocks() clears calls but not implementations; reset so a test
+    // that makes the plugin bootstrap throw cannot leak into later tests.
+    mocks.ensureRuntimePluginsLoaded.mockReset();
     mocks.resolveContextEngine.mockResolvedValue({
       onSubagentEnded: mocks.onSubagentEnded,
     });
@@ -418,6 +421,56 @@ describe("subagent registry seam flow", () => {
       expect.objectContaining({
         runId: "run-killed-init",
         childSessionKey: "agent:main:subagent:killed",
+        requesterSessionKey: "agent:main:main",
+      }),
+    );
+  });
+
+  it("emits killed ended hook directly when a hook runner is already registered", async () => {
+    const endedHookRunner = {
+      hasHooks: (hookName: string) => hookName === "subagent_ended",
+      runSubagentEnded: mocks.runSubagentEnded,
+    };
+    mocks.getGlobalHookRunner.mockReturnValue(endedHookRunner as never);
+
+    mod.registerSubagentRun({
+      runId: "run-killed-bootstrapped",
+      childSessionKey: "agent:main:subagent:killed-bootstrapped",
+      requesterSessionKey: "agent:main:main",
+      requesterDisplayKey: "main",
+      requesterOrigin: { channel: "discord", accountId: "acct-2" },
+      task: "kill with runner ready",
+      cleanup: "keep",
+      workspaceDir: "/tmp/killed-bootstrapped-workspace",
+    });
+    // The bootstrap hop exists only to make a hook runner appear. When one is
+    // already registered the killed ended hook must not be routed through it:
+    // a failing/slow bootstrap would otherwise swallow or delay the hook.
+    mocks.ensureRuntimePluginsLoaded.mockImplementation(() => {
+      throw new Error("plugin bootstrap boom");
+    });
+
+    const updated = mod.markSubagentRunTerminated({
+      runId: "run-killed-bootstrapped",
+      reason: "manual kill",
+    });
+
+    expect(updated).toBe(1);
+    await vi.waitFor(() => {
+      expect(mocks.runSubagentEnded).toHaveBeenCalledTimes(1);
+    });
+    expect(mocks.runSubagentEnded).toHaveBeenCalledWith(
+      expect.objectContaining({
+        targetSessionKey: "agent:main:subagent:killed-bootstrapped",
+        reason: "subagent-killed",
+        accountId: "acct-2",
+        runId: "run-killed-bootstrapped",
+        outcome: "killed",
+        error: "manual kill",
+      }),
+      expect.objectContaining({
+        runId: "run-killed-bootstrapped",
+        childSessionKey: "agent:main:subagent:killed-bootstrapped",
         requesterSessionKey: "agent:main:main",
       }),
     );

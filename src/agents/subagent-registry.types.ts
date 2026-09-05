@@ -57,6 +57,13 @@ export type SubagentRunRecord = {
   fallbackFrozenResultCapturedAt?: number;
   /** Set after the subagent_ended hook has been emitted successfully once. */
   endedHookEmittedAt?: number;
+  /**
+   * Set once a completion announce has actually been delivered for this run.
+   * Guards against re-announcing the same completion when cleanup is retried
+   * (resume, wake-on-descendant-settle, restart). Cleared on steer restart so a
+   * genuinely new run announces again.
+   */
+  completionAnnouncedAt?: number;
   attachmentsDir?: string;
   attachmentsRootDir?: string;
   retainAttachmentsOnKeep?: boolean;
