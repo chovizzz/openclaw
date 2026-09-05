@@ -535,4 +535,224 @@ describe("runBtwSideQuestion", () => {
       expect.arrayContaining([expect.objectContaining({ role: "toolResult" })]),
     );
   });
+
+  it("drops assistant thinking blocks from BTW context", async () => {
+    getActiveEmbeddedRunSnapshotMock.mockReturnValue({
+      transcriptLeafId: "assistant-1",
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "text", text: "seed" }],
+          timestamp: 1,
+        },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "Visible answer" },
+            { type: "thinking", thinking: "Hidden chain of thought" },
+          ],
+          provider: DEFAULT_PROVIDER,
+          api: "anthropic-messages",
+          model: DEFAULT_MODEL,
+          stopReason: "stop",
+          timestamp: 2,
+        },
+      ],
+    });
+    mockDoneAnswer(MATH_ANSWER);
+
+    await runMathSideQuestion();
+
+    const [, context] = streamSimpleMock.mock.calls[0] ?? [];
+    expect(context).toMatchObject({
+      messages: [
+        expect.objectContaining({ role: "user" }),
+        expect.objectContaining({
+          role: "assistant",
+          content: [{ type: "text", text: "Visible answer" }],
+        }),
+        expect.objectContaining({ role: "user" }),
+      ],
+    });
+    expect(
+      (context as { messages?: Array<{ role?: string; content?: Array<{ type?: string }> }> })
+        .messages,
+    ).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: "assistant",
+          content: expect.arrayContaining([expect.objectContaining({ type: "thinking" })]),
+        }),
+      ]),
+    );
+  });
+
+  it("drops thinking-only assistant messages from BTW context", async () => {
+    getActiveEmbeddedRunSnapshotMock.mockReturnValue({
+      transcriptLeafId: "assistant-1",
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "text", text: "seed" }],
+          timestamp: 1,
+        },
+        {
+          role: "assistant",
+          content: [{ type: "thinking", thinking: "Hidden chain of thought" }],
+          provider: DEFAULT_PROVIDER,
+          api: "anthropic-messages",
+          model: DEFAULT_MODEL,
+          stopReason: "stop",
+          timestamp: 2,
+        },
+      ],
+    });
+    mockDoneAnswer(MATH_ANSWER);
+
+    await runMathSideQuestion();
+
+    const [, context] = streamSimpleMock.mock.calls[0] ?? [];
+    expect(
+      (context as { messages?: Array<{ role?: string }> }).messages?.filter(
+        (message) => message.role === "assistant",
+      ),
+    ).toHaveLength(0);
+  });
+
+  it("drops malformed user image blocks from BTW context", async () => {
+    getActiveEmbeddedRunSnapshotMock.mockReturnValue({
+      transcriptLeafId: "assistant-1",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "seed" },
+            { type: "image", mimeType: "image/png" },
+          ],
+          timestamp: 1,
+        },
+      ],
+    });
+    mockDoneAnswer(MATH_ANSWER);
+
+    await runMathSideQuestion();
+
+    const [, context] = streamSimpleMock.mock.calls[0] ?? [];
+    expect(context).toMatchObject({
+      messages: [
+        expect.objectContaining({
+          role: "user",
+          content: [{ type: "text", text: "seed" }],
+        }),
+        expect.objectContaining({ role: "user" }),
+      ],
+    });
+  });
+
+  // Reverse test: legitimate visible content must survive the sanitizer.
+  it("keeps legitimate user text/image and assistant text in BTW context", async () => {
+    // 1x1 transparent PNG.
+    const pngBase64 =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+    getActiveEmbeddedRunSnapshotMock.mockReturnValue({
+      transcriptLeafId: "assistant-1",
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "here is the chart" },
+            { type: "image", data: pngBase64, mimeType: "image/png" },
+            { type: "text", text: "what does it show?" },
+          ],
+          timestamp: 1,
+        },
+        {
+          role: "assistant",
+          content: [
+            { type: "text", text: "First paragraph." },
+            { type: "text", text: "Second paragraph." },
+          ],
+          provider: DEFAULT_PROVIDER,
+          api: "anthropic-messages",
+          model: DEFAULT_MODEL,
+          stopReason: "stop",
+          timestamp: 2,
+        },
+        {
+          role: "user",
+          content: "plain string content stays intact",
+          timestamp: 3,
+        },
+      ],
+    });
+    mockDoneAnswer(MATH_ANSWER);
+
+    await runMathSideQuestion();
+
+    const [, context] = streamSimpleMock.mock.calls[0] ?? [];
+    const messages = (context as { messages?: Array<Record<string, unknown>> }).messages ?? [];
+    // seeded user (3 blocks), assistant (2 text blocks), plain-string user, plus the BTW question.
+    expect(messages).toHaveLength(4);
+    expect(messages[0]).toMatchObject({
+      role: "user",
+      content: [
+        { type: "text", text: "here is the chart" },
+        { type: "image", data: pngBase64, mimeType: "image/png" },
+        { type: "text", text: "what does it show?" },
+      ],
+    });
+    expect(messages[1]).toMatchObject({
+      role: "assistant",
+      content: [
+        { type: "text", text: "First paragraph." },
+        { type: "text", text: "Second paragraph." },
+      ],
+    });
+    expect(messages[2]).toMatchObject({
+      role: "user",
+      content: "plain string content stays intact",
+    });
+  });
+
+  // Reverse test: legacy transcripts can store a single block object rather than
+  // an array. Those messages must be sanitized, not dropped wholesale.
+  it("keeps single-object content blocks in BTW context", async () => {
+    getActiveEmbeddedRunSnapshotMock.mockReturnValue({
+      transcriptLeafId: "assistant-1",
+      messages: [
+        {
+          role: "user",
+          content: { type: "text", text: "legacy single block" },
+          timestamp: 1,
+        },
+        {
+          role: "assistant",
+          content: { type: "text", text: "legacy assistant block" },
+          provider: DEFAULT_PROVIDER,
+          api: "anthropic-messages",
+          model: DEFAULT_MODEL,
+          stopReason: "stop",
+          timestamp: 2,
+        },
+      ],
+    });
+    mockDoneAnswer(MATH_ANSWER);
+
+    await runMathSideQuestion();
+
+    const [, context] = streamSimpleMock.mock.calls[0] ?? [];
+    expect(context).toMatchObject({
+      messages: [
+        expect.objectContaining({
+          role: "user",
+          content: [{ type: "text", text: "legacy single block" }],
+        }),
+        expect.objectContaining({
+          role: "assistant",
+          content: [{ type: "text", text: "legacy assistant block" }],
+        }),
+        expect.objectContaining({ role: "user" }),
+      ],
+    });
+  });
 });

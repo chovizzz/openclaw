@@ -171,6 +171,7 @@ export async function ensureSandboxBrowser(params: {
       noVncPort: params.cfg.browser.noVncPort,
       headless: params.cfg.browser.headless,
       enableNoVnc: params.cfg.browser.enableNoVnc,
+      autoStartTimeoutMs: params.cfg.browser.autoStartTimeoutMs,
       cdpSourceRange,
     },
     securityEpoch: SANDBOX_BROWSER_SECURITY_HASH_EPOCH,
@@ -266,6 +267,13 @@ export async function ensureSandboxBrowser(params: {
     args.push("-e", `OPENCLAW_BROWSER_HEADLESS=${params.cfg.browser.headless ? "1" : "0"}`);
     args.push("-e", `OPENCLAW_BROWSER_ENABLE_NOVNC=${params.cfg.browser.enableNoVnc ? "1" : "0"}`);
     args.push("-e", `OPENCLAW_BROWSER_CDP_PORT=${params.cfg.browser.cdpPort}`);
+    // Give the container the same deadline the host waits on, so the in-container
+    // startup probe and the host-side waitForSandboxCdp cannot disagree and leave
+    // a half-started container behind.
+    args.push(
+      "-e",
+      `OPENCLAW_BROWSER_AUTO_START_TIMEOUT_MS=${params.cfg.browser.autoStartTimeoutMs}`,
+    );
     if (cdpSourceRange) {
       args.push("-e", `${CDP_SOURCE_RANGE_ENV_KEY}=${cdpSourceRange}`);
     }
@@ -355,8 +363,13 @@ export async function ensureSandboxBrowser(params: {
             timeoutMs: params.cfg.browser.autoStartTimeoutMs,
           });
           if (!ok) {
+            // Giving up on the wait is not enough: the container (and the
+            // chromium process inside it) keeps running and holding the mapped
+            // CDP port, so the next attach attempt hangs the same way. Reap it
+            // before surfacing the failure.
+            await execDocker(["rm", "-f", containerName], { allowFailure: true });
             throw new Error(
-              `Sandbox browser CDP did not become reachable on 127.0.0.1:${mappedCdp} within ${params.cfg.browser.autoStartTimeoutMs}ms.`,
+              `Sandbox browser CDP did not become reachable on 127.0.0.1:${mappedCdp} within ${params.cfg.browser.autoStartTimeoutMs}ms. The hung container has been forcefully removed.`,
             );
           }
         }

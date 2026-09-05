@@ -6,6 +6,7 @@ import { onAgentEvent } from "../infra/agent-events.js";
 import { requestHeartbeatNow } from "../infra/heartbeat-wake.js";
 import { enqueueSystemEvent } from "../infra/system-events.js";
 import { scopedHeartbeatWakeOptions } from "../routing/session-key.js";
+import { normalizeAssistantPhase } from "../shared/chat-message-content.js";
 import { normalizeOptionalString } from "../shared/string-coerce.js";
 import { recordTaskRunProgressByRunId } from "../tasks/task-executor.js";
 
@@ -307,6 +308,9 @@ export function startAcpSpawnParentStreamRelay(params: {
 
     if (event.stream === "assistant") {
       const data = event.data;
+      const assistantPhase = normalizeAssistantPhase(
+        (data as { phase?: unknown } | undefined)?.phase,
+      );
       const deltaCandidate =
         (data as { delta?: unknown } | undefined)?.delta ??
         (data as { text?: unknown } | undefined)?.text;
@@ -314,7 +318,18 @@ export function startAcpSpawnParentStreamRelay(params: {
       if (!delta || !delta.trim()) {
         return;
       }
-      logEvent("assistant_delta", { delta });
+      logEvent("assistant_delta", {
+        delta,
+        ...(assistantPhase ? { phase: assistantPhase } : {}),
+      });
+
+      // Commentary is the child agent's own narration, not an answer meant for
+      // the parent session. Treat it as progress (so the stall notice stays
+      // quiet) but never relay it upward.
+      if (assistantPhase === "commentary") {
+        lastProgressAt = Date.now();
+        return;
+      }
 
       if (stallNotified) {
         stallNotified = false;

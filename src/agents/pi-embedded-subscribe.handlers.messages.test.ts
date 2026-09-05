@@ -75,12 +75,24 @@ describe("buildAssistantStreamData", () => {
         delta: "he",
         replace: true,
         mediaUrl: "https://example.com/a.png",
+        phase: "final_answer",
       }),
     ).toEqual({
       text: "hello",
       delta: "he",
       replace: true,
       mediaUrls: ["https://example.com/a.png"],
+      phase: "final_answer",
+    });
+  });
+
+  it("leaves phase undefined when the caller does not classify the message", () => {
+    expect(buildAssistantStreamData({ text: "hello", delta: "he" })).toEqual({
+      text: "hello",
+      delta: "he",
+      replace: undefined,
+      mediaUrls: undefined,
+      phase: undefined,
     });
   });
 });

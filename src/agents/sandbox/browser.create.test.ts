@@ -108,6 +108,7 @@ describe("ensureSandboxBrowser create args", () => {
   });
 
   beforeEach(() => {
+    vi.restoreAllMocks();
     BROWSER_BRIDGES.clear();
     resetNoVncObserverTokensForTests();
     dockerMocks.dockerContainerState.mockClear();
@@ -293,5 +294,99 @@ describe("ensureSandboxBrowser create args", () => {
     const createArgs = findDockerArgsCall(dockerMocks.execDocker.mock.calls, "create");
     const labels = collectDockerFlagValues(createArgs ?? [], "--label");
     expect(labels).toContain(`openclaw.mountFormatVersion=${SANDBOX_MOUNT_FORMAT_VERSION}`);
+  });
+
+  it("passes the host auto-start timeout to the container", async () => {
+    const cfg = buildConfig(false);
+    cfg.browser.autoStartTimeoutMs = 12345;
+
+    await ensureSandboxBrowser({
+      scopeKey: "session:test",
+      workspaceDir: "/tmp/workspace",
+      agentWorkspaceDir: "/tmp/workspace",
+      cfg,
+    });
+
+    const createArgs = findDockerArgsCall(dockerMocks.execDocker.mock.calls, "create");
+    const envs = collectDockerFlagValues(createArgs ?? [], "-e");
+    expect(envs).toContain("OPENCLAW_BROWSER_AUTO_START_TIMEOUT_MS=12345");
+  });
+
+  it("force-removes the browser container when CDP never becomes reachable", async () => {
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("timeout"));
+    bridgeMocks.startBrowserBridgeServer.mockImplementationOnce(
+      async (params: { onEnsureAttachTarget?: (arg: unknown) => Promise<void> }) => {
+        await params.onEnsureAttachTarget?.({});
+        return {
+          server: {} as never,
+          port: 19000,
+          baseUrl: "http://127.0.0.1:19000",
+          state: {
+            server: null,
+            port: 19000,
+            resolved: { profiles: {} },
+            profiles: new Map(),
+          },
+        };
+      },
+    );
+
+    const cfg = buildConfig(false);
+    cfg.browser.autoStartTimeoutMs = 1;
+
+    await expect(
+      ensureSandboxBrowser({
+        scopeKey: "session:test",
+        workspaceDir: "/tmp/workspace",
+        agentWorkspaceDir: "/tmp/workspace",
+        cfg,
+      }),
+    ).rejects.toThrow("hung container has been forcefully removed");
+
+    expect(dockerMocks.execDocker).toHaveBeenCalledWith(
+      ["rm", "-f", expect.stringMatching(/^openclaw-sbx-browser-session-test-/)],
+      { allowFailure: true },
+    );
+  });
+
+  // Reverse test: a healthy CDP startup must not trigger the reaper.
+  it("does not remove the container when CDP becomes reachable", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify({ webSocketDebuggerUrl: "ws://127.0.0.1:1/x" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    bridgeMocks.startBrowserBridgeServer.mockImplementationOnce(
+      async (params: { onEnsureAttachTarget?: (arg: unknown) => Promise<void> }) => {
+        await params.onEnsureAttachTarget?.({});
+        return {
+          server: {} as never,
+          port: 19000,
+          baseUrl: "http://127.0.0.1:19000",
+          state: {
+            server: null,
+            port: 19000,
+            resolved: { profiles: {} },
+            profiles: new Map(),
+          },
+        };
+      },
+    );
+
+    const cfg = buildConfig(false);
+    cfg.browser.autoStartTimeoutMs = 5_000;
+
+    await ensureSandboxBrowser({
+      scopeKey: "session:test",
+      workspaceDir: "/tmp/workspace",
+      agentWorkspaceDir: "/tmp/workspace",
+      cfg,
+    });
+
+    expect(dockerMocks.execDocker).not.toHaveBeenCalledWith(
+      expect.arrayContaining(["rm", "-f"]),
+      expect.anything(),
+    );
   });
 });
