@@ -17,6 +17,20 @@ function applyTrim(value: string, mode: ReasoningTagTrim): string {
   return value.trim();
 }
 
+/**
+ * An orphan `</think>` with real text on both sides means the model emitted
+ * reasoning without an opening tag: everything before the close tag is the
+ * malformed reasoning, and everything after it is the actual answer. Detect
+ * that shape so callers can drop the leading reasoning instead of shipping it
+ * to the user.
+ */
+export function hasOrphanReasoningCloseBoundary(params: {
+  before: string;
+  after: string;
+}): boolean {
+  return params.before.trim().length > 0 && params.after.trim().length > 0;
+}
+
 export function stripReasoningTagsFromText(
   text: string,
   options?: {
@@ -63,7 +77,8 @@ export function stripReasoningTagsFromText(
   THINKING_TAG_RE.lastIndex = 0;
   let result = "";
   let lastIndex = 0;
-  let inThinking = false;
+  let thinkingDepth = 0;
+  let droppedOrphanReasoningPrefix = false;
 
   for (const match of cleaned.matchAll(THINKING_TAG_RE)) {
     const idx = match.index ?? 0;
@@ -73,19 +88,37 @@ export function stripReasoningTagsFromText(
       continue;
     }
 
-    if (!inThinking) {
-      result += cleaned.slice(lastIndex, idx);
-      if (!isClose) {
-        inThinking = true;
+    if (thinkingDepth === 0) {
+      if (isClose) {
+        const afterIndex = idx + match[0].length;
+        const before = cleaned.slice(lastIndex, idx);
+        const after = cleaned.slice(afterIndex);
+        if (!droppedOrphanReasoningPrefix && hasOrphanReasoningCloseBoundary({ before, after })) {
+          // Unopened reasoning: drop everything accumulated before the stray
+          // close tag rather than emitting it as visible assistant text. Only
+          // the first orphan close marks the reasoning boundary; later stray
+          // close tags just get stripped, otherwise text already accepted as
+          // the answer would be thrown away too.
+          result = "";
+          droppedOrphanReasoningPrefix = true;
+        } else {
+          result += before;
+        }
+        lastIndex = afterIndex;
+        continue;
       }
+      result += cleaned.slice(lastIndex, idx);
+      thinkingDepth = 1;
     } else if (isClose) {
-      inThinking = false;
+      thinkingDepth -= 1;
+    } else {
+      thinkingDepth += 1;
     }
 
     lastIndex = idx + match[0].length;
   }
 
-  if (!inThinking || mode === "preserve") {
+  if (thinkingDepth === 0 || mode === "preserve") {
     result += cleaned.slice(lastIndex);
   }
 

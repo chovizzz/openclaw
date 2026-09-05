@@ -360,6 +360,104 @@ describe("mergeConsecutiveUserTurns", () => {
 });
 
 describe("validateAnthropicTurns strips dangling tool_use blocks", () => {
+  it("preserves signed-thinking turns whose sibling tool calls still resolve", () => {
+    const msgs = asMessages([
+      { role: "user", content: [{ type: "text", text: "Use tool" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "internal", thinkingSignature: "sig_1" },
+          { type: "toolCall", id: "tool-1", name: "gateway", arguments: {} },
+        ],
+      },
+      {
+        role: "toolResult",
+        toolCallId: "tool-1",
+        toolName: "gateway",
+        content: [{ type: "text", text: "ok" }],
+        isError: false,
+      },
+      { role: "user", content: [{ type: "text", text: "Continue" }] },
+    ]);
+
+    const result = validateAnthropicTurns(msgs);
+
+    expect(result).toHaveLength(4);
+    const assistantContent = (result[1] as { content?: unknown[] }).content;
+    expect(assistantContent).toEqual([
+      { type: "thinking", thinking: "internal", thinkingSignature: "sig_1" },
+      { type: "toolCall", id: "tool-1", name: "gateway", arguments: {} },
+    ]);
+  });
+
+  it("only filters dangling tool calls for unsigned thinking turns", () => {
+    const msgs = asMessages([
+      { role: "user", content: [{ type: "text", text: "Use tool" }] },
+      {
+        role: "assistant",
+        content: [
+          // No signature: OpenAI reasoning / Google thoughts share this shape
+          // and accept a rewritten turn, so keep the visible content.
+          { type: "thinking", thinking: "internal" },
+          { type: "text", text: "Working on it." },
+          { type: "toolCall", id: "tool-1", name: "gateway", arguments: {} },
+        ],
+      },
+      { role: "user", content: [{ type: "text", text: "Continue" }] },
+    ]);
+
+    const result = validateAnthropicTurns(msgs);
+
+    const assistantContent = (result[1] as { content?: unknown[] }).content;
+    expect(assistantContent).toEqual([
+      { type: "thinking", thinking: "internal" },
+      { type: "text", text: "Working on it." },
+    ]);
+  });
+
+  it("drops signed-thinking turns whose sibling tool calls are dangling", () => {
+    const msgs = asMessages([
+      { role: "user", content: [{ type: "text", text: "Use tool" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "internal", thinkingSignature: "sig_1" },
+          { type: "toolCall", id: "tool-1", name: "gateway", arguments: {} },
+        ],
+      },
+      { role: "user", content: [{ type: "text", text: "Continue" }] },
+    ]);
+
+    const result = validateAnthropicTurns(msgs);
+
+    expect(result).toHaveLength(3);
+    expect((result[1] as { role?: unknown }).role).toBe("assistant");
+    expect((result[1] as { content?: unknown[] }).content).toEqual([
+      { type: "text", text: "[tool calls omitted]" },
+    ]);
+  });
+
+  it("drops redacted-thinking turns whose sibling tool calls are dangling", () => {
+    const msgs = asMessages([
+      { role: "user", content: [{ type: "text", text: "Use tool" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "redacted_thinking", data: "blob", thinkingSignature: "sig_1" },
+          { type: "toolUse", id: "tool-1", name: "gateway", arguments: {} },
+        ],
+      },
+      { role: "user", content: [{ type: "text", text: "Continue" }] },
+    ]);
+
+    const result = validateAnthropicTurns(msgs);
+
+    expect(result).toHaveLength(3);
+    expect((result[1] as { content?: unknown[] }).content).toEqual([
+      { type: "text", text: "[tool calls omitted]" },
+    ]);
+  });
+
   it("should strip tool_use blocks without matching tool_result", () => {
     // Simulates: user asks -> assistant has tool_use -> user responds without tool_result
     // This happens after compaction trims history

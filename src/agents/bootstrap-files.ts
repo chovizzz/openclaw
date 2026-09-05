@@ -101,14 +101,51 @@ export async function hasCompletedBootstrapTurn(sessionFile: string): Promise<bo
   }
 }
 
+const BOOTSTRAP_WARNING_DEDUPE_LIMIT = 1024;
+const seenBootstrapWarnings = new Set<string>();
+const bootstrapWarningOrder: string[] = [];
+
+/** Returns true the first time a warning key is seen; false for repeats. */
+function rememberBootstrapWarning(key: string): boolean {
+  if (seenBootstrapWarnings.has(key)) {
+    return false;
+  }
+  if (seenBootstrapWarnings.size >= BOOTSTRAP_WARNING_DEDUPE_LIMIT) {
+    const oldest = bootstrapWarningOrder.shift();
+    if (oldest) {
+      seenBootstrapWarnings.delete(oldest);
+    }
+  }
+  seenBootstrapWarnings.add(key);
+  bootstrapWarningOrder.push(key);
+  return true;
+}
+
+export function _resetBootstrapWarningCacheForTest(): void {
+  seenBootstrapWarnings.clear();
+  bootstrapWarningOrder.length = 0;
+}
+
 export function makeBootstrapWarn(params: {
   sessionLabel: string;
+  workspaceDir?: string;
   warn?: (message: string) => void;
 }): ((message: string) => void) | undefined {
-  if (!params.warn) {
+  const warn = params.warn;
+  if (!warn) {
     return undefined;
   }
-  return (message: string) => params.warn?.(`${message} (sessionKey=${params.sessionLabel})`);
+  // Bootstrap truncation warnings repeat on every turn of a session. Emit each
+  // distinct warning once per workspace + session, with a bounded FIFO cache so
+  // a long-lived gateway does not grow it without limit.
+  const workspacePrefix = params.workspaceDir ?? "";
+  return (message: string) => {
+    const key = `${workspacePrefix}\u0000${params.sessionLabel}\u0000${message}`;
+    if (!rememberBootstrapWarning(key)) {
+      return;
+    }
+    warn(`${message} (sessionKey=${params.sessionLabel})`);
+  };
 }
 
 function sanitizeBootstrapFiles(

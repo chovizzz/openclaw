@@ -71,6 +71,7 @@ function shouldIncludeToolErrorDetails(params: {
 function resolveToolErrorWarningPolicy(params: {
   lastToolError: ToolErrorSummary;
   hasUserFacingReply: boolean;
+  hasUserFacingErrorReply: boolean;
   suppressToolErrors: boolean;
   suppressToolErrorWarnings?: boolean;
   isCronTrigger?: boolean;
@@ -94,7 +95,15 @@ function resolveToolErrorWarningPolicy(params: {
   const isMutatingToolError =
     params.lastToolError.mutatingAction ?? isLikelyMutatingToolName(params.lastToolError.toolName);
   if (isMutatingToolError) {
-    return { showWarning: true, includeDetails };
+    // Mutating failures are normally surfaced so we never silently confirm an
+    // action that did not happen. The exception is a turn that already
+    // delivered a user-facing error reply: appending the raw tool warning on
+    // top of it only leaks internal payload text the user has already been told
+    // about in readable form.
+    return {
+      showWarning: !params.hasUserFacingErrorReply,
+      includeDetails,
+    };
   }
   if (params.suppressToolErrors) {
     return { showWarning: false, includeDetails };
@@ -278,6 +287,7 @@ export function buildEmbeddedRunPayloads(params: {
       ).filter((text) => !shouldSuppressRawErrorText(text));
 
   let hasUserFacingAssistantReply = false;
+  const hasUserFacingErrorReply = replyItems.some((item) => item.isError === true);
   for (const text of answerTexts) {
     const {
       text: cleanedText,
@@ -305,6 +315,7 @@ export function buildEmbeddedRunPayloads(params: {
     const warningPolicy = resolveToolErrorWarningPolicy({
       lastToolError: params.lastToolError,
       hasUserFacingReply: hasUserFacingAssistantReply,
+      hasUserFacingErrorReply,
       suppressToolErrors: Boolean(params.config?.messages?.suppressToolErrors),
       suppressToolErrorWarnings: params.suppressToolErrorWarnings,
       isCronTrigger: params.isCronTrigger,

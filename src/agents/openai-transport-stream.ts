@@ -159,6 +159,29 @@ function shortHash(value: string): string {
   return Math.abs(hash).toString(36);
 }
 
+const OPENAI_RESPONSES_REPLAY_ITEM_ID_MAX_LENGTH = 64;
+
+function normalizeResponsesReplayItemId(
+  id: string | undefined,
+  prefix: string,
+): string | undefined {
+  if (!id) {
+    return undefined;
+  }
+  if (id.length <= OPENAI_RESPONSES_REPLAY_ITEM_ID_MAX_LENGTH) {
+    return id;
+  }
+  return `${prefix}_${shortHash(id)}`;
+}
+
+function isSafeResponsesReplayItemId(id: unknown): id is string {
+  return (
+    typeof id === "string" &&
+    id.length > 0 &&
+    id.length <= OPENAI_RESPONSES_REPLAY_ITEM_ID_MAX_LENGTH
+  );
+}
+
 function encodeTextSignatureV1(id: string, phase?: "commentary" | "final_answer"): string {
   return JSON.stringify({ v: 1, id, ...(phase ? { phase } : {}) });
 }
@@ -265,13 +288,33 @@ function convertResponsesMessages(
       for (const block of msg.content) {
         if (block.type === "thinking") {
           if (block.thinkingSignature) {
-            output.push(JSON.parse(block.thinkingSignature));
+            const parsedReasoningItem: unknown = JSON.parse(block.thinkingSignature);
+            if (!parsedReasoningItem || typeof parsedReasoningItem !== "object") {
+              // A signature that parses to null/a scalar is not a replayable
+              // reasoning item; reading `.id` off it would throw.
+              continue;
+            }
+            const replayableReasoningItem = parsedReasoningItem as ResponseInput[0] & {
+              id?: unknown;
+            };
+            // Copilot rejects the whole request when a replayed reasoning item
+            // carries an id it cannot resolve (missing, empty, or longer than
+            // the Responses item-id limit). Drop just that reasoning item
+            // instead of failing the turn; other providers tolerate it.
+            if (
+              model.provider === "github-copilot" &&
+              !isSafeResponsesReplayItemId(replayableReasoningItem.id)
+            ) {
+              continue;
+            }
+            output.push(replayableReasoningItem);
           }
         } else if (block.type === "text") {
-          let msgId = parseTextSignature(block.textSignature)?.id ?? `msg_${msgIndex}`;
-          if (msgId.length > 64) {
-            msgId = `msg_${shortHash(msgId)}`;
-          }
+          const msgId =
+            normalizeResponsesReplayItemId(
+              parseTextSignature(block.textSignature)?.id ?? `msg_${msgIndex}`,
+              "msg",
+            ) ?? `msg_${msgIndex}`;
           output.push({
             type: "message",
             role: "assistant",

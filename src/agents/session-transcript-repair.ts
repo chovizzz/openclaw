@@ -17,6 +17,14 @@ type RawToolCallBlock = {
   arguments?: unknown;
 };
 
+function isThinkingLikeBlock(block: unknown): boolean {
+  if (!block || typeof block !== "object") {
+    return false;
+  }
+  const type = (block as { type?: unknown }).type;
+  return type === "thinking" || type === "redacted_thinking";
+}
+
 function isRawToolCallBlock(block: unknown): block is RawToolCallBlock {
   if (!block || typeof block !== "object") {
     return false;
@@ -86,6 +94,7 @@ function redactSessionsSpawnAttachmentsArgs(value: unknown): unknown {
   if (!Array.isArray(raw)) {
     return value;
   }
+  let touched = false;
   const next = raw.map((item) => {
     if (!item || typeof item !== "object") {
       return item;
@@ -94,10 +103,17 @@ function redactSessionsSpawnAttachmentsArgs(value: unknown): unknown {
     if (!Object.hasOwn(a, "content")) {
       return item;
     }
+    if (a.content === "__OPENCLAW_REDACTED__") {
+      // Already redacted: keep the identical object so repeated repair passes
+      // stay byte-stable and replay-safety checks (which compare identity) do
+      // not misread an idempotent pass as a pending mutation.
+      return item;
+    }
+    touched = true;
     const { content: _content, ...rest } = a;
     return { ...rest, content: "__OPENCLAW_REDACTED__" };
   });
-  return { ...rec, attachments: next };
+  return touched ? { ...rec, attachments: next } : value;
 }
 
 function sanitizeToolCallBlock(block: RawToolCallBlock): RawToolCallBlock {
@@ -135,6 +151,40 @@ function sanitizeToolCallBlock(block: RawToolCallBlock): RawToolCallBlock {
     next.input = nextInput;
   }
   return next as RawToolCallBlock;
+}
+
+function countRawToolCallBlocks(content: unknown[]): number {
+  let count = 0;
+  for (const block of content) {
+    if (isRawToolCallBlock(block)) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
+function isReplaySafeThinkingAssistantTurn(
+  content: unknown[],
+  allowedToolNames: Set<string> | null,
+): boolean {
+  let sawToolCall = false;
+  for (const block of content) {
+    if (!isRawToolCallBlock(block)) {
+      continue;
+    }
+    sawToolCall = true;
+    if (
+      !hasToolCallInput(block) ||
+      !hasToolCallId(block) ||
+      !hasToolCallName(block, allowedToolNames)
+    ) {
+      return false;
+    }
+    if (sanitizeToolCallBlock(block) !== block) {
+      return false;
+    }
+  }
+  return sawToolCall || content.some((block) => isThinkingLikeBlock(block));
 }
 
 function makeMissingToolResult(params: {
@@ -190,6 +240,15 @@ export type ToolCallInputRepairReport = {
 
 export type ToolCallInputRepairOptions = {
   allowedToolNames?: Iterable<string>;
+  /**
+   * Opt in to provider-owned signed-thinking replay handling. When enabled,
+   * assistant turns that pair a thinking block with tool calls are preserved
+   * verbatim when replay-safe and dropped wholesale otherwise, instead of
+   * having their tool calls normalized in place (which invalidates the
+   * provider signature). Resolve this with
+   * `shouldAllowProviderOwnedThinkingReplay` from `transcript-policy.ts`.
+   */
+  allowProviderOwnedThinkingReplay?: boolean;
 };
 
 export type ErroredAssistantResultPolicy = "preserve" | "drop";
@@ -227,6 +286,8 @@ export function repairToolCallInputs(
   let changed = false;
   const out: AgentMessage[] = [];
   const allowedToolNames = normalizeAllowedToolNames(options?.allowedToolNames);
+  const allowProviderOwnedThinkingReplay = options?.allowProviderOwnedThinkingReplay === true;
+  const claimedReplaySafeToolCallIds = new Set<string>();
 
   for (const msg of messages) {
     if (!msg || typeof msg !== "object") {
@@ -236,6 +297,42 @@ export function repairToolCallInputs(
 
     if (msg.role !== "assistant" || !Array.isArray(msg.content)) {
       out.push(msg);
+      continue;
+    }
+
+    if (
+      allowProviderOwnedThinkingReplay &&
+      msg.content.some((block) => isThinkingLikeBlock(block)) &&
+      countRawToolCallBlocks(msg.content) > 0
+    ) {
+      // Signed Anthropic thinking blocks must remain byte-for-byte stable on
+      // replay. Preserve the turn only if every sibling tool call is already
+      // valid, requires no redaction or normalization, and does not collide
+      // with a tool call id already claimed by an earlier preserved turn.
+      // Otherwise drop the whole assistant turn rather than mutating
+      // provider-owned content (mutation makes the signature invalid, and the
+      // provider rejects the entire replay).
+      //
+      // This branch is opt-in: `type: "thinking"` is the universal pi-ai
+      // thinking shape (OpenAI reasoning and Google thoughts land there too),
+      // and those providers accept normalized sibling tool calls just fine.
+      // Only callers that resolved a provider-owned signed-thinking replay
+      // policy (see `shouldAllowProviderOwnedThinkingReplay`) may enable it,
+      // so we never drop history for a provider that did not need it.
+      const replaySafeToolCalls = extractToolCallsFromAssistant(msg);
+      if (
+        isReplaySafeThinkingAssistantTurn(msg.content, allowedToolNames) &&
+        replaySafeToolCalls.every((toolCall) => !claimedReplaySafeToolCallIds.has(toolCall.id))
+      ) {
+        for (const toolCall of replaySafeToolCalls) {
+          claimedReplaySafeToolCallIds.add(toolCall.id);
+        }
+        out.push(msg);
+      } else {
+        droppedToolCalls += countRawToolCallBlocks(msg.content);
+        droppedAssistantMessages += 1;
+        changed = true;
+      }
       continue;
     }
 

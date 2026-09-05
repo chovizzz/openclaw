@@ -9,6 +9,7 @@ import { createSubsystemLogger } from "../logging/subsystem.js";
 import type { InlineCodeState } from "../markdown/code-spans.js";
 import { buildCodeSpanIndex, createInlineCodeState } from "../markdown/code-spans.js";
 import { normalizeOptionalString } from "../shared/string-coerce.js";
+import { hasOrphanReasoningCloseBoundary } from "../shared/text/reasoning-tags.js";
 import { EmbeddedBlockChunker } from "./pi-embedded-block-chunker.js";
 import {
   isMessagingToolDuplicateNormalized,
@@ -172,9 +173,13 @@ export function subscribeEmbeddedPiSession(params: SubscribeEmbeddedPiSessionPar
   };
   const emitBlockReply = (
     payload: BlockReplyPayload,
-    options?: { assistantMessageIndex?: number },
+    options?: { assistantMessageIndex?: number; consumePendingToolMedia?: boolean },
   ) => {
-    emitBlockReplySafely(consumePendingToolMediaIntoReply(state, payload), options);
+    const withToolMedia =
+      options?.consumePendingToolMedia === false
+        ? payload
+        : consumePendingToolMediaIntoReply(state, payload);
+    emitBlockReplySafely(withToolMedia, options);
   };
 
   const resetAssistantMessageState = (nextAssistantTextBaseline: number) => {
@@ -451,15 +456,33 @@ export function subscribeEmbeddedPiSession(params: SubscribeEmbeddedPiSessionPar
     THINKING_TAG_SCAN_RE.lastIndex = 0;
     let lastIndex = 0;
     let inThinking = state.thinking;
+    let droppedOrphanReasoningPrefix = false;
     for (const match of text.matchAll(THINKING_TAG_SCAN_RE)) {
       const idx = match.index ?? 0;
       if (codeSpans.isInside(idx)) {
         continue;
       }
+      const isClose = match[1] === "/";
       if (!inThinking) {
+        if (isClose) {
+          // Unopened reasoning: the model emitted its thinking without an
+          // opening tag. Text on both sides of the stray close tag means
+          // everything before it was reasoning, so drop it instead of
+          // streaming it out as visible assistant text.
+          const afterIndex = idx + match[0].length;
+          const before = text.slice(lastIndex, idx);
+          const after = text.slice(afterIndex);
+          if (!droppedOrphanReasoningPrefix && hasOrphanReasoningCloseBoundary({ before, after })) {
+            processed = "";
+            droppedOrphanReasoningPrefix = true;
+          } else {
+            processed += before;
+          }
+          lastIndex = afterIndex;
+          continue;
+        }
         processed += text.slice(lastIndex, idx);
       }
-      const isClose = match[1] === "/";
       inThinking = !isClose;
       lastIndex = idx + match[0].length;
     }
@@ -603,6 +626,12 @@ export function subscribeEmbeddedPiSession(params: SubscribeEmbeddedPiSessionPar
       },
       {
         assistantMessageIndex: options?.assistantMessageIndex ?? state.assistantMessageIndex,
+        // Only fold pending tool media (generated images, TTS audio) into a
+        // chunk that already carries media of its own. Attaching it to the
+        // first streamed chunk delivers the same file twice when the assistant
+        // text later emits its own explicit MEDIA: directive for it. Anything
+        // still pending at the end is flushed once by the agent_end handler.
+        consumePendingToolMedia: Boolean(mediaUrls?.length || audioAsVoice),
       },
     );
   };

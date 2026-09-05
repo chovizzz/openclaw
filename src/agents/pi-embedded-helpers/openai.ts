@@ -207,6 +207,7 @@ export function downgradeOpenAIFunctionCallReasoningPairs(
  * is incomplete, drop the block to keep history usable.
  */
 export function downgradeOpenAIReasoningBlocks(messages: AgentMessage[]): AgentMessage[] {
+  let anyChanged = false;
   const out: AgentMessage[] = [];
 
   for (const msg of messages) {
@@ -259,6 +260,7 @@ export function downgradeOpenAIReasoningBlocks(messages: AgentMessage[]): AgentM
       continue;
     }
 
+    anyChanged = true;
     if (nextContent.length === 0) {
       continue;
     }
@@ -266,5 +268,8 @@ export function downgradeOpenAIReasoningBlocks(messages: AgentMessage[]): AgentM
     out.push({ ...assistantMsg, content: nextContent } as AgentMessage);
   }
 
-  return out;
+  // Return the original array when nothing changed so callers can compare by
+  // identity and skip rebuilding the outbound context (keeps the cached prompt
+  // prefix byte-identical).
+  return anyChanged ? out : messages;
 }

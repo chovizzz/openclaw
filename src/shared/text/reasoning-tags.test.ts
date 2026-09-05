@@ -121,6 +121,20 @@ describe("stripReasoningTagsFromText", () => {
         expected: "You can start with <think and then close with",
       },
       {
+        input: "Internal reasoning </think> final answer",
+        expected: "final answer",
+      },
+      {
+        // Only the first orphan close marks the reasoning boundary. A later
+        // stray close tag must not throw away text already kept as the answer.
+        input: "reasoning </think> answer1 </think> answer2",
+        expected: "answer1  answer2",
+      },
+      {
+        input: "Use `<think>` to open and `</think>` to close. Final sentence.",
+        expected: "Use `<think>` to open and `</think>` to close. Final sentence.",
+      },
+      {
         input: "A < think >content< /think > B",
         expected: "A  B",
       },
@@ -168,7 +182,7 @@ describe("stripReasoningTagsFromText", () => {
     it.each([
       {
         input: "<think>outer <think>inner</think> still outer</think>visible",
-        expected: "still outervisible",
+        expected: "visible",
       },
       {
         input: "A<final>1</final>B<final>2</final>C",

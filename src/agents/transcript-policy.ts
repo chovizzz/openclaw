@@ -44,8 +44,54 @@ const DEFAULT_TRANSCRIPT_POLICY: TranscriptPolicy = {
   allowSyntheticToolResults: false,
 };
 
+/**
+ * Read the `supportsReasoningEffort` compat flag off a resolved model. The
+ * upstream `Model["compat"]` type is narrowed per API family, so read it
+ * through a structural view instead of the conditional type.
+ */
+function resolveSupportsReasoningEffort(model?: ProviderRuntimeModel): boolean | undefined {
+  const compat = (model as { compat?: { supportsReasoningEffort?: unknown } } | undefined)?.compat;
+  const value = compat?.supportsReasoningEffort;
+  return typeof value === "boolean" ? value : undefined;
+}
+
 function isAnthropicApi(modelApi?: string | null): boolean {
   return modelApi === "anthropic-messages" || modelApi === "bedrock-converse-stream";
+}
+
+const SIGNED_THINKING_PROVIDERS = new Set(["anthropic", "amazon-bedrock", "anthropic-vertex"]);
+
+/** Return true when a provider family owns signed thinking blocks. */
+export function providerRequiresSignedThinking(provider?: string | null): boolean {
+  return SIGNED_THINKING_PROVIDERS.has(normalizeProviderId(provider ?? ""));
+}
+
+/**
+ * Decide whether signed thinking can be replayed under the current provider
+ * policy.
+ *
+ * Only these providers hand back thinking blocks whose bytes are signed and
+ * must be replayed verbatim. Everywhere else (`type: "thinking"` is the shared
+ * pi-ai shape used by OpenAI reasoning and Google thoughts too) it is safe to
+ * normalize sibling tool calls in place, so the stricter drop-the-whole-turn
+ * repair path must stay off.
+ */
+export function shouldAllowProviderOwnedThinkingReplay(params: {
+  modelApi?: string | null;
+  provider?: string | null;
+  policy: Pick<
+    TranscriptPolicy,
+    "validateAnthropicTurns" | "preserveSignatures" | "dropThinkingBlocks"
+  >;
+}): boolean {
+  const hasProviderOwnedSignedThinking =
+    params.policy.preserveSignatures || providerRequiresSignedThinking(params.provider);
+  return (
+    isAnthropicApi(params.modelApi) &&
+    params.policy.validateAnthropicTurns &&
+    hasProviderOwnedSignedThinking &&
+    !params.policy.dropThinkingBlocks
+  );
 }
 
 /**
@@ -58,6 +104,7 @@ function isAnthropicApi(modelApi?: string | null): boolean {
 function buildUnownedProviderTransportReplayFallback(params: {
   modelApi?: string | null;
   modelId?: string | null;
+  model?: ProviderRuntimeModel;
 }): ProviderReplayPolicy | undefined {
   const isGoogle = isGoogleModelApi(params.modelApi);
   const isAnthropic = isAnthropicApi(params.modelApi);
@@ -97,6 +144,11 @@ function buildUnownedProviderTransportReplayFallback(params: {
       : {}),
     ...(isAnthropic && modelId.includes("claude")
       ? { dropThinkingBlocks: !shouldPreserveThinkingBlocks(modelId) }
+      : {}),
+    // A model that cannot take a reasoning effort cannot accept replayed
+    // thinking blocks either; keeping them makes the request fail outright.
+    ...(isAnthropic && resolveSupportsReasoningEffort(params.model) === false
+      ? { dropThinkingBlocks: true }
       : {}),
     ...(isGoogle || isStrictOpenAiCompatible ? { applyAssistantFirstOrderingFix: true } : {}),
     ...(isGoogle || isStrictOpenAiCompatible ? { validateGeminiTurns: true } : {}),
@@ -190,6 +242,7 @@ export function resolveTranscriptPolicy(params: {
     buildUnownedProviderTransportReplayFallback({
       modelApi: params.modelApi,
       modelId: params.modelId,
+      model: params.model,
     }),
   );
 }

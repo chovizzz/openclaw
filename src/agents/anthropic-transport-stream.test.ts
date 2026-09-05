@@ -264,4 +264,67 @@ describe("anthropic transport stream", () => {
       undefined,
     );
   });
+
+  it("recovers orphan text deltas when an Anthropic-compatible provider omits block start", async () => {
+    anthropicMessagesStreamMock.mockReturnValue(
+      (async function* () {
+        yield {
+          type: "message_start",
+          message: { id: "msg_1", usage: { input_tokens: 6, output_tokens: 0 } },
+        };
+        yield {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text: "hello there" },
+        };
+        yield { type: "content_block_stop", index: 0 };
+        yield {
+          type: "message_delta",
+          delta: { stop_reason: "end_turn" },
+          usage: { input_tokens: 6, output_tokens: 1 },
+        };
+      })(),
+    );
+    const model = attachModelProviderRequestTransport(
+      {
+        id: "kimi-k2",
+        name: "Kimi K2",
+        api: "anthropic-messages",
+        provider: "kimi-coding",
+        baseUrl: "https://api.kimi.com/coding/",
+        reasoning: false,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 200000,
+        maxTokens: 8192,
+      } satisfies Model<"anthropic-messages">,
+      { proxy: { mode: "env-proxy" } },
+    );
+    const streamFn = createAnthropicMessagesTransportStreamFn();
+
+    const stream = await Promise.resolve(
+      streamFn(
+        model,
+        { messages: [{ role: "user", content: "hello" }] } as Parameters<typeof streamFn>[1],
+        { apiKey: "kimi-key" } as Parameters<typeof streamFn>[2],
+      ),
+    );
+    const events: Array<{ type?: string; delta?: string; content?: string }> = [];
+    for await (const event of stream as AsyncIterable<{
+      type?: string;
+      delta?: string;
+      content?: string;
+    }>) {
+      events.push(event);
+    }
+    const result = await stream.result();
+
+    expect(result.content).toEqual([{ type: "text", text: "hello there" }]);
+    expect(events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "text_start" }),
+        expect.objectContaining({ type: "text_delta", delta: "hello there" }),
+      ]),
+    );
+  });
 });

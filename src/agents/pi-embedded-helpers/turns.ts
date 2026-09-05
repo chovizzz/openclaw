@@ -15,6 +15,40 @@ function isToolCallBlock(block: AnthropicContentBlock): boolean {
   return block.type === "toolUse" || block.type === "toolCall" || block.type === "functionCall";
 }
 
+/**
+ * Detect a thinking block whose bytes are provider-signed.
+ *
+ * `type: "thinking"` is the shared pi-ai shape that OpenAI reasoning and Google
+ * thoughts also use, and this fork enables `validateAnthropicTurns` for
+ * `openai-completions` too. Only a block that actually carries a signature is
+ * byte-locked, so only those turns must be collapsed wholesale instead of
+ * having their dangling tool calls filtered out individually.
+ */
+function isSignedThinkingBlock(block: AnthropicContentBlock | undefined): boolean {
+  if (!block || typeof block !== "object") {
+    return false;
+  }
+  const record = block as {
+    type?: unknown;
+    thinkingSignature?: unknown;
+    signature?: unknown;
+    redacted?: unknown;
+  };
+  if (record.type === "redacted_thinking") {
+    return true;
+  }
+  if (record.type !== "thinking") {
+    return false;
+  }
+  if (record.redacted === true) {
+    return true;
+  }
+  return (
+    (typeof record.thinkingSignature === "string" && record.thinkingSignature.length > 0) ||
+    (typeof record.signature === "string" && record.signature.length > 0)
+  );
+}
+
 function isAbortedAssistantTurn(message: AgentMessage): boolean {
   const stopReason = (message as { stopReason?: unknown }).stopReason;
   return stopReason === "aborted" || stopReason === "error";
@@ -124,7 +158,35 @@ function stripDanglingAnthropicToolUses(messages: AgentMessage[]): AgentMessage[
       result.push(msg);
       continue;
     }
+    const hasThinking = originalContent.some((block) => isSignedThinkingBlock(block));
     const validToolUseIds = collectFutureToolResultIds(messages, i);
+
+    if (hasThinking) {
+      // Signed thinking must replay byte-for-byte alongside its original
+      // tool_use blocks. Filtering out only the dangling tool calls would leave
+      // a signed turn whose content no longer matches the signature and the API
+      // rejects the whole request. Keep the turn verbatim when every tool call
+      // still resolves, otherwise collapse the turn to a placeholder instead of
+      // shipping a half-rewritten signed turn.
+      const allToolCallsResolvable = originalContent.every((block) => {
+        if (!block || !isToolCallBlock(block)) {
+          return true;
+        }
+        const blockId = normalizeOptionalString(block.id);
+        return blockId ? validToolUseIds.has(blockId) : false;
+      });
+      if (allToolCallsResolvable) {
+        result.push(msg);
+      } else {
+        result.push({
+          ...assistantMsg,
+          content: isAbortedAssistantTurn(msg)
+            ? []
+            : ([{ type: "text", text: "[tool calls omitted]" }] as AnthropicContentBlock[]),
+        } as AgentMessage);
+      }
+      continue;
+    }
 
     const filteredContent = originalContent.filter((block) => {
       if (!block) {

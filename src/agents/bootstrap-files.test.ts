@@ -8,8 +8,10 @@ import {
 } from "../hooks/internal-hooks.js";
 import { makeTempWorkspace } from "../test-helpers/workspace.js";
 import {
+  _resetBootstrapWarningCacheForTest,
   FULL_BOOTSTRAP_COMPLETED_CUSTOM_TYPE,
   hasCompletedBootstrapTurn,
+  makeBootstrapWarn,
   resolveBootstrapContextForRun,
   resolveBootstrapFilesForRun,
   resolveContextInjectionMode,
@@ -377,5 +379,82 @@ describe("resolveContextInjectionMode", () => {
         agents: { defaults: { contextInjection: "continuation-skip" } },
       } as never),
     ).toBe("continuation-skip");
+  });
+});
+
+describe("makeBootstrapWarn", () => {
+  const TRUNCATION_WARNING =
+    "workspace bootstrap file MEMORY.md is 36697 chars (limit 12000); truncating";
+
+  afterEach(() => {
+    _resetBootstrapWarningCacheForTest();
+  });
+
+  it("deduplicates repeated warnings for the same session and message", () => {
+    const warnings: string[] = [];
+    const warn = makeBootstrapWarn({
+      sessionLabel: "agent:main:test-session",
+      warn: (message) => warnings.push(message),
+    });
+
+    warn?.(TRUNCATION_WARNING);
+    warn?.(TRUNCATION_WARNING);
+
+    expect(warnings).toEqual([`${TRUNCATION_WARNING} (sessionKey=agent:main:test-session)`]);
+  });
+
+  it("keeps warnings distinct across sessions", () => {
+    const warnings: string[] = [];
+    const first = makeBootstrapWarn({
+      sessionLabel: "agent:main:first-session",
+      warn: (message) => warnings.push(message),
+    });
+    const second = makeBootstrapWarn({
+      sessionLabel: "agent:main:second-session",
+      warn: (message) => warnings.push(message),
+    });
+
+    first?.(TRUNCATION_WARNING);
+    second?.(TRUNCATION_WARNING);
+
+    expect(warnings).toEqual([
+      `${TRUNCATION_WARNING} (sessionKey=agent:main:first-session)`,
+      `${TRUNCATION_WARNING} (sessionKey=agent:main:second-session)`,
+    ]);
+  });
+
+  it("keeps warnings distinct across workspaces with the same session", () => {
+    const warnings: string[] = [];
+    const first = makeBootstrapWarn({
+      sessionLabel: "agent:main:shared-session",
+      workspaceDir: "/tmp/workspace-a",
+      warn: (message) => warnings.push(message),
+    });
+    const second = makeBootstrapWarn({
+      sessionLabel: "agent:main:shared-session",
+      workspaceDir: "/tmp/workspace-b",
+      warn: (message) => warnings.push(message),
+    });
+
+    first?.(TRUNCATION_WARNING);
+    second?.(TRUNCATION_WARNING);
+
+    expect(warnings).toEqual([
+      `${TRUNCATION_WARNING} (sessionKey=agent:main:shared-session)`,
+      `${TRUNCATION_WARNING} (sessionKey=agent:main:shared-session)`,
+    ]);
+  });
+
+  it("keeps distinct messages for the same session", () => {
+    const warnings: string[] = [];
+    const warn = makeBootstrapWarn({
+      sessionLabel: "agent:main:test-session",
+      warn: (message) => warnings.push(message),
+    });
+
+    warn?.(TRUNCATION_WARNING);
+    warn?.("workspace bootstrap file AGENTS.md is 20000 chars (limit 12000); truncating");
+
+    expect(warnings).toHaveLength(2);
   });
 });

@@ -266,6 +266,142 @@ describe("sanitizeToolUseResultPairing", () => {
 });
 
 describe("sanitizeToolCallInputs", () => {
+  it("drops signed-thinking assistant turns when sibling tool calls are not replay-safe", () => {
+    const input = castAgentMessages([
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "Plan it.", thinkingSignature: "sig_plan" },
+          { type: "toolCall", id: "call_1", name: "gateway ", arguments: { path: "a" } },
+        ],
+      },
+    ]);
+
+    const out = sanitizeToolCallInputs(input, {
+      allowedToolNames: ["read"],
+      allowProviderOwnedThinkingReplay: true,
+    });
+
+    expect(out).toEqual([]);
+  });
+
+  it("drops signed-thinking assistant turns that would require attachment redaction", () => {
+    const secret = "SIGNED_THINKING_ATTACHMENT_SECRET"; // pragma: allowlist secret
+    const input = castAgentMessages([
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "Spawn a helper.", thinkingSignature: "sig_spawn" },
+          {
+            type: "toolUse",
+            id: "call_spawn",
+            name: "sessions_spawn",
+            input: {
+              task: "inspect attachment",
+              attachments: [{ name: "snapshot.txt", content: secret }],
+            },
+          },
+        ],
+      },
+    ]);
+
+    const out = sanitizeToolCallInputs(input, {
+      allowedToolNames: ["sessions_spawn"],
+      allowProviderOwnedThinkingReplay: true,
+    });
+
+    expect(out).toEqual([]);
+    expect(JSON.stringify(out)).not.toContain(secret);
+  });
+
+  it("preserves replay-safe signed-thinking assistant turns verbatim", () => {
+    const input = castAgentMessages([
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "Read it.", thinkingSignature: "sig_read" },
+          { type: "toolCall", id: "call_1", name: "read", arguments: { path: "a" } },
+        ],
+      },
+    ]);
+
+    const out = sanitizeToolCallInputs(input, {
+      allowedToolNames: ["read"],
+      allowProviderOwnedThinkingReplay: true,
+    });
+
+    expect(out).toBe(input);
+  });
+
+  it("drops later signed-thinking assistant turns that reuse an earlier signed tool id", () => {
+    const input = castAgentMessages([
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "First.", thinkingSignature: "sig_first" },
+          { type: "toolCall", id: "call_shared", name: "read", arguments: { path: "a" } },
+        ],
+      },
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "Second.", thinkingSignature: "sig_second" },
+          { type: "toolUse", id: "call_shared", name: "read", input: { path: "b" } },
+        ],
+      },
+    ]);
+
+    const out = sanitizeToolCallInputs(input, {
+      allowedToolNames: ["read"],
+      allowProviderOwnedThinkingReplay: true,
+    });
+
+    expect(out).toEqual([input[0]]);
+  });
+
+  it("leaves thinking turns alone when provider-owned signed replay is not enabled", () => {
+    const input = castAgentMessages([
+      {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "OpenAI reasoning has no signature lock." },
+          { type: "toolCall", id: "call_1", name: " read ", arguments: { path: "a" } },
+        ],
+      },
+    ]);
+
+    const out = sanitizeToolCallInputs(input, { allowedToolNames: ["read"] });
+
+    expect(out).toHaveLength(1);
+    const assistant = out[0] as Extract<AgentMessage, { role: "assistant" }>;
+    const content = assistant.content as { type: string; name?: string }[];
+    expect(content.map((block) => block.type)).toEqual(["thinking", "toolCall"]);
+    expect(content[1]?.name).toBe("read");
+  });
+
+  it("keeps already-redacted sessions_spawn attachments byte-stable across repeated repairs", () => {
+    const input = castAgentMessages([
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "call_spawn",
+            name: "sessions_spawn",
+            arguments: {
+              task: "t",
+              attachments: [{ name: "a.txt", content: "__OPENCLAW_REDACTED__" }],
+            },
+          },
+        ],
+      },
+    ]);
+
+    const first = sanitizeToolCallInputs(input, { allowedToolNames: ["sessions_spawn"] });
+    expect(first).toBe(input);
+    expect(sanitizeToolCallInputs(first, { allowedToolNames: ["sessions_spawn"] })).toBe(first);
+  });
+
   function sanitizeAssistantContent(
     content: unknown[],
     options?: Parameters<typeof sanitizeToolCallInputs>[1],

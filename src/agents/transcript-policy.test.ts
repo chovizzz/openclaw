@@ -178,8 +178,55 @@ vi.mock("../plugins/provider-runtime.js", async () => {
 });
 
 let resolveTranscriptPolicy: typeof import("./transcript-policy.js").resolveTranscriptPolicy;
+let shouldAllowProviderOwnedThinkingReplay: typeof import("./transcript-policy.js").shouldAllowProviderOwnedThinkingReplay;
 
 describe("resolveTranscriptPolicy", () => {
+  it("strips thinking blocks for unowned Anthropic-compatible models that opt out of reasoning", () => {
+    const policy = resolveTranscriptPolicy({
+      provider: "qiniu",
+      modelId: "moonshotai/kimi-k2.5",
+      modelApi: "anthropic-messages",
+      model: {
+        id: "moonshotai/kimi-k2.5",
+        name: "Kimi K2.5",
+        provider: "qiniu",
+        api: "anthropic-messages",
+        baseUrl: "https://api.qnaigc.com",
+        reasoning: false,
+        input: ["text", "image"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 256_000,
+        maxTokens: 16_384,
+        compat: { supportsReasoningEffort: false },
+      },
+    });
+
+    expect(policy.dropThinkingBlocks).toBe(true);
+    expect(policy.validateAnthropicTurns).toBe(true);
+  });
+
+  it("keeps thinking blocks for unowned Anthropic-compatible models without the compat opt-out", () => {
+    const policy = resolveTranscriptPolicy({
+      provider: "qiniu",
+      modelId: "moonshotai/kimi-k2.5",
+      modelApi: "anthropic-messages",
+      model: {
+        id: "moonshotai/kimi-k2.5",
+        name: "Kimi K2.5",
+        provider: "qiniu",
+        api: "anthropic-messages",
+        baseUrl: "https://api.qnaigc.com",
+        reasoning: false,
+        input: ["text", "image"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 256_000,
+        maxTokens: 16_384,
+      },
+    });
+
+    expect(policy.dropThinkingBlocks).toBe(false);
+  });
+
   beforeAll(async () => {
     ({ resolveTranscriptPolicy } = await import("./transcript-policy.js"));
   });
@@ -440,5 +487,84 @@ describe("resolveTranscriptPolicy", () => {
       allowBase64Only: true,
       includeCamelCase: true,
     });
+  });
+});
+
+describe("shouldAllowProviderOwnedThinkingReplay", () => {
+  beforeAll(async () => {
+    ({ shouldAllowProviderOwnedThinkingReplay } = await import("./transcript-policy.js"));
+  });
+
+  const basePolicy = {
+    validateAnthropicTurns: true,
+    preserveSignatures: true,
+    dropThinkingBlocks: false,
+  };
+
+  it("allows provider-owned signed thinking replay for the anthropic transport", () => {
+    expect(
+      shouldAllowProviderOwnedThinkingReplay({
+        modelApi: "anthropic-messages",
+        provider: "anthropic",
+        policy: basePolicy,
+      }),
+    ).toBe(true);
+  });
+
+  it("allows it for bedrock converse stream", () => {
+    expect(
+      shouldAllowProviderOwnedThinkingReplay({
+        modelApi: "bedrock-converse-stream",
+        provider: "amazon-bedrock",
+        policy: { ...basePolicy, preserveSignatures: false },
+      }),
+    ).toBe(true);
+  });
+
+  it("refuses when thinking blocks are dropped anyway", () => {
+    expect(
+      shouldAllowProviderOwnedThinkingReplay({
+        modelApi: "anthropic-messages",
+        provider: "anthropic",
+        policy: { ...basePolicy, dropThinkingBlocks: true },
+      }),
+    ).toBe(false);
+  });
+
+  it("refuses for non-anthropic transports that share the pi-ai thinking shape", () => {
+    expect(
+      shouldAllowProviderOwnedThinkingReplay({
+        modelApi: "openai-responses",
+        provider: "openai",
+        policy: basePolicy,
+      }),
+    ).toBe(false);
+    expect(
+      shouldAllowProviderOwnedThinkingReplay({
+        modelApi: "google-generative-ai",
+        provider: "google",
+        policy: basePolicy,
+      }),
+    ).toBe(false);
+  });
+
+  it("refuses when anthropic turn validation is off", () => {
+    expect(
+      shouldAllowProviderOwnedThinkingReplay({
+        modelApi: "anthropic-messages",
+        provider: "anthropic",
+        policy: { ...basePolicy, validateAnthropicTurns: false },
+      }),
+    ).toBe(false);
+  });
+
+  it("refuses for an unrelated provider that neither signs nor preserves signatures", () => {
+    expect(
+      shouldAllowProviderOwnedThinkingReplay({
+        modelApi: "anthropic-messages",
+        provider: "qiniu",
+        policy: { ...basePolicy, preserveSignatures: false },
+      }),
+    ).toBe(false);
   });
 });

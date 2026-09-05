@@ -3,6 +3,7 @@ import { streamSimple } from "@mariozechner/pi-ai";
 import { normalizeLowercaseStringOrEmpty } from "../../../shared/string-coerce.js";
 import { validateAnthropicTurns, validateGeminiTurns } from "../../pi-embedded-helpers.js";
 import { sanitizeToolUseResultPairing } from "../../session-transcript-repair.js";
+import { extractToolCallsFromAssistant } from "../../tool-call-id.js";
 import { normalizeToolName } from "../../tool-policy.js";
 import type { TranscriptPolicy } from "../../transcript-policy.js";
 
@@ -242,6 +243,70 @@ function isReplayToolCallBlock(block: unknown): block is ReplayToolCallBlock {
   return isToolCallBlockType((block as { type?: unknown }).type);
 }
 
+function isThinkingLikeReplayBlock(block: unknown): boolean {
+  if (!block || typeof block !== "object") {
+    return false;
+  }
+  const type = (block as { type?: unknown }).type;
+  return type === "thinking" || type === "redacted_thinking";
+}
+
+/**
+ * A `sessions_spawn` replay block still carrying raw attachment content would
+ * be rewritten by transcript redaction. Rewriting a signed turn invalidates the
+ * signature, so such a turn is not replay-safe.
+ */
+function hasUnredactedSessionsSpawnAttachments(block: ReplayToolCallBlock): boolean {
+  const rawName = typeof block.name === "string" ? block.name.trim() : "";
+  if (normalizeLowercaseStringOrEmpty(rawName) !== "sessions_spawn") {
+    return false;
+  }
+  for (const payload of [block.arguments, block.input]) {
+    if (!payload || typeof payload !== "object") {
+      continue;
+    }
+    const attachments = (payload as { attachments?: unknown }).attachments;
+    if (!Array.isArray(attachments)) {
+      continue;
+    }
+    for (const attachment of attachments) {
+      if (!attachment || typeof attachment !== "object") {
+        continue;
+      }
+      if (!Object.hasOwn(attachment, "content")) {
+        continue;
+      }
+      const content = (attachment as { content?: unknown }).content;
+      if (content !== "__OPENCLAW_REDACTED__") {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function isReplaySafeThinkingTurn(content: unknown[], allowedToolNames?: Set<string>): boolean {
+  for (const block of content) {
+    if (!isReplayToolCallBlock(block)) {
+      continue;
+    }
+    const replayBlock = block;
+    if (
+      !replayToolCallHasInput(replayBlock) ||
+      !replayToolCallNonEmptyString(replayBlock.id) ||
+      hasUnredactedSessionsSpawnAttachments(replayBlock)
+    ) {
+      return false;
+    }
+    const rawName = typeof replayBlock.name === "string" ? replayBlock.name : "";
+    const resolvedName = resolveReplayToolCallName(rawName, replayBlock.id, allowedToolNames);
+    if (!resolvedName || replayBlock.name !== resolvedName) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function replayToolCallHasInput(block: ReplayToolCallBlock): boolean {
   const hasInput = "input" in block ? block.input !== undefined && block.input !== null : false;
   const hasArguments =
@@ -275,10 +340,12 @@ function resolveReplayToolCallName(
 function sanitizeReplayToolCallInputs(
   messages: AgentMessage[],
   allowedToolNames?: Set<string>,
+  allowProviderOwnedThinkingReplay?: boolean,
 ): ReplayToolCallSanitizeReport {
   let changed = false;
   let droppedAssistantMessages = 0;
   const out: AgentMessage[] = [];
+  const claimedReplaySafeToolCallIds = new Set<string>();
 
   for (const message of messages) {
     if (!message || typeof message !== "object" || message.role !== "assistant") {
@@ -287,6 +354,33 @@ function sanitizeReplayToolCallInputs(
     }
     if (!Array.isArray(message.content)) {
       out.push(message);
+      continue;
+    }
+
+    // Provider-owned signed thinking must replay byte-for-byte. Normalizing a
+    // sibling tool call in place invalidates the signature and the provider
+    // rejects the whole request, so preserve the turn verbatim when it is
+    // already replay-safe and drop it outright otherwise. Gated on the
+    // provider policy: `type: "thinking"` is the shared pi-ai shape, and
+    // non-signing providers accept normalized tool calls just fine.
+    if (
+      allowProviderOwnedThinkingReplay &&
+      message.content.some((block) => isThinkingLikeReplayBlock(block)) &&
+      message.content.some((block) => isReplayToolCallBlock(block))
+    ) {
+      const replaySafeToolCalls = extractToolCallsFromAssistant(message);
+      if (
+        isReplaySafeThinkingTurn(message.content, allowedToolNames) &&
+        replaySafeToolCalls.every((toolCall) => !claimedReplaySafeToolCallIds.has(toolCall.id))
+      ) {
+        for (const toolCall of replaySafeToolCalls) {
+          claimedReplaySafeToolCallIds.add(toolCall.id);
+        }
+        out.push(message);
+      } else {
+        changed = true;
+        droppedAssistantMessages += 1;
+      }
       continue;
     }
 
@@ -738,6 +832,7 @@ export function wrapStreamFnSanitizeMalformedToolCalls(
   baseFn: StreamFn,
   allowedToolNames?: Set<string>,
   transcriptPolicy?: Pick<TranscriptPolicy, "validateGeminiTurns" | "validateAnthropicTurns">,
+  allowProviderOwnedThinkingReplay?: boolean,
 ): StreamFn {
   return (model, context, options) => {
     const ctx = context as unknown as { messages?: unknown };
@@ -745,7 +840,11 @@ export function wrapStreamFnSanitizeMalformedToolCalls(
     if (!Array.isArray(messages)) {
       return baseFn(model, context, options);
     }
-    const sanitized = sanitizeReplayToolCallInputs(messages as AgentMessage[], allowedToolNames);
+    const sanitized = sanitizeReplayToolCallInputs(
+      messages as AgentMessage[],
+      allowedToolNames,
+      allowProviderOwnedThinkingReplay,
+    );
     if (sanitized.messages === messages) {
       return baseFn(model, context, options);
     }

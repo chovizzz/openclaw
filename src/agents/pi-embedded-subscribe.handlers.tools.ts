@@ -509,7 +509,7 @@ async function emitToolResultOutput(params: {
   }
   const mediaUrls = filterToolResultMediaUrls(toolName, mediaReply.mediaUrls, result);
   const pendingMediaUrls =
-    mediaReply.audioAsVoice || emittedToolOutputMediaUrls.length === 0
+    emittedToolOutputMediaUrls.length === 0
       ? mediaUrls
       : mediaUrls.filter((url) => !emittedToolOutputMediaUrls.includes(url));
   if (pendingMediaUrls.length === 0) {

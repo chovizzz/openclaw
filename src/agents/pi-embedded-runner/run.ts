@@ -1442,10 +1442,30 @@ export async function runEmbeddedPiAgent(
             didSendDeterministicApprovalPrompt: attempt.didSendDeterministicApprovalPrompt,
           });
 
+          // A prompt-phase timeout can also leave a *partial* assistant
+          // fragment behind: text the model had started emitting when the
+          // deadline hit, with no tool activity to anchor it. Shipping that
+          // fragment reads as a complete answer, so drop it and surface the
+          // timeout instead. Runs that reached tools, sent via a messaging
+          // tool, or yielded keep whatever they already produced.
+          const timedOutDuringPrompt = timedOut && !timedOutDuringCompaction;
+          const hasPartialAssistantTextAfterPromptTimeout =
+            timedOutDuringPrompt &&
+            (attempt.assistantTexts ?? []).some((text) => text.trim().length > 0) &&
+            !attempt.clientToolCall &&
+            !attempt.yieldDetected &&
+            !attempt.didSendViaMessagingTool &&
+            !attempt.didSendDeterministicApprovalPrompt &&
+            !attempt.lastToolError &&
+            (attempt.toolMetas?.length ?? 0) === 0;
+
           // Timeout aborts can leave the run without any assistant payloads.
           // Emit an explicit timeout error instead of silently completing, so
           // callers do not lose the turn as an orphaned user message.
-          if (timedOut && !timedOutDuringCompaction && payloads.length === 0) {
+          if (
+            timedOutDuringPrompt &&
+            (payloads.length === 0 || hasPartialAssistantTextAfterPromptTimeout)
+          ) {
             return {
               payloads: [
                 {

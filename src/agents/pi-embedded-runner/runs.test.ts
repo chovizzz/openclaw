@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { importFreshModule } from "../../../test/helpers/import-fresh.js";
+import { diagnosticLogger } from "../../logging/diagnostic.js";
 import {
   __testing,
   abortEmbeddedPiRun,
   clearActiveEmbeddedRun,
+  isEmbeddedPiRunActive,
+  resolveActiveEmbeddedRunSessionId,
   consumeEmbeddedRunModelSwitch,
   getActiveEmbeddedRunSnapshot,
   requestEmbeddedRunModelSwitch,
@@ -30,6 +33,35 @@ describe("pi-embedded runner run registry", () => {
   afterEach(() => {
     __testing.resetActiveEmbeddedRuns();
     vi.restoreAllMocks();
+  });
+
+  it("treats repeated clears for a completed run handle as idempotent", () => {
+    const debugSpy = vi.spyOn(diagnosticLogger, "debug").mockImplementation(() => undefined);
+    const handle = createRunHandle();
+
+    setActiveEmbeddedRun("session-repeat-clear", handle, "agent:main:main");
+    clearActiveEmbeddedRun("session-repeat-clear", handle, "agent:main:main");
+    clearActiveEmbeddedRun("session-repeat-clear", handle, "agent:main:main");
+
+    expect(isEmbeddedPiRunActive("session-repeat-clear")).toBe(false);
+    expect(resolveActiveEmbeddedRunSessionId("agent:main:main")).toBeUndefined();
+    expect(
+      debugSpy.mock.calls.some(([message]) => message.includes("reason=handle_mismatch")),
+    ).toBe(false);
+  });
+
+  it("still logs handle mismatches when another run owns the session", () => {
+    const debugSpy = vi.spyOn(diagnosticLogger, "debug").mockImplementation(() => undefined);
+    const staleHandle = createRunHandle();
+    const activeHandle = createRunHandle();
+
+    setActiveEmbeddedRun("session-handle-replaced", activeHandle);
+    clearActiveEmbeddedRun("session-handle-replaced", staleHandle);
+
+    expect(isEmbeddedPiRunActive("session-handle-replaced")).toBe(true);
+    expect(
+      debugSpy.mock.calls.some(([message]) => message.includes("reason=handle_mismatch")),
+    ).toBe(true);
   });
 
   it("aborts only compacting runs in compacting mode", () => {
