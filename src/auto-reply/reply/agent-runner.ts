@@ -43,7 +43,7 @@ import {
   signalTypingIfNeeded,
 } from "./agent-runner-helpers.js";
 import { runMemoryFlushIfNeeded, runPreflightCompactionIfNeeded } from "./agent-runner-memory.js";
-import { buildReplyPayloads } from "./agent-runner-payloads.js";
+import { buildReplyPayloads, loadReplyPayloadsDedupeRuntime } from "./agent-runner-payloads.js";
 import {
   appendUnscheduledReminderNote,
   hasSessionRelatedCronJobs,
@@ -594,7 +594,26 @@ export async function runReplyAgent(params: {
     // Otherwise, a late typing trigger (e.g. from a tool callback) can outlive the run and
     // keep the typing indicator stuck.
     if (runResult.didSendViaMessagingTool === true) {
-      await opts?.onObservedReplyDelivery?.();
+      // Attest delivery only when the messaging tool actually sent content back to
+      // *this* conversation. Any send used to count, so a turn that messaged an
+      // unrelated target cleared the channel's ack as if the user had been
+      // answered, hiding a conversation that got no reply. Under-attesting only
+      // costs a redundant fallback notice, so fall through on an unclear route.
+      const { hasSourceRoutedMessagingToolDelivery } = await loadReplyPayloadsDedupeRuntime();
+      const attested = hasSourceRoutedMessagingToolDelivery({
+        messageProvider: followupRun.run.messageProvider,
+        messagingToolSentTargets: runResult.messagingToolSentTargets,
+        messagingToolSentTexts: runResult.messagingToolSentTexts,
+        messagingToolSentMediaUrls: runResult.messagingToolSentMediaUrls,
+        originatingTo: resolveOriginMessageTo({
+          originatingTo: sessionCtx.OriginatingTo,
+          to: sessionCtx.To,
+        }),
+        accountId: sessionCtx.AccountId,
+      });
+      if (attested) {
+        await opts?.onObservedReplyDelivery?.();
+      }
     }
     if (payloadArray.length === 0) {
       return finalizeWithFollowup(undefined, queueKey, runFollowupTurn);

@@ -51,21 +51,26 @@ export function resolveFollowupDeliveryPayloads(params: {
     }
     return [{ ...payload, text: stripped.text }];
   });
-  const replyTaggedPayloads = applyReplyThreading({
-    payloads: sanitizedPayloads,
-    replyToMode,
-    replyToChannel,
-  });
   // Media dedupe first: the text dedupe below keeps a text-duplicate payload
   // alive only when it still carries unsent content, so already-sent media must
   // be stripped before that check runs.
   const mediaFilteredPayloads = filterMessagingToolMediaDuplicates({
-    payloads: replyTaggedPayloads,
+    payloads: sanitizedPayloads,
     sentMediaUrls: params.sentMediaUrls ?? [],
   });
   const dedupedPayloads = filterMessagingToolDuplicates({
     payloads: mediaFilteredPayloads,
     sentTexts: params.sentTexts ?? [],
+  });
+  // Thread only what actually survives dedupe. replyToMode=first|batched hands
+  // out a single reply-to slot, so threading before dedupe let a payload that
+  // was about to be dropped consume the slot and leave the surviving reply
+  // unthreaded. Neither dedupe stage reads the threading fields, so deferring
+  // this is safe.
+  const replyTaggedPayloads = applyReplyThreading({
+    payloads: dedupedPayloads,
+    replyToMode,
+    replyToChannel,
   });
   const suppressMessagingToolReplies = shouldSuppressMessagingToolReplies({
     messageProvider: replyToChannel,
@@ -77,5 +82,5 @@ export function resolveFollowupDeliveryPayloads(params: {
       originatingAccountId: params.originatingAccountId,
     }),
   });
-  return suppressMessagingToolReplies ? [] : dedupedPayloads;
+  return suppressMessagingToolReplies ? [] : replyTaggedPayloads;
 }

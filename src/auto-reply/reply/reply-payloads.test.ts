@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { resetPluginRuntimeStateForTest, setActivePluginRegistry } from "../../plugins/runtime.js";
 import { createOutboundTestPlugin, createTestRegistry } from "../../test-utils/channel-plugins.js";
+import { hasSourceRoutedMessagingToolDelivery } from "./reply-payloads-dedupe.js";
 import {
   filterMessagingToolMediaDuplicates,
   shouldSuppressMessagingToolReplies,
@@ -234,5 +235,130 @@ describe("shouldSuppressMessagingToolReplies", () => {
         ],
       }),
     ).toBe(false);
+  });
+});
+
+describe("hasSourceRoutedMessagingToolDelivery", () => {
+  it("attests delivery when the sent target matches the source route and carried text", () => {
+    expect(
+      hasSourceRoutedMessagingToolDelivery({
+        messageProvider: "telegram",
+        originatingTo: "123",
+        messagingToolSentTargets: [{ tool: "message", provider: "telegram", to: "123" }],
+        messagingToolSentTexts: ["hello there"],
+      }),
+    ).toBe(true);
+  });
+
+  it("attests delivery from aggregate media evidence when the route matches", () => {
+    expect(
+      hasSourceRoutedMessagingToolDelivery({
+        messageProvider: "telegram",
+        originatingTo: "123",
+        messagingToolSentTargets: [{ tool: "message", provider: "telegram", to: "123" }],
+        messagingToolSentMediaUrls: ["file:///tmp/photo.jpg"],
+      }),
+    ).toBe(true);
+  });
+
+  it("does not attest delivery for an unrelated-target send even with sent content", () => {
+    // The reply text was clearly sent somewhere, but not to the source
+    // conversation - a genuinely silent source conversation must still be
+    // free to fall back to the no-visible-reply notice.
+    expect(
+      hasSourceRoutedMessagingToolDelivery({
+        messageProvider: "telegram",
+        originatingTo: "123",
+        messagingToolSentTargets: [{ tool: "message", provider: "telegram", to: "456" }],
+        messagingToolSentTexts: ["hello there"],
+      }),
+    ).toBe(false);
+  });
+
+  it("does not attest delivery when routing cannot be determined at all", () => {
+    // No messageProvider and no sent targets: routing is simply unknown. This
+    // must default to "not attested" rather than guessing, per the same
+    // lose-content-is-worse-than-a-duplicate contract as suppression: an
+    // under-attestation only risks an extra fallback notice, while an
+    // over-attestation could hide a turn that never actually replied.
+    expect(
+      hasSourceRoutedMessagingToolDelivery({
+        originatingTo: "123",
+        messagingToolSentTexts: ["hello there"],
+      }),
+    ).toBe(false);
+  });
+
+  it("does not attest delivery when the route matches but nothing was actually sent", () => {
+    expect(
+      hasSourceRoutedMessagingToolDelivery({
+        messageProvider: "telegram",
+        originatingTo: "123",
+        messagingToolSentTargets: [{ tool: "message", provider: "telegram", to: "123" }],
+      }),
+    ).toBe(false);
+  });
+
+  it("does not attest delivery when the aggregate text is blank/whitespace-only", () => {
+    // A blank string surviving in the sent-texts list is not evidence that
+    // anything was actually delivered.
+    expect(
+      hasSourceRoutedMessagingToolDelivery({
+        messageProvider: "telegram",
+        originatingTo: "123",
+        messagingToolSentTargets: [{ tool: "message", provider: "telegram", to: "123" }],
+        messagingToolSentTexts: ["   \n\t "],
+        messagingToolSentMediaUrls: [""],
+      }),
+    ).toBe(false);
+  });
+
+  it("still attests delivery when only one of several sent texts is non-blank", () => {
+    expect(
+      hasSourceRoutedMessagingToolDelivery({
+        messageProvider: "telegram",
+        originatingTo: "123",
+        messagingToolSentTargets: [{ tool: "message", provider: "telegram", to: "123" }],
+        messagingToolSentTexts: ["", "actual reply text"],
+      }),
+    ).toBe(true);
+  });
+
+  it("known limitation: aggregate content from an unrelated send can attest a contentless source-routed send", () => {
+    // MessagingToolSend only records target identity, not per-target sent
+    // text/media, so a turn that sends via the messaging tool to BOTH the
+    // source conversation (with no content of its own) and an unrelated
+    // target (which does carry content) cannot distinguish which target the
+    // aggregate text belongs to. This is a documented tradeoff, not a
+    // regression: the alternative (never attesting without per-target
+    // evidence) would reintroduce the original bug for the common
+    // single-target case.
+    expect(
+      hasSourceRoutedMessagingToolDelivery({
+        messageProvider: "telegram",
+        originatingTo: "123",
+        messagingToolSentTargets: [
+          { tool: "message", provider: "telegram", to: "123" },
+          { tool: "message", provider: "telegram", to: "456" },
+        ],
+        messagingToolSentTexts: ["reply that actually went to 456"],
+      }),
+    ).toBe(true);
+  });
+
+  it("attests delivery when the origin account is unset but the target account is set", () => {
+    // Partial routing metadata (only one side specifies accountId) must not
+    // be treated as a mismatch - shouldSuppressMessagingToolReplies only
+    // rejects when BOTH sides specify an account and they differ.
+    expect(
+      hasSourceRoutedMessagingToolDelivery({
+        messageProvider: "telegram",
+        originatingTo: "123",
+        messagingToolSentTargets: [
+          { tool: "message", provider: "telegram", to: "123", accountId: "acct-1" },
+        ],
+        messagingToolSentTexts: ["hello there"],
+      }),
+    ).toBe(true);
   });
 });

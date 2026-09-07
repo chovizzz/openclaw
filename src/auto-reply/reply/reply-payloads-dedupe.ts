@@ -180,3 +180,64 @@ export function shouldSuppressMessagingToolReplies(params: {
     });
   });
 }
+
+/**
+ * True when a messaging-tool send visibly delivered to the *source*
+ * conversation (the same route `shouldSuppressMessagingToolReplies` matches
+ * against). Used to attest observed delivery for automatic-mode turns that
+ * answered entirely via the message tool: without this, a message-tool reply
+ * to the source conversation followed by no further final text still draws
+ * the no-visible-reply fallback into that conversation.
+ *
+ * Route matching is what keeps a send to an unrelated target (a different
+ * chat, a different provider) from counting as "the reply was delivered
+ * here". A false negative here (treating a real source-routed delivery as
+ * unattested) only costs a duplicate fallback notice; a false positive
+ * (crediting an unrelated-target send as the source reply) would hide a
+ * conversation that genuinely got no reply. So when routing itself cannot be
+ * determined, this returns false (do not attest) rather than guessing - losing
+ * an attestation is recoverable (worst case: an extra fallback line), losing
+ * visibility into a truly silent turn is not.
+ *
+ * This repo's `MessagingToolSend` records only target identity (provider/to/
+ * thread/account), not per-target sent text or media, so there is no
+ * per-route content evidence to check the way upstream's richer dedupe
+ * decision object does. The route match itself already implies a send
+ * happened at that target; requiring non-blank aggregate sent text/media is
+ * the closest available equivalent to "that send actually carried content".
+ * Known limitation inherited from that aggregate shape: when a single turn
+ * sends via the messaging tool to *both* the source conversation and an
+ * unrelated target, the aggregate text/media cannot be attributed back to a
+ * specific target, so a source-routed send with no content of its own can
+ * still be attested off of content that actually went elsewhere. This also
+ * inherits `shouldSuppressMessagingToolReplies`'s existing route-matching
+ * semantics as-is (for example a missing/`"message"`-placeholder target
+ * provider defaults to the current provider) - this function does not add or
+ * remove any routing leniency of its own.
+ */
+export function hasSourceRoutedMessagingToolDelivery(params: {
+  messageProvider?: string;
+  messagingToolSentTargets?: MessagingToolSend[];
+  messagingToolSentTexts?: string[];
+  messagingToolSentMediaUrls?: string[];
+  originatingTo?: string;
+  accountId?: string;
+}): boolean {
+  if (
+    !shouldSuppressMessagingToolReplies({
+      messageProvider: params.messageProvider,
+      messagingToolSentTargets: params.messagingToolSentTargets,
+      originatingTo: params.originatingTo,
+      accountId: params.accountId,
+    })
+  ) {
+    return false;
+  }
+  // `.some(Boolean-after-trim)` rather than `.length > 0`: an aggregate list
+  // containing only "" or whitespace is not evidence anything was actually
+  // delivered.
+  return (
+    (params.messagingToolSentTexts?.some((text) => text.trim().length > 0) ?? false) ||
+    (params.messagingToolSentMediaUrls?.some((url) => url.trim().length > 0) ?? false)
+  );
+}

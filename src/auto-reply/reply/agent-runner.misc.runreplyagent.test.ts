@@ -1087,7 +1087,11 @@ describe("runReplyAgent claude-cli routing", () => {
 describe("runReplyAgent messaging tool suppression", () => {
   function createRun(
     messageProvider = "slack",
-    opts: { storePath?: string; sessionKey?: string } = {},
+    opts: {
+      storePath?: string;
+      sessionKey?: string;
+      onObservedReplyDelivery?: () => Promise<void> | void;
+    } = {},
   ) {
     const typing = createMockTypingController();
     const sessionKey = opts.sessionKey ?? "main";
@@ -1145,8 +1149,43 @@ describe("runReplyAgent messaging tool suppression", () => {
       resolvedBlockStreamingBreak: "message_end",
       shouldInjectGroupIntro: false,
       typingMode: "instant",
+      opts: opts.onObservedReplyDelivery
+        ? { onObservedReplyDelivery: opts.onObservedReplyDelivery }
+        : undefined,
     });
   }
+
+  it("attests reply delivery when the messaging tool answered this conversation", async () => {
+    const onObservedReplyDelivery = vi.fn();
+    runEmbeddedPiAgentMock.mockResolvedValueOnce({
+      payloads: [{ text: "hello world!" }],
+      messagingToolSentTexts: ["answered here"],
+      messagingToolSentTargets: [{ tool: "slack", provider: "slack", to: "channel:C1" }],
+      didSendViaMessagingTool: true,
+      meta: {},
+    });
+
+    await createRun("slack", { onObservedReplyDelivery });
+
+    expect(onObservedReplyDelivery).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not attest reply delivery for a send to an unrelated target", async () => {
+    // Clearing the channel ack on any messaging-tool send hides a conversation
+    // that never got an answer. An unrelated target must not count.
+    const onObservedReplyDelivery = vi.fn();
+    runEmbeddedPiAgentMock.mockResolvedValueOnce({
+      payloads: [{ text: "hello world!" }],
+      messagingToolSentTexts: ["sent somewhere else"],
+      messagingToolSentTargets: [{ tool: "slack", provider: "slack", to: "channel:OTHER" }],
+      didSendViaMessagingTool: true,
+      meta: {},
+    });
+
+    await createRun("slack", { onObservedReplyDelivery });
+
+    expect(onObservedReplyDelivery).not.toHaveBeenCalled();
+  });
 
   it("drops replies when a messaging tool sent via the same provider + target", async () => {
     runEmbeddedPiAgentMock.mockResolvedValueOnce({

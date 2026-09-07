@@ -8,6 +8,7 @@ import {
   type ToolContentBlock,
 } from "../chat/tool-content.js";
 import type { SessionEntry } from "../config/sessions.js";
+import { redactToolPayloadText } from "../logging/redact.js";
 import { normalizeOptionalString } from "../shared/string-coerce.js";
 import { attachOpenClawTranscriptMeta } from "./session-utils.fs.js";
 
@@ -181,6 +182,58 @@ function isUserToolResultMessage(message: unknown): boolean {
   return Boolean(blocks && blocks.length > 0 && blocks.every(isToolResultBlock));
 }
 
+// Deep-redact string content in an imported CLI transcript message before it
+// reaches merge/dedupe (`mergeImportedChatHistoryMessages`) or the Control UI.
+// `redactToolPayloadText` forces tools-mode regardless of `logging.redactSensitive`
+// and merges built-in plus user-configured patterns - the same primitive already
+// used for payloads streamed to the Control UI and for persisted tool-result
+// details - so an imported secret gets the identical treatment a locally
+// generated one would receive on that surface.
+//
+// Redaction runs here - after this module's own tool-call/result coalescing,
+// but before the caller ever hands these messages to the cross-session merge/
+// dedupe in cli-session-history.merge.ts - on purpose: skipping it would let a
+// secret that exists only in the imported CLI transcript flow through that
+// merge unredacted and reach the Control UI, which is the exact leak this
+// closes. The tradeoff
+// is that two distinct short secrets which mask down to the same `***` (or the
+// same kept prefix/suffix) become textually indistinguishable to the dedupe
+// comparison, so they could coalesce into a single history entry; that is
+// preferable to ever exposing raw secret text.
+function redactImportedContentDeep(value: unknown, ancestors: Set<object> = new Set()): unknown {
+  if (typeof value === "string") {
+    return redactToolPayloadText(value);
+  }
+  if (value === null || typeof value !== "object") {
+    return value;
+  }
+  if (ancestors.has(value)) {
+    return "[Circular]";
+  }
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      return value.map((item) => redactImportedContentDeep(item, ancestors));
+    }
+    const out: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      out[key] = redactImportedContentDeep(child, ancestors);
+    }
+    return out;
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
+function redactImportedClaudeCliMessage(message: TranscriptLikeMessage): TranscriptLikeMessage {
+  const content = message.content;
+  if (content === undefined) {
+    return message;
+  }
+  const redactedContent = redactImportedContentDeep(content);
+  return redactedContent === content ? message : { ...message, content: redactedContent };
+}
+
 function coalesceClaudeCliToolMessages(messages: TranscriptLikeMessage[]): TranscriptLikeMessage[] {
   const coalesced: TranscriptLikeMessage[] = [];
   for (let index = 0; index < messages.length; index += 1) {
@@ -331,5 +384,5 @@ export function readClaudeCliSessionMessages(params: {
       // Ignore malformed external history entries.
     }
   }
-  return coalesceClaudeCliToolMessages(messages);
+  return coalesceClaudeCliToolMessages(messages).map(redactImportedClaudeCliMessage);
 }

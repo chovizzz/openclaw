@@ -20,7 +20,11 @@ let replyPayloadsDedupeRuntimePromise: Promise<
   typeof import("./reply-payloads-dedupe.runtime.js")
 > | null = null;
 
-function loadReplyPayloadsDedupeRuntime() {
+// Exported so callers outside this module (for example the agent-runner
+// delivery-attestation path) can reuse the same lazily-loaded dedupe runtime
+// instance instead of importing ./reply-payloads-dedupe.runtime.js directly
+// and mixing static/dynamic import styles for the same module.
+export function loadReplyPayloadsDedupeRuntime() {
   replyPayloadsDedupeRuntimePromise ??= import("./reply-payloads-dedupe.runtime.js");
   return replyPayloadsDedupeRuntimePromise;
 }

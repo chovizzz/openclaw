@@ -112,6 +112,47 @@ async function withClaudeProjectsDir<T>(
   }
 }
 
+const IMPORTED_SECRET = "sk-abcdef1234567890xyz";
+
+function createClaudeSecretHistoryLines() {
+  return [
+    JSON.stringify({
+      type: "assistant",
+      uuid: "assistant-secret",
+      timestamp: "2026-03-26T16:29:55.500Z",
+      message: {
+        role: "assistant",
+        model: "claude-sonnet-4-6",
+        content: [{ type: "text", text: `here is the key ${IMPORTED_SECRET} for you` }],
+        stop_reason: "end_turn",
+      },
+    }),
+  ].join("\n");
+}
+
+async function withClaudeSecretProjectsDir<T>(
+  run: (params: { homeDir: string; sessionId: string }) => Promise<T>,
+): Promise<T> {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-claude-secret-history-"));
+  const homeDir = path.join(root, "home");
+  const sessionId = "5b8b202c-f6bb-4046-9475-d2f15fd07531";
+  const projectsDir = path.join(homeDir, ".claude", "projects", "demo-workspace");
+  const filePath = path.join(projectsDir, `${sessionId}.jsonl`);
+  await fs.mkdir(projectsDir, { recursive: true });
+  await fs.writeFile(filePath, createClaudeSecretHistoryLines(), "utf-8");
+  process.env.HOME = homeDir;
+  try {
+    return await run({ homeDir, sessionId });
+  } finally {
+    if (ORIGINAL_HOME === undefined) {
+      delete process.env.HOME;
+    } else {
+      process.env.HOME = ORIGINAL_HOME;
+    }
+    await fs.rm(root, { recursive: true, force: true });
+  }
+}
+
 describe("cli session history", () => {
   afterEach(() => {
     if (ORIGINAL_HOME === undefined) {
@@ -171,6 +212,104 @@ describe("cli session history", () => {
         ],
       });
     });
+  });
+
+  it("redacts secrets from imported claude-cli messages before dedupe/merge sees them", async () => {
+    await withClaudeSecretProjectsDir(async ({ homeDir, sessionId }) => {
+      const messages = readClaudeCliSessionMessages({ cliSessionId: sessionId, homeDir });
+      expect(messages).toHaveLength(1);
+      const serialized = JSON.stringify(messages);
+      expect(serialized).not.toContain(IMPORTED_SECRET);
+      // Redaction keeps a distinguishing prefix/suffix rather than collapsing
+      // the whole token, so distinct secrets stay distinguishable to dedupe
+      // in the common case.
+      expect(serialized).toContain("sk-abc");
+    });
+  });
+
+  it("does not surface a secret present only in imported history after merge", async () => {
+    await withClaudeSecretProjectsDir(async ({ homeDir, sessionId }) => {
+      const messages = augmentChatHistoryWithCliSessionImports({
+        entry: {
+          sessionId: "openclaw-session",
+          updatedAt: Date.now(),
+          cliSessionBindings: {
+            "claude-cli": { sessionId },
+          },
+        },
+        provider: "claude-cli",
+        localMessages: [{ role: "user", content: "local visible text" }],
+        homeDir,
+      });
+      expect(messages).toHaveLength(2);
+      expect(JSON.stringify(messages)).not.toContain(IMPORTED_SECRET);
+    });
+  });
+
+  it("redacts secrets nested inside tool_use input and tool_result content", async () => {
+    const inputSecret = "sk-toolinputsecret1234567890";
+    const resultSecret = "sk-toolresultsecret1234567890";
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-claude-tool-secret-"));
+    const homeDir = path.join(root, "home");
+    const sessionId = "5b8b202c-f6bb-4046-9475-d2f15fd07532";
+    const projectsDir = path.join(homeDir, ".claude", "projects", "demo-workspace");
+    const filePath = path.join(projectsDir, `${sessionId}.jsonl`);
+    await fs.mkdir(projectsDir, { recursive: true });
+    await fs.writeFile(
+      filePath,
+      [
+        JSON.stringify({
+          type: "assistant",
+          uuid: "assistant-tool-call",
+          timestamp: "2026-03-26T16:29:56.000Z",
+          message: {
+            role: "assistant",
+            model: "claude-sonnet-4-6",
+            content: [
+              {
+                type: "tool_use",
+                id: "toolu_secret",
+                name: "Bash",
+                input: { command: `echo ${inputSecret}` },
+              },
+            ],
+            stop_reason: "tool_use",
+          },
+        }),
+        JSON.stringify({
+          type: "user",
+          uuid: "user-tool-result",
+          timestamp: "2026-03-26T16:29:56.400Z",
+          message: {
+            role: "user",
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "toolu_secret",
+                content: `output contains ${resultSecret}`,
+              },
+            ],
+          },
+        }),
+      ].join("\n"),
+      "utf-8",
+    );
+    process.env.HOME = homeDir;
+    try {
+      const messages = readClaudeCliSessionMessages({ cliSessionId: sessionId, homeDir });
+      const serialized = JSON.stringify(messages);
+      expect(serialized).not.toContain(inputSecret);
+      expect(serialized).not.toContain(resultSecret);
+      // Structure survives redaction: still one coalesced call+result message.
+      expect(messages).toHaveLength(1);
+    } finally {
+      if (ORIGINAL_HOME === undefined) {
+        delete process.env.HOME;
+      } else {
+        process.env.HOME = ORIGINAL_HOME;
+      }
+      await fs.rm(root, { recursive: true, force: true });
+    }
   });
 
   it("deduplicates imported messages against similar local transcript entries", () => {
