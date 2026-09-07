@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { openBoundaryFile } from "../infra/boundary-file-read.js";
 import { resolveRequiredHomeDir } from "../infra/home-dir.js";
+import { retryAsync } from "../infra/retry.js";
 import { runCommandWithTimeout } from "../process/exec.js";
 import { isCronSessionKey, isSubagentSessionKey } from "../routing/session-key.js";
 import { normalizeOptionalLowercaseString, readStringValue } from "../shared/string-coerce.js";
@@ -54,37 +55,85 @@ function workspaceFileIdentity(stat: syncFs.Stats, canonicalPath: string): strin
   return `${canonicalPath}|${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeMs}`;
 }
 
+/** FS error codes seen for transient race conditions (not real, persistent failures). */
+const TRANSIENT_WORKSPACE_READ_ERROR_CODES = new Set(["EAGAIN", "EWOULDBLOCK", "EINTR"]);
+
+/**
+ * Classify whether a workspace bootstrap read/open/boundary-resolution failure
+ * is a transient FS race (worth retrying) rather than a deterministic failure
+ * (missing file, permission denied, boundary violation, etc.) that should
+ * return unchanged.
+ */
+function isTransientWorkspaceReadError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" && TRANSIENT_WORKSPACE_READ_ERROR_CODES.has(code);
+}
+
+const WORKSPACE_BOOTSTRAP_READ_RETRY_ATTEMPTS = 3;
+const WORKSPACE_BOOTSTRAP_READ_RETRY_DELAY_MS = 50;
+
 async function readWorkspaceFileWithGuards(params: {
   filePath: string;
   workspaceDir: string;
 }): Promise<WorkspaceGuardedReadResult> {
-  const opened = await openBoundaryFile({
-    absolutePath: params.filePath,
-    rootPath: params.workspaceDir,
-    boundaryLabel: "workspace root",
-    maxBytes: MAX_WORKSPACE_BOOTSTRAP_FILE_BYTES,
-  });
-  if (!opened.ok) {
-    workspaceFileCache.delete(params.filePath);
-    return opened;
-  }
-
-  const identity = workspaceFileIdentity(opened.stat, opened.path);
-  const cached = workspaceFileCache.get(params.filePath);
-  if (cached && cached.identity === identity) {
-    syncFs.closeSync(opened.fd);
-    return { ok: true, content: cached.content };
-  }
-
   try {
-    const content = syncFs.readFileSync(opened.fd, "utf-8");
-    workspaceFileCache.set(params.filePath, { content, identity });
-    return { ok: true, content };
+    // A transient FS race (EAGAIN/EWOULDBLOCK/EINTR under load) on the open or
+    // read must not drop the agent's bootstrap file for the turn — this reader
+    // runs every turn for AGENTS/SOUL/HEARTBEAT/etc. Retry the whole open+read
+    // (up to 3 attempts, 50ms apart — bounded so a genuinely stuck FS still
+    // fails fast within ~100ms of extra wait) so each attempt uses a fresh fd
+    // (retrying readFileSync on the same fd could return truncated content
+    // after a partial read); the inode-identity guard in openBoundaryFile
+    // still protects against a swapped file between attempts.
+    return await retryAsync(
+      async () => {
+        const opened = await openBoundaryFile({
+          absolutePath: params.filePath,
+          rootPath: params.workspaceDir,
+          boundaryLabel: "workspace root",
+          maxBytes: MAX_WORKSPACE_BOOTSTRAP_FILE_BYTES,
+        });
+        if (!opened.ok) {
+          // Boundary resolution can report transient IO as "validation", while
+          // pinned open failures use "io". Classify the underlying error so
+          // deterministic path and validation failures still return unchanged.
+          if (isTransientWorkspaceReadError(opened.error)) {
+            throw opened.error;
+          }
+          workspaceFileCache.delete(params.filePath);
+          return opened;
+        }
+
+        const identity = workspaceFileIdentity(opened.stat, opened.path);
+        const cached = workspaceFileCache.get(params.filePath);
+        if (cached && cached.identity === identity) {
+          syncFs.closeSync(opened.fd);
+          return { ok: true, content: cached.content };
+        }
+
+        try {
+          const content = syncFs.readFileSync(opened.fd, "utf-8");
+          workspaceFileCache.set(params.filePath, { content, identity });
+          return { ok: true, content };
+        } finally {
+          syncFs.closeSync(opened.fd);
+        }
+      },
+      {
+        attempts: WORKSPACE_BOOTSTRAP_READ_RETRY_ATTEMPTS,
+        minDelayMs: WORKSPACE_BOOTSTRAP_READ_RETRY_DELAY_MS,
+        maxDelayMs: WORKSPACE_BOOTSTRAP_READ_RETRY_DELAY_MS,
+        shouldRetry: (err) => isTransientWorkspaceReadError(err),
+      },
+    );
   } catch (error) {
+    // Non-transient read failure, or transient retries exhausted (final
+    // outcome: the file is treated as missing/unreadable for this turn).
     workspaceFileCache.delete(params.filePath);
     return { ok: false, reason: "io", error };
-  } finally {
-    syncFs.closeSync(opened.fd);
   }
 }
 

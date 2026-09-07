@@ -405,6 +405,57 @@ export function resolveUnknownToolGuardThreshold(loopDetection?: {
   return UNKNOWN_TOOL_THRESHOLD;
 }
 
+function getAbortReason(signal: AbortSignal): unknown {
+  return "reason" in signal ? (signal as { reason?: unknown }).reason : undefined;
+}
+
+function makeAbortErrorForSignal(signal: AbortSignal): Error {
+  const reason = getAbortReason(signal);
+  // If the reason is already an Error, preserve it to keep the original message
+  // (e.g., "LLM idle timeout (60s): no response from model" instead of "aborted")
+  if (reason instanceof Error) {
+    const err = new Error(reason.message, { cause: reason });
+    err.name = "AbortError";
+    return err;
+  }
+  const err = reason ? new Error("aborted", { cause: reason }) : new Error("aborted");
+  err.name = "AbortError";
+  return err;
+}
+
+/**
+ * Race a promise against an AbortSignal. Defined at module scope (rather than
+ * nested inside `runEmbeddedAttempt`) so its closure only captures `signal` and
+ * `promise` — not the entire embedded-run function scope. If the wrapped
+ * promise never settles (a hung provider call), the `.then()` callback below
+ * keeps a reference alive for the run's lifetime; nesting this inside
+ * `runEmbeddedAttempt` would transitively retain every local variable of that
+ * function (session, config, message buffers, etc.) for as long as the hang
+ * persists, which is the heap leak this shape avoids.
+ */
+export function abortableWithSignal<T>(signal: AbortSignal, promise: Promise<T>): Promise<T> {
+  if (signal.aborted) {
+    return Promise.reject(makeAbortErrorForSignal(signal));
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener("abort", onAbort);
+      reject(makeAbortErrorForSignal(signal));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (err) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(err);
+      },
+    );
+  });
+}
+
 export async function runEmbeddedAttempt(
   params: EmbeddedRunAttemptParams,
 ): Promise<EmbeddedRunAttemptResult> {
@@ -1437,24 +1488,9 @@ export async function runEmbeddedAttempt(
       let yieldAborted = false;
       let timedOut = false;
       let timedOutDuringCompaction = false;
-      const getAbortReason = (signal: AbortSignal): unknown =>
-        "reason" in signal ? (signal as { reason?: unknown }).reason : undefined;
       const makeTimeoutAbortReason = (): Error => {
         const err = new Error("request timed out");
         err.name = "TimeoutError";
-        return err;
-      };
-      const makeAbortError = (signal: AbortSignal): Error => {
-        const reason = getAbortReason(signal);
-        // If the reason is already an Error, preserve it to keep the original message
-        // (e.g., "LLM idle timeout (60s): no response from model" instead of "aborted")
-        if (reason instanceof Error) {
-          const err = new Error(reason.message, { cause: reason });
-          err.name = "AbortError";
-          return err;
-        }
-        const err = reason ? new Error("aborted", { cause: reason }) : new Error("aborted");
-        err.name = "AbortError";
         return err;
       };
       const abortCompaction = () => {
@@ -1496,29 +1532,8 @@ export async function runEmbeddedAttempt(
       idleTimeoutTrigger = (error) => {
         abortRun(true, error);
       };
-      const abortable = <T>(promise: Promise<T>): Promise<T> => {
-        const signal = runAbortController.signal;
-        if (signal.aborted) {
-          return Promise.reject(makeAbortError(signal));
-        }
-        return new Promise<T>((resolve, reject) => {
-          const onAbort = () => {
-            signal.removeEventListener("abort", onAbort);
-            reject(makeAbortError(signal));
-          };
-          signal.addEventListener("abort", onAbort, { once: true });
-          promise.then(
-            (value) => {
-              signal.removeEventListener("abort", onAbort);
-              resolve(value);
-            },
-            (err) => {
-              signal.removeEventListener("abort", onAbort);
-              reject(err);
-            },
-          );
-        });
-      };
+      const abortable = <T>(promise: Promise<T>): Promise<T> =>
+        abortableWithSignal(runAbortController.signal, promise);
 
       const subscription = subscribeEmbeddedPiSession(
         buildEmbeddedSubscriptionParams({

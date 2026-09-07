@@ -453,6 +453,10 @@ vi.mock("../../transcript-policy.js", () => ({
   resolveTranscriptPolicy: () => ({
     allowSyntheticToolResults: false,
   }),
+  // attempt.ts consults this before replaying provider-owned signed thinking.
+  // The default is off, matching the real gate, so these tests keep exercising
+  // the drop path they were written against.
+  shouldAllowProviderOwnedThinkingReplay: () => false,
 }));
 
 vi.mock("../cache-ttl.js", () => ({
