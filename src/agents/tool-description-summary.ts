@@ -1,4 +1,5 @@
 import { normalizeOptionalString } from "../shared/string-coerce.js";
+import { truncateUtf16Safe } from "../utils.js";
 
 function normalizeSummaryWhitespace(value: string): string {
   return value.replace(/\s+/g, " ").trim();
@@ -8,7 +9,7 @@ function truncateSummary(value: string, maxLen = 120): string {
   if (value.length <= maxLen) {
     return value;
   }
-  const sliced = value.slice(0, maxLen - 3);
+  const sliced = truncateUtf16Safe(value, maxLen - 3);
   const boundary = sliced.lastIndexOf(" ");
   const trimmed = (boundary >= 48 ? sliced.slice(0, boundary) : sliced).trimEnd();
   return `${trimmed}...`;
@@ -134,7 +135,7 @@ export function describeToolForVerbose(params: {
   if (normalized.length <= maxLen) {
     return normalized;
   }
-  const sliced = normalized.slice(0, maxLen - 3);
+  const sliced = truncateUtf16Safe(normalized, maxLen - 3);
   const boundary = sliced.lastIndexOf(" ");
   return `${(boundary >= Math.floor(maxLen / 2) ? sliced.slice(0, boundary) : sliced).trimEnd()}...`;
 }

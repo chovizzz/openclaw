@@ -1,5 +1,6 @@
 import { prefixSystemMessage } from "../infra/system-message.js";
 import { normalizeOptionalString } from "../shared/string-coerce.js";
+import { truncateUtf16Safe } from "../utils.js";
 
 const DEFAULT_THREAD_BINDING_FAREWELL_TEXT =
   "Session ended. Messages here will no longer be routed.";
@@ -36,7 +37,7 @@ export function resolveThreadBindingThreadName(params: {
   const label = normalizeOptionalString(params.label);
   const base = label || normalizeOptionalString(params.agentId) || "agent";
   const raw = `🤖 ${base}`.replace(/\s+/g, " ").trim();
-  return raw.slice(0, 100);
+  return truncateUtf16Safe(raw, 100);
 }
 
 export function resolveThreadBindingIntroText(params: {
@@ -49,7 +50,7 @@ export function resolveThreadBindingIntroText(params: {
 }): string {
   const label = normalizeOptionalString(params.label);
   const base = label || normalizeOptionalString(params.agentId) || "agent";
-  const normalized = base.replace(/\s+/g, " ").trim().slice(0, 100) || "agent";
+  const normalized = truncateUtf16Safe(base.replace(/\s+/g, " ").trim(), 100) || "agent";
   const idleTimeoutMs = normalizeThreadBindingDurationMs(params.idleTimeoutMs);
   const maxAgeMs = normalizeThreadBindingDurationMs(params.maxAgeMs);
   const cwd = normalizeOptionalString(params.sessionCwd);

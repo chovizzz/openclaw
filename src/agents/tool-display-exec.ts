@@ -1,3 +1,4 @@
+import { truncateUtf16Safe } from "../utils.js";
 import {
   binaryName,
   firstPositional,
@@ -382,7 +383,7 @@ function compactRawCommand(raw: string, maxLength = 120): string {
   if (oneLine.length <= maxLength) {
     return oneLine;
   }
-  return `${oneLine.slice(0, Math.max(0, maxLength - 1))}…`;
+  return `${truncateUtf16Safe(oneLine, Math.max(0, maxLength - 1))}…`;
 }
 
 export function resolveExecDetail(args: unknown): string | undefined {

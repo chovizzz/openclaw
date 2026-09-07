@@ -2,6 +2,7 @@ import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
 } from "../shared/string-coerce.js";
+import { truncateUtf16Safe } from "../utils.js";
 import { resolveExecDetail } from "./tool-display-exec.js";
 import { asRecord } from "./tool-display-record.js";
 
@@ -109,7 +110,7 @@ export function coerceDisplayValue(
       return undefined;
     }
     if (firstLine.length > maxStringChars) {
-      return `${firstLine.slice(0, Math.max(0, maxStringChars - 3))}…`;
+      return `${truncateUtf16Safe(firstLine, Math.max(0, maxStringChars - 3))}…`;
     }
     return firstLine;
   }
