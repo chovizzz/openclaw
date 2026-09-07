@@ -1,6 +1,7 @@
 import { formatRawAssistantErrorForUi } from "../agents/pi-embedded-helpers.js";
 import type { SessionEntry } from "../config/sessions.js";
 import { normalizeOptionalString } from "../shared/string-coerce.js";
+import { truncateUtf16Safe } from "../utils.js";
 import { formatProviderModelRef } from "./model-runtime.js";
 import type { RuntimeFallbackAttempt } from "./reply/agent-runner-execution.js";
 
@@ -21,7 +22,7 @@ function truncateFallbackReasonPart(value: string, max = FALLBACK_REASON_PART_MA
   if (text.length <= max) {
     return text;
   }
-  return `${text.slice(0, Math.max(0, max - 1)).trimEnd()}…`;
+  return `${truncateUtf16Safe(text, max - 1).trimEnd()}…`;
 }
 
 function formatFallbackAttemptErrorPreview(attempt: RuntimeFallbackAttempt): string | undefined {

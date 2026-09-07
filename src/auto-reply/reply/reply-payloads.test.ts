@@ -188,7 +188,9 @@ describe("shouldSuppressMessagingToolReplies", () => {
     ).toBe(true);
   });
 
-  it("suppresses telegram replies even when the active plugin registry omits telegram", () => {
+  it("uses generic route matching when the active plugin registry omits telegram", () => {
+    // Dedupe must not load the bundled channel module to obtain a matcher: an
+    // unregistered plugin falls through to plain target comparison.
     resetPluginRuntimeStateForTest();
     setActivePluginRegistry(createTestRegistry([]));
 
@@ -200,6 +202,37 @@ describe("shouldSuppressMessagingToolReplies", () => {
           { tool: "message", provider: "telegram", to: "-100123", threadId: "77" },
         ],
       }),
+    ).toBe(false);
+  });
+
+  it("preserves string thread ids before plugin reply-suppression matching", () => {
+    // 9007199254740993 is not representable as a double: a parseInt round-trip
+    // turns it into ...992 and would match the wrong topic.
+    installTelegramSuppressionRegistry();
+    const largeThreadId = "9007199254740993";
+
+    expect(
+      shouldSuppressMessagingToolReplies({
+        messageProvider: "telegram",
+        originatingTo: `telegram:group:-100123:topic:${largeThreadId}`,
+        messagingToolSentTargets: [
+          { tool: "message", provider: "telegram", to: "-100123", threadId: largeThreadId },
+        ],
+      }),
     ).toBe(true);
+  });
+
+  it("does not collapse distinct thread ids that differ beyond double precision", () => {
+    installTelegramSuppressionRegistry();
+
+    expect(
+      shouldSuppressMessagingToolReplies({
+        messageProvider: "telegram",
+        originatingTo: "telegram:group:-100123:topic:9007199254740993",
+        messagingToolSentTargets: [
+          { tool: "message", provider: "telegram", to: "-100123", threadId: "9007199254740992" },
+        ],
+      }),
+    ).toBe(false);
   });
 });

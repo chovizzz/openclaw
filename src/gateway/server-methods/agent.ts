@@ -223,8 +223,16 @@ function dispatchAgentRunFromGateway(params: {
         deliveryStatus: "not_applicable",
         startedAt: Date.now(),
       });
-    } catch {
+    } catch (err) {
       // Best-effort only: background task tracking must not block agent runs.
+      // Still surface the swallowed error so non-transient tracking failures stay
+      // observable. formatForLog is the shared gateway log formatter, which caps
+      // length; note its Error branch returns name/message/code without running
+      // redactSensitiveText, so this stays a task-tracking diagnostic and must not
+      // grow to log request payloads.
+      params.context.logGateway.warn(
+        `failed to start tracked agent task ${params.runId}: ${formatForLog(err)}`,
+      );
     }
   }
   void agentCommandFromIngress(params.ingressOpts, defaultRuntime, params.context.deps)

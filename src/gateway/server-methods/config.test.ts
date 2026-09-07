@@ -78,6 +78,26 @@ describe("config.openFile", () => {
     );
   });
 
+  it("does not split surrogate pairs when truncating the failed config path", async () => {
+    // The 117-char cut lands between the emoji's two code units, so a raw
+    // slice would put a lone surrogate into the log line.
+    const pathPrefix = `/tmp/${"a".repeat(111)}`;
+    process.env.OPENCLAW_CONFIG_PATH = `${pathPrefix}\u{1F600}tail.json`;
+    execFileMock.mockImplementation((...args: unknown[]) => {
+      invokeExecFileCallback(args, new Error("open failed"));
+      return {} as never;
+    });
+
+    const { options, logGateway } = createConfigHandlerHarness({
+      method: "config.openFile",
+    });
+    await configHandlers["config.openFile"](options);
+
+    expect(logGateway.warn).toHaveBeenCalledWith(
+      expect.stringContaining(`config.openFile failed path=${pathPrefix}...`),
+    );
+  });
+
   it("returns a generic error and logs details when the opener fails", async () => {
     process.env.OPENCLAW_CONFIG_PATH = "/tmp/config.json";
     execFileMock.mockImplementation((...args: unknown[]) => {

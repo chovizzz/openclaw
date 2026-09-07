@@ -135,7 +135,7 @@ vi.mock("./server-node-events.runtime.js", () => runtimeMocks);
 import type { CliDeps } from "../cli/deps.js";
 import type { HealthSummary } from "../commands/health.js";
 import type { NodeEventContext } from "./server-node-events-types.js";
-import { handleNodeEvent } from "./server-node-events.js";
+import { handleNodeEvent, resetNodeEventDeduplicationForTests } from "./server-node-events.js";
 
 const enqueueSystemEventMock = runtimeMocks.enqueueSystemEvent;
 const requestHeartbeatNowMock = runtimeMocks.requestHeartbeatNow;
@@ -171,6 +171,8 @@ function buildCtx(): NodeEventContext {
 
 describe("node exec events", () => {
   beforeEach(() => {
+    resetNodeEventDeduplicationForTests();
+    enqueueSystemEventMock.mockReturnValue(true);
     enqueueSystemEventMock.mockClear();
     requestHeartbeatNowMock.mockClear();
     registerApnsRegistrationVi.mockClear();
@@ -217,6 +219,83 @@ describe("node exec events", () => {
       { sessionKey: "node-node-2", contextKey: "exec:run-2" },
     );
     expect(requestHeartbeatNowMock).toHaveBeenCalledWith({ reason: "exec-event" });
+  });
+
+  it("dedupes duplicate exec.finished events for the same runId on the same session", async () => {
+    const ctx = buildCtx();
+    const payloadJSON = JSON.stringify({
+      sessionKey: "agent:main:main",
+      runId: "run-dup-finished",
+      exitCode: 0,
+      timedOut: false,
+      output: "done",
+    });
+
+    await handleNodeEvent(ctx, "node-2", { event: "exec.finished", payloadJSON });
+    await handleNodeEvent(ctx, "node-2", { event: "exec.finished", payloadJSON });
+
+    expect(enqueueSystemEventMock).toHaveBeenCalledTimes(1);
+    expect(requestHeartbeatNowMock).toHaveBeenCalledTimes(1);
+    expect(enqueueSystemEventMock).toHaveBeenCalledWith(
+      "Exec finished (node=node-2 id=run-dup-finished, code 0)\ndone",
+      { sessionKey: "agent:main:main", contextKey: "exec:run-dup-finished" },
+    );
+  });
+
+  it("stays unkeyed when the node omits runId so identical exec events are not collapsed", async () => {
+    const ctx = buildCtx();
+    // A node that does not send runId has no stable per-run identity. A shared
+    // literal contextKey would let the queue-wide keyed dedupe in
+    // enqueueSystemEvent drop the second of two genuinely distinct runs that
+    // happen to render the same text.
+    const payloadJSON = JSON.stringify({
+      sessionKey: "agent:main:main",
+      exitCode: 0,
+      timedOut: false,
+      output: "done",
+    });
+
+    await handleNodeEvent(ctx, "node-2", { event: "exec.finished", payloadJSON });
+    await handleNodeEvent(ctx, "node-2", { event: "exec.finished", payloadJSON });
+
+    expect(enqueueSystemEventMock).toHaveBeenCalledTimes(2);
+    expect(enqueueSystemEventMock).toHaveBeenNthCalledWith(
+      1,
+      "Exec finished (node=node-2, code 0)\ndone",
+      { sessionKey: "agent:main:main", contextKey: undefined },
+    );
+  });
+
+  it("keeps distinct runIds and does not wake when the system event was dropped", async () => {
+    const ctx = buildCtx();
+    const build = (runId: string) =>
+      JSON.stringify({
+        sessionKey: "agent:main:main",
+        runId,
+        exitCode: 0,
+        timedOut: false,
+        output: "done",
+      });
+
+    await handleNodeEvent(ctx, "node-2", {
+      event: "exec.finished",
+      payloadJSON: build("run-distinct-a"),
+    });
+    await handleNodeEvent(ctx, "node-2", {
+      event: "exec.finished",
+      payloadJSON: build("run-distinct-b"),
+    });
+    expect(enqueueSystemEventMock).toHaveBeenCalledTimes(2);
+    expect(requestHeartbeatNowMock).toHaveBeenCalledTimes(2);
+
+    // A queue-level rejection must not schedule a wake for a turn that will never arrive.
+    enqueueSystemEventMock.mockReturnValueOnce(false);
+    await handleNodeEvent(ctx, "node-2", {
+      event: "exec.finished",
+      payloadJSON: build("run-distinct-c"),
+    });
+    expect(enqueueSystemEventMock).toHaveBeenCalledTimes(3);
+    expect(requestHeartbeatNowMock).toHaveBeenCalledTimes(2);
   });
 
   it("canonicalizes exec session key before enqueue and wake", async () => {
@@ -444,6 +523,8 @@ describe("node exec events", () => {
 
 describe("voice transcript events", () => {
   beforeEach(() => {
+    resetNodeEventDeduplicationForTests();
+    enqueueSystemEventMock.mockReturnValue(true);
     agentCommandMock.mockClear();
     updateSessionStoreMock.mockClear();
     agentCommandMock.mockResolvedValue({ status: "ok" } as never);
@@ -613,6 +694,8 @@ describe("voice transcript events", () => {
 
 describe("notifications changed events", () => {
   beforeEach(() => {
+    resetNodeEventDeduplicationForTests();
+    enqueueSystemEventMock.mockReturnValue(true);
     enqueueSystemEventMock.mockClear();
     requestHeartbeatNowMock.mockClear();
     loadSessionEntryMock.mockClear();
@@ -788,6 +871,8 @@ describe("notifications changed events", () => {
 
 describe("agent request events", () => {
   beforeEach(() => {
+    resetNodeEventDeduplicationForTests();
+    enqueueSystemEventMock.mockReturnValue(true);
     agentCommandMock.mockClear();
     parseMessageWithAttachmentsMock.mockReset();
     updateSessionStoreMock.mockClear();

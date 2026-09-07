@@ -591,6 +591,68 @@ describe("createAcpReplyProjector", () => {
     ]);
   });
 
+  it("truncates status updates without splitting surrogate pairs", async () => {
+    const { deliveries, projector } = createProjectorHarness(
+      createLiveCfgOverrides({
+        coalesceIdleMs: 0,
+        maxChunkChars: 256,
+        maxSessionUpdateChars: 64,
+        tagVisibility: {
+          memory_summary: true,
+        },
+      }),
+    );
+
+    // The 63-char cut (maxSessionUpdateChars - 1) lands between the two code
+    // units of the emoji, so a raw slice would emit a lone surrogate.
+    await projector.onEvent({
+      type: "status",
+      tag: "memory_summary",
+      text: `${"a".repeat(62)}\u{1F389}${"b".repeat(10)}`,
+    });
+
+    expect(deliveries).toEqual([
+      {
+        kind: "tool",
+        text: prefixSystemMessage(`${"a".repeat(62)}\u2026`),
+      },
+    ]);
+  });
+
+  it("truncates oversized turns at code-point boundaries", async () => {
+    const { deliveries, projector } = createProjectorHarness({
+      acp: {
+        enabled: true,
+        stream: {
+          coalesceIdleMs: 0,
+          maxChunkChars: 256,
+          deliveryMode: "live",
+          maxOutputChars: 5,
+        },
+      },
+    });
+
+    // maxOutputChars lands inside the emoji surrogate pair.
+    await projector.onEvent({
+      type: "text_delta",
+      text: "abcd\u{1F600} tail",
+      tag: "agent_message_chunk",
+    });
+    await projector.onEvent({
+      type: "text_delta",
+      text: "ignored tail",
+      tag: "agent_message_chunk",
+    });
+    await projector.flush(true);
+
+    expect(deliveries).toHaveLength(2);
+    expect(deliveries).toContainEqual({ kind: "block", text: "abcd" });
+    expect(deliveries).toContainEqual({
+      kind: "tool",
+      text: prefixSystemMessage("output truncated"),
+    });
+  });
+
   it("truncates oversized turns once and emits one truncation notice", async () => {
     const { deliveries, projector } = createProjectorHarness({
       acp: {

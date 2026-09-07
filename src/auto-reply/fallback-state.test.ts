@@ -121,6 +121,17 @@ describe("fallback-state", () => {
     expect(resolved.reasonSummary).toBe("rate limit");
   });
 
+  it("keeps truncated transient error details UTF-16 safe", () => {
+    // The 80-char cap lands exactly between the two code units of the emoji
+    // surrogate pair, so a raw slice would emit a lone surrogate.
+    const detail = "x".repeat(68);
+    const resolved = resolveDemoFallbackTransition({
+      attempts: [{ ...baseAttempt, error: `429 ${detail}\u{1F600}tail` }],
+    });
+
+    expect(resolved.reasonSummary).toBe(`HTTP 429: ${detail}\u2026`);
+  });
+
   it("refreshes reason when fallback remains active with same model pair", () => {
     const resolved = resolveDemoFallbackTransition({
       attempts: [{ ...baseAttempt, reason: "timeout" }],

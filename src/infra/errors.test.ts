@@ -87,6 +87,28 @@ describe("error helpers", () => {
     expect(formatted).toBe("error A | error B");
   });
 
+  it("dedupes repeated cause messages while preserving deeper distinct causes", () => {
+    const rootCause = new Error("provider auth lookup failed");
+    const inner = new Error('No API key found for provider "openai-codex".', { cause: rootCause });
+    const wrapper = new Error(inner.message, { cause: inner });
+    expect(formatErrorMessage(wrapper)).toBe(`${inner.message} | ${rootCause.message}`);
+  });
+
+  it("keeps every distinct cause message in the chain", () => {
+    // Reverse guard: dedupe must never collapse diagnostics that differ.
+    const root = new Error("ECONNREFUSED 127.0.0.1:8080");
+    const middle = new Error("socket hang up", { cause: root });
+    const top = new Error("request failed", { cause: middle });
+    expect(formatErrorMessage(top)).toBe(
+      "request failed | socket hang up | ECONNREFUSED 127.0.0.1:8080",
+    );
+  });
+
+  it("keeps a distinct string cause", () => {
+    const top = new Error("outer", { cause: "inner detail" });
+    expect(formatErrorMessage(top)).toBe("outer | inner detail");
+  });
+
   it("redacts sensitive tokens from formatted error messages", () => {
     const token = "sk-abcdefghijklmnopqrstuv";
     const formatted = formatErrorMessage(new Error(`Authorization: Bearer ${token}`));

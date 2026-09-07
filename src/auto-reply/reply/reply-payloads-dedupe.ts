@@ -1,6 +1,6 @@
 import { isMessagingToolDuplicate } from "../../agents/pi-embedded-helpers.js";
 import type { MessagingToolSend } from "../../agents/pi-embedded-runner.js";
-import { getChannelPlugin, normalizeChannelId } from "../../channels/plugins/index.js";
+import { getLoadedChannelPlugin, normalizeChannelId } from "../../channels/plugins/index.js";
 import { normalizeTargetForProvider } from "../../infra/outbound/target-normalization.js";
 import { hasReplyPayloadContent } from "../../interactive/payload.js";
 import { normalizeOptionalAccountId } from "../../routing/account-id.js";
@@ -97,9 +97,10 @@ function normalizeThreadIdForComparison(value?: string): string | undefined {
   if (!trimmed) {
     return undefined;
   }
-  if (/^-?\d+$/.test(trimmed)) {
-    return String(Number.parseInt(trimmed, 10));
-  }
+  // Keep the id as a string. Round-tripping numeric-looking ids through
+  // Number.parseInt silently loses precision past 2^53, so two distinct topic
+  // ids could collapse to the same value and suppress a reply that belonged to
+  // a different thread.
   return normalizeLowercaseStringOrEmpty(trimmed);
 }
 
@@ -120,7 +121,12 @@ function targetsMatchForSuppression(params: {
   targetKey: string;
   targetThreadId?: string;
 }): boolean {
-  const pluginMatch = getChannelPlugin(params.provider)?.outbound?.targetsMatchForReplySuppression;
+  // Read-only lookup on purpose: getChannelPlugin falls back to loading the
+  // bundled channel module, and this runs on the reply hot path where a plugin
+  // that is not already registered should simply fall through to generic route
+  // matching rather than drag a channel implementation into the process.
+  const pluginMatch = getLoadedChannelPlugin(params.provider)?.outbound
+    ?.targetsMatchForReplySuppression;
   if (pluginMatch) {
     return pluginMatch({
       originTarget: params.originTarget,

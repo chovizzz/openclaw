@@ -86,11 +86,16 @@ export function createInboundDebouncer<T>(params: InboundDebounceCreateParams<T>
     const next = previous.catch(() => undefined).then(task);
     const settled = next.catch(() => undefined);
     keyChains.set(key, settled);
-    void settled.finally(() => {
+    // Attach the cleanup with then(onFulfilled, onRejected) rather than
+    // finally(): finally() allocates another promise that re-adopts `settled`'s
+    // state and is then discarded, which is exactly the shape that leaks an
+    // unhandled rejection if the chain ever settles rejected.
+    const cleanup = () => {
       if (keyChains.get(key) === settled) {
         keyChains.delete(key);
       }
-    });
+    };
+    settled.then(cleanup, cleanup);
     return next;
   };
 

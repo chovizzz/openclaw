@@ -28,6 +28,7 @@ import {
 } from "../../infra/restart-sentinel.js";
 import { scheduleGatewaySigusr1Restart } from "../../infra/restart.js";
 import { prepareSecretsRuntimeSnapshot } from "../../secrets/runtime.js";
+import { truncateUtf16Safe } from "../../utils.js";
 import { resolveEffectiveSharedGatewayAuth } from "../auth.js";
 import {
   buildGatewayReloadPlan,
@@ -134,7 +135,7 @@ function sanitizeLookupPathForLog(path: string): string {
     const code = char.charCodeAt(0);
     return code < 0x20 || code === 0x7f ? "?" : char;
   }).join("");
-  return sanitized.length > 120 ? `${sanitized.slice(0, 117)}...` : sanitized;
+  return sanitized.length > 120 ? `${truncateUtf16Safe(sanitized, 117)}...` : sanitized;
 }
 
 function escapePowerShellSingleQuotedString(value: string): string {

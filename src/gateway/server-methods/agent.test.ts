@@ -98,11 +98,30 @@ vi.mock("../../utils/delivery-context.js", async () => {
   };
 });
 
+const taskExecutorState = vi.hoisted(() => ({
+  createRunningTaskRunError: null as Error | null,
+}));
+
+// Narrow partial mock: the registry test below needs the real implementation, so
+// only the throw path is synthesized.
+vi.mock("../../tasks/task-executor.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../tasks/task-executor.js")>();
+  return {
+    ...actual,
+    createRunningTaskRun: (...args: Parameters<typeof actual.createRunningTaskRun>) => {
+      if (taskExecutorState.createRunningTaskRunError) {
+        throw taskExecutorState.createRunningTaskRunError;
+      }
+      return actual.createRunningTaskRun(...args);
+    },
+  };
+});
+
 const makeContext = (): GatewayRequestContext =>
   ({
     dedupe: new Map(),
     addChatRun: vi.fn(),
-    logGateway: { info: vi.fn(), error: vi.fn() },
+    logGateway: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
     broadcastToConnIds: vi.fn(),
     getSessionEventSubscriberConnIds: () => new Set(),
   }) as unknown as GatewayRequestContext;
@@ -971,6 +990,41 @@ describe("gateway agent handler", () => {
         childSessionKey: "agent:main:main",
         status: "running",
       });
+    });
+  });
+
+  it("warns instead of silently swallowing a task-tracking start failure", async () => {
+    await withTempDir({ prefix: "openclaw-gateway-agent-task-throw-" }, async (root) => {
+      process.env.OPENCLAW_STATE_DIR = root;
+      resetTaskRegistryForTests();
+      primeMainAgentRun();
+      taskExecutorState.createRunningTaskRunError = new Error("registry boom");
+      const context = makeContext();
+
+      try {
+        await invokeAgent(
+          {
+            message: "background cli task",
+            sessionKey: "agent:main:main",
+            idempotencyKey: "task-registry-throw",
+          },
+          { context, reqId: "task-registry-throw" },
+        );
+
+        // The run still dispatches: tracking failures must not block agent runs.
+        await waitForAssertion(() => expect(mocks.agentCommand).toHaveBeenCalled());
+
+        const warnMock = context.logGateway.warn as ReturnType<typeof vi.fn>;
+        const logged = warnMock.mock.calls.some(
+          ([message]) =>
+            typeof message === "string" &&
+            message.includes("failed to start tracked agent task task-registry-throw") &&
+            message.includes("registry boom"),
+        );
+        expect(logged).toBe(true);
+      } finally {
+        taskExecutorState.createRunningTaskRunError = null;
+      }
     });
   });
 
