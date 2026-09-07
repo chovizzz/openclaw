@@ -458,6 +458,26 @@ export type AgentEventHandlerOptions = {
   isChatSendRunActive?: (runId: string) => boolean;
 };
 
+/**
+ * Return `connIds` without any connection that already received the
+ * run-scoped frame, so overlapping subscribers are not served twice.
+ */
+function excludeConnIds(
+  connIds: ReadonlySet<string>,
+  excludedConnIds: ReadonlySet<string> | undefined,
+): ReadonlySet<string> {
+  if (!excludedConnIds || excludedConnIds.size === 0 || connIds.size === 0) {
+    return connIds;
+  }
+  const filtered = new Set<string>();
+  for (const connId of connIds) {
+    if (!excludedConnIds.has(connId)) {
+      filtered.add(connId);
+    }
+  }
+  return filtered;
+}
+
 export function createAgentEventHandler({
   broadcast,
   broadcastToConnIds,
@@ -908,12 +928,12 @@ export function createAgentEventHandler({
       // tool-events capability, regardless of verboseLevel. The verbose
       // setting only controls whether tool details are sent as channel
       // messages to messaging surfaces (Telegram, Discord, etc.).
-      const recipients = toolEventRecipients.get(evt.runId);
-      if (recipients && recipients.size > 0) {
+      const runToolRecipients = toolEventRecipients.get(evt.runId);
+      if (runToolRecipients && runToolRecipients.size > 0) {
         broadcastToConnIds(
           "agent",
           sessionKey ? { ...toolPayload, ...buildSessionEventSnapshot(sessionKey) } : toolPayload,
-          recipients,
+          runToolRecipients,
         );
       }
       // Session subscribers power operator UIs that attach to an existing
@@ -922,7 +942,15 @@ export function createAgentEventHandler({
       // tool recipients. Mirror tool lifecycle onto a session-scoped event so
       // they can render live pending tool cards without polling history.
       if (sessionKey) {
-        const sessionSubscribers = sessionEventSubscribers.getAll();
+        // A Control UI connection can be subscribed both ways at once. It
+        // already got the canonical run-scoped `agent` frame above, so drop it
+        // from the compatibility `session.tool` mirror. Computed per event from
+        // the live recipient set, never latched: the moment a connection stops
+        // being a run recipient it starts receiving the mirror again.
+        const sessionSubscribers = excludeConnIds(
+          sessionEventSubscribers.getAll(),
+          runToolRecipients,
+        );
         if (sessionSubscribers.size > 0) {
           broadcastToConnIds(
             "session.tool",

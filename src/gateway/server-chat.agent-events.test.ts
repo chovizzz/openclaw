@@ -1473,4 +1473,118 @@ describe("agent event handler", () => {
     expect(chatRunState.deltaLastBroadcastLen.get("run-skip")).toBeUndefined();
     nowSpy.mockRestore();
   });
+  it("does not duplicate tool events to clients subscribed by run and session", () => {
+    const { broadcastToConnIds, sessionEventSubscribers, toolEventRecipients, handler } =
+      createHarness({
+        resolveSessionKeyForRun: () => "session-dedupe",
+      });
+
+    registerAgentRunContext("run-session-dedupe-tool", {
+      sessionKey: "session-dedupe",
+      verboseLevel: "off",
+    });
+    toolEventRecipients.add("run-session-dedupe-tool", "conn-overlap");
+    toolEventRecipients.add("run-session-dedupe-tool", "conn-run-only");
+    sessionEventSubscribers.subscribe("conn-overlap");
+    sessionEventSubscribers.subscribe("conn-session-only");
+
+    handler({
+      runId: "run-session-dedupe-tool",
+      seq: 1,
+      stream: "tool",
+      ts: 1_234,
+      data: {
+        phase: "start",
+        name: "exec",
+        toolCallId: "tool-session-dedupe-1",
+        args: { command: "echo hi" },
+      },
+    });
+
+    expect(broadcastToConnIds).toHaveBeenCalledTimes(2);
+    expect(broadcastToConnIds.mock.calls[0]?.[0]).toBe("agent");
+    expect(broadcastToConnIds.mock.calls[0]?.[2]).toEqual(
+      new Set(["conn-overlap", "conn-run-only"]),
+    );
+    expect(broadcastToConnIds.mock.calls[1]?.[0]).toBe("session.tool");
+    expect(broadcastToConnIds.mock.calls[1]?.[2]).toEqual(new Set(["conn-session-only"]));
+  });
+
+  it("keeps mirroring session tool events to non-overlapping subscribers", () => {
+    // Reverse test: excluding run recipients must not silence session-only
+    // subscribers, and a session subscriber that is not a run recipient for
+    // *this* run must still receive the mirror.
+    const { broadcastToConnIds, sessionEventSubscribers, toolEventRecipients, handler } =
+      createHarness({
+        resolveSessionKeyForRun: () => "session-dedupe-reverse",
+      });
+
+    registerAgentRunContext("run-a", { sessionKey: "session-dedupe-reverse", verboseLevel: "off" });
+    // conn-other is a tool recipient of a *different* run; it must not be
+    // excluded from this run's session mirror.
+    toolEventRecipients.add("run-b", "conn-other");
+    sessionEventSubscribers.subscribe("conn-other");
+    sessionEventSubscribers.subscribe("conn-session-only");
+
+    handler({
+      runId: "run-a",
+      seq: 1,
+      stream: "tool",
+      ts: 1_234,
+      data: {
+        phase: "start",
+        name: "exec",
+        toolCallId: "tool-reverse-1",
+        args: { command: "echo hi" },
+      },
+    });
+
+    expect(broadcastToConnIds).toHaveBeenCalledTimes(1);
+    expect(broadcastToConnIds.mock.calls[0]?.[0]).toBe("session.tool");
+    expect(broadcastToConnIds.mock.calls[0]?.[2]).toEqual(
+      new Set(["conn-other", "conn-session-only"]),
+    );
+  });
+
+  it("resumes the session mirror once a connection stops being a run recipient", () => {
+    // No sticky exclusion: the filter is recomputed per event from the live
+    // recipient set.
+    const { broadcastToConnIds, sessionEventSubscribers, toolEventRecipients, handler } =
+      createHarness({
+        resolveSessionKeyForRun: () => "session-dedupe-resume",
+      });
+
+    registerAgentRunContext("run-resume", {
+      sessionKey: "session-dedupe-resume",
+      verboseLevel: "off",
+    });
+    toolEventRecipients.add("run-resume", "conn-overlap");
+    sessionEventSubscribers.subscribe("conn-overlap");
+
+    const emit = (runId: string, seq: number, toolCallId: string) =>
+      handler({
+        runId,
+        seq,
+        stream: "tool",
+        ts: 1_234,
+        data: { phase: "start", name: "exec", toolCallId, args: { command: "echo hi" } },
+      });
+
+    emit("run-resume", 1, "tool-resume-1");
+    // Only the run-scoped frame; the mirror was empty after exclusion.
+    expect(broadcastToConnIds).toHaveBeenCalledTimes(1);
+    expect(broadcastToConnIds.mock.calls[0]?.[0]).toBe("agent");
+
+    // Same connection, a run it is not a tool recipient of: the mirror is back.
+    registerAgentRunContext("run-resume-other", {
+      sessionKey: "session-dedupe-resume",
+      verboseLevel: "off",
+    });
+    broadcastToConnIds.mockClear();
+
+    emit("run-resume-other", 1, "tool-resume-2");
+    expect(broadcastToConnIds).toHaveBeenCalledTimes(1);
+    expect(broadcastToConnIds.mock.calls[0]?.[0]).toBe("session.tool");
+    expect(broadcastToConnIds.mock.calls[0]?.[2]).toEqual(new Set(["conn-overlap"]));
+  });
 });

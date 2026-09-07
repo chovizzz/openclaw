@@ -1,5 +1,6 @@
 import { defaultVoiceWakeTriggers } from "../infra/voicewake.js";
 import { normalizeOptionalString } from "../shared/string-coerce.js";
+import { truncateUtf16Safe } from "../utils.js";
 
 export function normalizeVoiceWakeTriggers(input: unknown): string[] {
   const raw = Array.isArray(input) ? input : [];
@@ -7,7 +8,7 @@ export function normalizeVoiceWakeTriggers(input: unknown): string[] {
     .map((v) => normalizeOptionalString(v))
     .filter((v): v is string => v !== undefined)
     .slice(0, 32)
-    .map((v) => v.slice(0, 64));
+    .map((v) => truncateUtf16Safe(v, 64));
   return cleaned.length > 0 ? cleaned : defaultVoiceWakeTriggers();
 }
 

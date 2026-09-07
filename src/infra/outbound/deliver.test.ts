@@ -1058,6 +1058,48 @@ describe("deliverOutboundPayloads", () => {
       expect.objectContaining({ channelId: "whatsapp" }),
     );
   });
+
+  it("logs a warning when failDelivery rejects on bestEffort partial failure (#84449)", async () => {
+    queueMocks.failDelivery.mockRejectedValueOnce(new Error("queue storage down"));
+
+    await runBestEffortPartialFailureDelivery();
+
+    expect(queueMocks.failDelivery).toHaveBeenCalledWith(
+      "mock-queue-id",
+      "partial delivery failure (bestEffort)",
+    );
+    const warnMessages = logMocks.warn.mock.calls.map((call) => String(call[0]));
+    const markFailedWarn = warnMessages.find((msg) =>
+      msg.includes("failed to mark queued delivery"),
+    );
+    expect(markFailedWarn).toBeDefined();
+    expect(markFailedWarn).toContain("mock-queue-id");
+    expect(markFailedWarn).toContain("queue storage down");
+  });
+
+  it("logs a warning when failDelivery rejects in the error handler (#84449)", async () => {
+    const sendWhatsApp = vi.fn().mockRejectedValue(new Error("native send failed"));
+    queueMocks.failDelivery.mockRejectedValueOnce(new Error("db connection lost"));
+
+    await expect(
+      deliverOutboundPayloads({
+        cfg: {},
+        channel: "whatsapp",
+        to: "+1555",
+        payloads: [{ text: "hello" }],
+        deps: { whatsapp: sendWhatsApp },
+      }),
+    ).rejects.toThrow("native send failed");
+
+    expect(queueMocks.failDelivery).toHaveBeenCalledWith("mock-queue-id", expect.any(String));
+    const warnMessages = logMocks.warn.mock.calls.map((call) => String(call[0]));
+    const markFailedWarn = warnMessages.find((msg) =>
+      msg.includes("failed to mark queued delivery"),
+    );
+    expect(markFailedWarn).toBeDefined();
+    expect(markFailedWarn).toContain("mock-queue-id");
+    expect(markFailedWarn).toContain("db connection lost");
+  });
 });
 
 const emptyRegistry = createTestRegistry([]);

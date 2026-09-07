@@ -59,6 +59,7 @@ import {
   normalizeOptionalLowercaseString,
   normalizeOptionalString,
 } from "../shared/string-coerce.js";
+import { truncateUtf16Safe } from "../utils.js";
 import { normalizeSessionDeliveryFields } from "../utils/delivery-context.js";
 import { estimateUsageCost, resolveModelCostConfig } from "../utils/usage-format.js";
 import {
@@ -167,7 +168,7 @@ function truncateTitle(text: string, maxLen: number): string {
   if (text.length <= maxLen) {
     return text;
   }
-  const cut = text.slice(0, maxLen - 1);
+  const cut = truncateUtf16Safe(text, maxLen - 1);
   const lastSpace = cut.lastIndexOf(" ");
   if (lastSpace > maxLen * 0.6) {
     return cut.slice(0, lastSpace) + "…";

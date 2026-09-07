@@ -62,6 +62,33 @@ async function readTranscriptLines(transcriptPath: string): Promise<TranscriptLi
     });
 }
 
+/**
+ * Seed a user transcript record carrying `idempotencyKey`.
+ *
+ * Written as raw JSONL on purpose: SessionManager drops unknown fields from
+ * user messages, and this fixture exists precisely to reproduce a foreign
+ * (non-assistant) record that already holds the key the assistant append is
+ * about to use.
+ */
+async function seedUserRecordWithIdempotencyKey(
+  transcriptPath: string,
+  idempotencyKey: string,
+): Promise<void> {
+  const record = {
+    type: "message",
+    id: "seed-user-record",
+    parentId: null,
+    timestamp: new Date(0).toISOString(),
+    message: {
+      role: "user",
+      content: [{ type: "text", text: "echo please" }],
+      idempotencyKey,
+      timestamp: 0,
+    },
+  };
+  await fs.appendFile(transcriptPath, `${JSON.stringify(record)}\n`, "utf-8");
+}
+
 function setMockSessionEntry(transcriptPath: string, sessionId: string) {
   sessionEntryState.transcriptPath = transcriptPath;
   sessionEntryState.sessionId = sessionId;
@@ -268,5 +295,83 @@ describe("chat abort transcript persistence", () => {
       .map((line) => line.message)
       .find((message) => message?.idempotencyKey === `${runId}:assistant`);
     expect(persisted).toBeUndefined();
+  });
+  it("still persists the assistant partial when a non-assistant entry reuses the key", async () => {
+    // Reverse test for narrowing the idempotency scope to assistant messages:
+    // a user entry carrying the same key used to make the guard report
+    // "already written", and the assistant partial was dropped entirely.
+    const { transcriptPath, sessionId } = await createTranscriptFixture(
+      "openclaw-chat-abort-run-scope-",
+    );
+    const runId = "idem-abort-run-scope";
+    await seedUserRecordWithIdempotencyKey(transcriptPath, `${runId}:assistant`);
+
+    const respond = vi.fn();
+    const context = createChatAbortContext({
+      chatAbortControllers: new Map([[runId, createActiveRun("main", { sessionId })]]),
+      chatRunBuffers: new Map([[runId, "Partial that must survive"]]),
+      chatDeltaSentAt: new Map([[runId, Date.now()]]),
+    });
+
+    await invokeChatAbortHandler({
+      handler: chatHandlers["chat.abort"],
+      context,
+      request: { sessionKey: "main", runId },
+      respond,
+    });
+
+    const lines = await readTranscriptLines(transcriptPath);
+    const matching = lines
+      .map((line) => line.message)
+      .filter(
+        (message): message is Record<string, unknown> =>
+          Boolean(message) && message?.idempotencyKey === `${runId}:assistant`,
+      );
+    const assistantEntries = matching.filter((message) => message.role === "assistant");
+    expect(matching).toHaveLength(2);
+    expect(assistantEntries).toHaveLength(1);
+    expect(assistantEntries[0]).toMatchObject({ role: "assistant" });
+  });
+
+  it("does not append the assistant partial twice for the same key", async () => {
+    const { transcriptPath, sessionId } = await createTranscriptFixture(
+      "openclaw-chat-abort-run-repeat-",
+    );
+    const runId = "idem-abort-run-repeat";
+    const respond = vi.fn();
+    const context = createChatAbortContext({
+      chatAbortControllers: new Map([[runId, createActiveRun("main", { sessionId })]]),
+      chatRunBuffers: new Map([[runId, "Partial once"]]),
+      chatDeltaSentAt: new Map([[runId, Date.now()]]),
+    });
+
+    await invokeChatAbortHandler({
+      handler: chatHandlers["chat.abort"],
+      context,
+      request: { sessionKey: "main", runId },
+      respond,
+    });
+
+    context.chatAbortControllers.set(runId, createActiveRun("main", { sessionId }));
+    context.chatRunBuffers.set(runId, "Partial once");
+    context.chatDeltaSentAt.set(runId, Date.now());
+
+    await invokeChatAbortHandler({
+      handler: chatHandlers["chat.abort"],
+      context,
+      request: { sessionKey: "main", runId },
+      respond,
+    });
+
+    const lines = await readTranscriptLines(transcriptPath);
+    const assistantEntries = lines
+      .map((line) => line.message)
+      .filter(
+        (message): message is Record<string, unknown> =>
+          Boolean(message) &&
+          message?.role === "assistant" &&
+          message?.idempotencyKey === `${runId}:assistant`,
+      );
+    expect(assistantEntries).toHaveLength(1);
   });
 });

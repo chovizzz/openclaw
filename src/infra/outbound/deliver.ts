@@ -554,7 +554,15 @@ export async function deliverOutboundPayloads(
     const results = await deliverOutboundPayloadsCore(wrappedParams);
     if (queueId) {
       if (hadPartialFailure) {
-        await failDelivery(queueId, "partial delivery failure (bestEffort)").catch(() => {});
+        // Mark-failed errors must not be swallowed: without a log there is no
+        // trail explaining why a queue entry stayed in-flight.
+        await failDelivery(queueId, "partial delivery failure (bestEffort)").catch(
+          (failErr: unknown) => {
+            log.warn(
+              `failed to mark queued delivery ${queueId} as failed after partial failure; continuing best-effort delivery: ${formatErrorMessage(failErr)}`,
+            );
+          },
+        );
       } else {
         await ackDelivery(queueId).catch(() => {}); // Best-effort cleanup.
       }
@@ -565,7 +573,11 @@ export async function deliverOutboundPayloads(
       if (isAbortError(err)) {
         await ackDelivery(queueId).catch(() => {});
       } else {
-        await failDelivery(queueId, formatErrorMessage(err)).catch(() => {});
+        await failDelivery(queueId, formatErrorMessage(err)).catch((failErr: unknown) => {
+          log.warn(
+            `failed to mark queued delivery ${queueId} as failed: ${formatErrorMessage(failErr)}`,
+          );
+        });
       }
     }
     throw err;

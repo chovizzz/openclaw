@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { CURRENT_SESSION_VERSION, SessionManager } from "@mariozechner/pi-coding-agent";
@@ -192,6 +193,65 @@ type ChatSendExplicitOrigin = {
   accountId?: string;
   messageThreadId?: string;
 };
+
+const ACTIVE_CHAT_SEND_DEDUPE_PREFIX = "chat:active-send";
+
+function resolveActiveChatSendRunId(value: unknown): string | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const runId = (value as { runId?: unknown }).runId;
+  return typeof runId === "string" && runId.trim() ? runId : null;
+}
+
+/**
+ * Build the key used to collapse a repeat WebChat submit onto the run that is
+ * still in flight.
+ *
+ * Returns `null` (= never dedupe) for anything where a second send is
+ * legitimately a *different* request: slash commands, attachment sends,
+ * explicit deliver routes, and non-internal origins. The digest covers the
+ * exact trimmed message text plus the session scope and, when present, the
+ * system provenance context, so two similar-but-distinct submits produce
+ * different keys and both dispatch.
+ */
+export function buildActiveChatSendDedupeKey(params: {
+  attachmentCount: number;
+  explicitDeliverRoute: boolean;
+  message: string;
+  originatingChannel: string;
+  sessionKey: string;
+  systemScope?: string;
+  thinking?: string;
+}): string | null {
+  const message = params.message.trim();
+  if (
+    !message ||
+    message.startsWith("/") ||
+    params.attachmentCount > 0 ||
+    params.explicitDeliverRoute ||
+    normalizeMessageChannel(params.originatingChannel) !== INTERNAL_MESSAGE_CHANNEL
+  ) {
+    return null;
+  }
+  // Everything that changes what actually gets dispatched must be part of the
+  // identity, or a legitimately different request gets folded into the
+  // in-flight one and is lost. `thinking` rewrites the command body into
+  // `/think <level> ...`, so the same text at two thinking levels is two
+  // distinct requests. System provenance (receipt / InputProvenance) is
+  // namespaced for the same reason.
+  const dedupeParts = [
+    params.sessionKey,
+    message,
+    params.systemScope?.trim() || null,
+    params.thinking?.trim() || null,
+  ];
+  const digest = createHash("sha256")
+    .update(JSON.stringify(dedupeParts))
+    .digest("hex")
+    .slice(0, 32);
+  return `${ACTIVE_CHAT_SEND_DEDUPE_PREFIX}:${digest}`;
+}
 
 type SideResultPayload = {
   kind: "btw";
@@ -910,15 +970,38 @@ function ensureTranscriptFile(params: { transcriptPath: string; sessionId: strin
   }
 }
 
-function transcriptHasIdempotencyKey(transcriptPath: string, idempotencyKey: string): boolean {
+/**
+ * Report whether the transcript already holds an *assistant* message carrying
+ * this idempotency key.
+ *
+ * Scoped to `role === "assistant"` on purpose: this guard only exists to stop a
+ * retried assistant injection from being written twice. Matching any role meant
+ * a user (or tool) entry that happened to carry the same key made the assistant
+ * reply look already-written, and the reply was dropped without ever being
+ * appended. A missed dedupe costs a duplicate line; a false positive costs the
+ * message.
+ */
+function transcriptHasAssistantIdempotencyKey(
+  transcriptPath: string,
+  idempotencyKey: string,
+): boolean {
   try {
     const lines = fs.readFileSync(transcriptPath, "utf-8").split(/\r?\n/);
     for (const line of lines) {
       if (!line.trim()) {
         continue;
       }
-      const parsed = JSON.parse(line) as { message?: { idempotencyKey?: unknown } };
-      if (parsed?.message?.idempotencyKey === idempotencyKey) {
+      let parsed: { message?: { role?: unknown; idempotencyKey?: unknown } };
+      try {
+        parsed = JSON.parse(line) as typeof parsed;
+      } catch {
+        // A partially written or non-JSON line proves nothing about whether the
+        // assistant message was persisted; skip it rather than abandoning the
+        // scan (which would report "not present" and risk a duplicate append).
+        continue;
+      }
+      const message = parsed?.message;
+      if (message?.role === "assistant" && message.idempotencyKey === idempotencyKey) {
         return true;
       }
     }
@@ -968,7 +1051,10 @@ function appendAssistantTranscriptMessage(params: {
     }
   }
 
-  if (params.idempotencyKey && transcriptHasIdempotencyKey(transcriptPath, params.idempotencyKey)) {
+  if (
+    params.idempotencyKey &&
+    transcriptHasAssistantIdempotencyKey(transcriptPath, params.idempotencyKey)
+  ) {
     return { ok: true };
   }
 
@@ -1510,6 +1596,10 @@ export const chatHandlers: GatewayRequestHandlers = {
     const inboundMessage = sanitizedMessageResult.message;
     const systemInputProvenance = normalizeInputProvenance(p.systemInputProvenance);
     const systemProvenanceReceipt = systemReceiptResult.receipt;
+    const systemDedupeScope =
+      systemInputProvenance || systemProvenanceReceipt
+        ? JSON.stringify([systemProvenanceReceipt ?? null, systemInputProvenance ?? null])
+        : undefined;
     const stopCommand = isChatStopCommandText(inboundMessage);
     const normalizedAttachments = normalizeRpcAttachmentsToChatAttachments(p.attachments);
     const rawMessage = inboundMessage.trim();
@@ -1590,6 +1680,43 @@ export const chatHandlers: GatewayRequestHandlers = {
       return;
     }
 
+    const clientInfo = client?.connect?.client;
+    const originatingRoute = resolveChatSendOriginatingRoute({
+      client: clientInfo,
+      deliver: p.deliver,
+      entry,
+      explicitOrigin: explicitOriginResult.value,
+      hasConnectedClient: client?.connect !== undefined,
+      mainKey: cfg.session?.mainKey,
+      sessionKey,
+    });
+    // Collapse a rapid repeat WebChat submit onto the run that is still in
+    // flight instead of starting a second agent dispatch. Gated on the run
+    // still being registered in `chatAbortControllers`: once the run finishes
+    // the stale mapping is ignored, so this can never permanently swallow a
+    // resend (no sticky "already sent" flag).
+    const activeChatSendDedupeKey = buildActiveChatSendDedupeKey({
+      attachmentCount: normalizedAttachments.length,
+      explicitDeliverRoute: originatingRoute.explicitDeliverRoute,
+      message: rawMessage,
+      originatingChannel: originatingRoute.originatingChannel,
+      sessionKey,
+      systemScope: systemDedupeScope,
+      thinking: typeof p.thinking === "string" ? p.thinking : undefined,
+    });
+    if (activeChatSendDedupeKey) {
+      const activeRunId = resolveActiveChatSendRunId(
+        context.dedupe.get(activeChatSendDedupeKey)?.payload,
+      );
+      if (activeRunId && context.chatAbortControllers.has(activeRunId)) {
+        respond(true, { runId: activeRunId, status: "in_flight" as const }, undefined, {
+          cached: true,
+          runId: activeRunId,
+        });
+        return;
+      }
+    }
+
     if (normalizedAttachments.length > 0) {
       const sessionAgentId = resolveSessionAgentId({ sessionKey, config: cfg });
       const modelRef = resolveSessionModelRef(cfg, entry, sessionAgentId);
@@ -1628,6 +1755,30 @@ export const chatHandlers: GatewayRequestHandlers = {
     }
 
     try {
+      // Re-check in the same synchronous step as the insert. The guards above
+      // run before attachment parsing, which awaits; two concurrent sends
+      // sharing an idempotency key can both clear them and then both register,
+      // detaching the first run's abort controller and dispatching the agent
+      // twice. Losing the race means reporting the existing outcome, never
+      // replacing it.
+      //
+      // Both terminal states have to be re-read here, not just the live one:
+      // the winner may already have finished and removed its abort controller
+      // while this request was still awaiting, leaving only the cached result.
+      const settledDuringParse = context.dedupe.get(`chat:${clientRunId}`);
+      if (settledDuringParse) {
+        respond(settledDuringParse.ok, settledDuringParse.payload, settledDuringParse.error, {
+          cached: true,
+        });
+        return;
+      }
+      if (context.chatAbortControllers.has(clientRunId)) {
+        respond(true, { runId: clientRunId, status: "in_flight" as const }, undefined, {
+          cached: true,
+          runId: clientRunId,
+        });
+        return;
+      }
       const abortController = new AbortController();
       context.chatAbortControllers.set(clientRunId, {
         controller: abortController,
@@ -1638,6 +1789,16 @@ export const chatHandlers: GatewayRequestHandlers = {
         ownerConnId: normalizeOptionalString(client?.connId),
         ownerDeviceId: normalizeOptionalString(client?.connect?.device?.id),
       });
+      if (activeChatSendDedupeKey) {
+        // Points at the run that is now in flight. The entry is only honored
+        // while that runId is still in `chatAbortControllers`, and the gateway
+        // dedupe map is TTL/size pruned, so it self-clears.
+        context.dedupe.set(activeChatSendDedupeKey, {
+          ts: now,
+          ok: true,
+          payload: { runId: clientRunId },
+        });
+      }
       const ackPayload = {
         runId: clientRunId,
         status: "started" as const,
@@ -1664,22 +1825,13 @@ export const chatHandlers: GatewayRequestHandlers = {
       const messageForAgent = systemProvenanceReceipt
         ? [systemProvenanceReceipt, parsedMessage].filter(Boolean).join("\n\n")
         : parsedMessage;
-      const clientInfo = client?.connect?.client;
       const {
         originatingChannel,
         originatingTo,
         accountId,
         messageThreadId,
         explicitDeliverRoute,
-      } = resolveChatSendOriginatingRoute({
-        client: clientInfo,
-        deliver: p.deliver,
-        entry,
-        explicitOrigin: explicitOriginResult.value,
-        hasConnectedClient: client?.connect !== undefined,
-        mainKey: cfg.session?.mainKey,
-        sessionKey,
-      });
+      } = originatingRoute;
       // Inject timestamp so agents know the current date/time.
       // Only BodyForAgent gets the timestamp — Body stays raw for UI display.
       // See: https://github.com/openclaw/openclaw/issues/3658
@@ -1974,6 +2126,14 @@ export const chatHandlers: GatewayRequestHandlers = {
           context.chatAbortControllers.delete(clientRunId);
         });
     } catch (err) {
+      // The run never reached dispatch, so its `.finally` cleanup will never
+      // run. Drop both the abort controller and the active-send mapping here;
+      // otherwise a stale entry keeps reporting `in_flight` for the same text
+      // until the controller TTL expires, silently swallowing later sends.
+      context.chatAbortControllers.delete(clientRunId);
+      if (activeChatSendDedupeKey) {
+        context.dedupe.delete(activeChatSendDedupeKey);
+      }
       const error = errorShape(ErrorCodes.UNAVAILABLE, String(err));
       const payload = {
         runId: clientRunId,

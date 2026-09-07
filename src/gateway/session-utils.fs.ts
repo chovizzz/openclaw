@@ -4,6 +4,7 @@ import { jsonUtf8Bytes } from "../infra/json-utf8-bytes.js";
 import { hasInterSessionUserProvenance } from "../sessions/input-provenance.js";
 import { extractAssistantVisibleText } from "../shared/chat-message-content.js";
 import { normalizeLowercaseStringOrEmpty } from "../shared/string-coerce.js";
+import { truncateUtf16Safe } from "../utils.js";
 import { stripInlineDirectiveTagsForDisplay } from "../utils/directive-tags.js";
 import { extractToolCallNames, hasToolCall } from "../utils/transcript-tools.js";
 import { stripEnvelope } from "./chat-sanitize.js";
@@ -622,13 +623,14 @@ function normalizeRole(role: string | undefined, isTool: boolean): SessionPrevie
 }
 
 function truncatePreviewText(text: string, maxChars: number): string {
-  if (maxChars <= 0 || text.length <= maxChars) {
+  if (text.length <= maxChars) {
     return text;
   }
-  if (maxChars <= 3) {
-    return text.slice(0, maxChars);
-  }
-  return `${text.slice(0, maxChars - 3)}...`;
+  // The only entry point (readSessionPreviewItemsFromTranscript) clamps
+  // maxChars to at least 20, so the suffix budget stays positive.
+  // truncateUtf16Safe keeps the cut off a surrogate pair, so an emoji at the
+  // boundary is dropped whole instead of leaving a lone surrogate.
+  return `${truncateUtf16Safe(text, maxChars - 3)}...`;
 }
 
 function extractPreviewText(message: TranscriptPreviewMessage): string | null {

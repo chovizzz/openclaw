@@ -14,9 +14,22 @@ export type DedupeCacheOptions = {
   maxSize: number;
 };
 
+/**
+ * Clamp a retention option to a non-negative integer.
+ *
+ * Non-finite input (NaN / +-Infinity) falls back to `fallback` instead of
+ * poisoning the arithmetic downstream: a NaN ttl/maxSize silently disables
+ * every `> 0` guard, and a NaN maxSize makes pruning a no-op, so the cache
+ * would grow without bound. Falling back keeps the failure mode "dedupe does
+ * less", never "cache leaks" or "comparisons are undefined".
+ */
+export function resolveDedupeNonNegativeInteger(value: number, fallback: number): number {
+  return Number.isFinite(value) ? Math.max(0, Math.floor(value)) : fallback;
+}
+
 export function createDedupeCache(options: DedupeCacheOptions): DedupeCache {
-  const ttlMs = Math.max(0, options.ttlMs);
-  const maxSize = Math.max(0, Math.floor(options.maxSize));
+  const ttlMs = resolveDedupeNonNegativeInteger(options.ttlMs, 0);
+  const maxSize = resolveDedupeNonNegativeInteger(options.maxSize, 0);
   const cache = new Map<string, number>();
 
   const touch = (key: string, now: number) => {

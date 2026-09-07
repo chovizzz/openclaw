@@ -878,6 +878,15 @@ describe("deriveSessionTitle", () => {
     expect(result!.endsWith("…")).toBe(true);
   });
 
+  test("keeps a derived title valid when the limit bisects an emoji", () => {
+    const entry = { sessionId: "abc123", updatedAt: Date.now() } as SessionEntry;
+    // The 60-char title limit cuts at index 59, which lands inside the
+    // surrogate pair. The emoji must be dropped whole, never split.
+    const result = deriveSessionTitle(entry, `${"t".repeat(58)}\u{1F680} extra`);
+    expect(result).toBe(`${"t".repeat(58)}\u2026`);
+    expect(/[\uD800-\uDFFF]/.test(result!)).toBe(false);
+  });
+
   test("truncates at word boundary when possible", () => {
     const entry = {
       sessionId: "abc123",

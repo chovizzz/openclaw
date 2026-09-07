@@ -86,9 +86,17 @@ export function startGatewayMaintenanceTimers(params: {
       }
     }
     if (params.dedupe.size > DEDUPE_MAX) {
-      const entries = [...params.dedupe.entries()].toSorted((a, b) => a[1].ts - b[1].ts);
-      for (let i = 0; i < params.dedupe.size - DEDUPE_MAX; i++) {
-        params.dedupe.delete(entries[i][0]);
+      // Snapshot the excess count before deleting: the loop bound used to be
+      // recomputed against the shrinking Map, so only half the overflow was
+      // ever evicted. Sort by entry timestamp rather than Map insertion order
+      // so refresh/reinsert paths still prune the oldest data first.
+      const excess = params.dedupe.size - DEDUPE_MAX;
+      const oldestKeys = [...params.dedupe.entries()]
+        .toSorted(([, left], [, right]) => left.ts - right.ts)
+        .slice(0, excess)
+        .map(([key]) => key);
+      for (const key of oldestKeys) {
+        params.dedupe.delete(key);
       }
     }
 

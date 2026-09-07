@@ -612,6 +612,32 @@ describe("readSessionPreviewItemsFromTranscript", () => {
     expect(result[0]?.text.endsWith("...")).toBe(true);
   });
 
+  test("keeps preview text valid when the limit bisects an emoji", () => {
+    const sessionId = "preview-truncate-utf16";
+    const lines = [
+      JSON.stringify({
+        message: { role: "assistant", content: `${"t".repeat(196)}\u{1F680}xyz` },
+      }),
+    ];
+    writeTranscriptLines(sessionId, lines);
+
+    const result = readPreview(sessionId, 1, 200);
+    expect(result).toEqual([{ role: "assistant", text: `${"t".repeat(196)}...` }]);
+    expect(/[\uD800-\uDFFF]/.test(result[0].text)).toBe(false);
+  });
+
+  test("still truncates non-surrogate preview text at the exact budget", () => {
+    // Reverse check: the UTF-16 guard must not shorten plain text.
+    const sessionId = "preview-truncate-plain";
+    writeTranscriptLines(sessionId, [
+      JSON.stringify({ message: { role: "assistant", content: "t".repeat(400) } }),
+    ]);
+
+    expect(readPreview(sessionId, 1, 200)).toEqual([
+      { role: "assistant", text: `${"t".repeat(197)}...` },
+    ]);
+  });
+
   test("strips inline directives from preview items", () => {
     const sessionId = "preview-strip-inline-directives";
     const lines = [
