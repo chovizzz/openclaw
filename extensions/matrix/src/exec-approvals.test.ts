@@ -402,7 +402,7 @@ describe("matrix exec approvals", () => {
     ).toBe(false);
   });
 
-  it("allows unbound foreign-channel approvals when only one matrix account can handle them", () => {
+  it("rejects unbound foreign-channel approvals even when only one matrix account can handle them", () => {
     const cfg = {
       channels: {
         matrix: {
@@ -448,7 +448,7 @@ describe("matrix exec approvals", () => {
         accountId: "default",
         request,
       }),
-    ).toBe(true);
+    ).toBe(false);
     expect(
       shouldHandleMatrixExecApprovalRequest({
         cfg,
@@ -458,7 +458,7 @@ describe("matrix exec approvals", () => {
     ).toBe(false);
   });
 
-  it("uses request filters when checking foreign-channel matrix ambiguity", () => {
+  it("uses request filters when checking unbound matrix account eligibility", () => {
     const cfg = {
       channels: {
         matrix: {
@@ -493,7 +493,7 @@ describe("matrix exec approvals", () => {
         command: "echo hi",
         agentId: "ops-agent",
         sessionKey: "agent:ops-agent:missing",
-        turnSourceChannel: "slack",
+        turnSourceChannel: "matrix",
         turnSourceTo: "channel:C123",
       },
       createdAtMs: 0,
@@ -516,7 +516,7 @@ describe("matrix exec approvals", () => {
     ).toBe(false);
   });
 
-  it("ignores disabled matrix accounts when checking foreign-channel ambiguity", () => {
+  it("ignores disabled matrix accounts when checking unbound account eligibility", () => {
     const cfg = {
       channels: {
         matrix: {
@@ -550,7 +550,7 @@ describe("matrix exec approvals", () => {
         command: "echo hi",
         agentId: "ops-agent",
         sessionKey: "agent:ops-agent:missing",
-        turnSourceChannel: "slack",
+        turnSourceChannel: "matrix",
         turnSourceTo: "channel:C123",
       },
       createdAtMs: 0,

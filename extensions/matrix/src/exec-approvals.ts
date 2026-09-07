@@ -14,7 +14,7 @@ import { normalizeAccountId } from "openclaw/plugin-sdk/routing";
 import { normalizeLowercaseStringOrEmpty } from "openclaw/plugin-sdk/text-runtime";
 import { getMatrixApprovalAuthApprovers } from "./approval-auth.js";
 import { normalizeMatrixApproverId } from "./approval-ids.js";
-import { listMatrixAccountIds, resolveMatrixAccount } from "./matrix/accounts.js";
+import { resolveMatrixAccount } from "./matrix/accounts.js";
 import type { CoreConfig } from "./types.js";
 
 type ApprovalRequest = ExecApprovalRequest | PluginApprovalRequest;
@@ -42,47 +42,6 @@ function resolveMatrixExecApprovalConfig(params: {
   };
 }
 
-function countMatrixExecApprovalEligibleAccounts(params: {
-  cfg: OpenClawConfig;
-  request: ApprovalRequest;
-  approvalKind: ApprovalKind;
-}): number {
-  return listMatrixAccountIds(params.cfg).filter((accountId) => {
-    const account = resolveMatrixAccount({ cfg: params.cfg, accountId });
-    if (!account.enabled || !account.configured) {
-      return false;
-    }
-    const config = resolveMatrixExecApprovalConfig({
-      cfg: params.cfg,
-      accountId,
-    });
-    const filters = config?.enabled
-      ? {
-          agentFilter: config.agentFilter,
-          sessionFilter: config.sessionFilter,
-        }
-      : {
-          agentFilter: undefined,
-          sessionFilter: undefined,
-        };
-    return (
-      isChannelExecApprovalClientEnabledFromConfig({
-        enabled: config?.enabled,
-        approverCount: getMatrixApprovalApprovers({
-          cfg: params.cfg,
-          accountId,
-          approvalKind: params.approvalKind,
-        }).length,
-      }) &&
-      matchesApprovalRequestFilters({
-        request: params.request.request,
-        agentFilter: filters.agentFilter,
-        sessionFilter: filters.sessionFilter,
-      })
-    );
-  }).length;
-}
-
 function matchesMatrixRequestAccount(params: {
   cfg: OpenClawConfig;
   accountId?: string | null;
@@ -97,14 +56,13 @@ function matchesMatrixRequestAccount(params: {
     request: params.request,
     channel: "matrix",
   });
+  // Fail closed. An unbound request whose turnSourceChannel names another
+  // channel must never be adopted here just because Matrix happens to have a
+  // single eligible account: doing so routed a foreign conversation's exec
+  // approval — command text and session metadata included — to Matrix
+  // approvers, who could then approve it.
   if (turnSourceChannel && turnSourceChannel !== "matrix" && !boundAccountId) {
-    return (
-      countMatrixExecApprovalEligibleAccounts({
-        cfg: params.cfg,
-        request: params.request,
-        approvalKind: params.approvalKind,
-      }) <= 1
-    );
+    return false;
   }
   return (
     !boundAccountId ||

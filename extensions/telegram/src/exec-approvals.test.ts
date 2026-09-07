@@ -241,7 +241,7 @@ describe("telegram exec approvals", () => {
     ).toBe(false);
   });
 
-  it("allows unbound foreign-channel approvals when only one telegram account can handle them", () => {
+  it("rejects unbound foreign-channel approvals even when only one telegram account can handle them", () => {
     const cfg = {
       channels: {
         telegram: {
@@ -282,7 +282,7 @@ describe("telegram exec approvals", () => {
         accountId: "default",
         request,
       }),
-    ).toBe(true);
+    ).toBe(false);
     expect(
       shouldHandleTelegramExecApprovalRequest({
         cfg,
@@ -292,7 +292,7 @@ describe("telegram exec approvals", () => {
     ).toBe(false);
   });
 
-  it("uses request filters when checking foreign-channel telegram ambiguity", () => {
+  it("uses request filters when checking unbound telegram account eligibility", () => {
     const cfg = {
       channels: {
         telegram: {
@@ -322,7 +322,7 @@ describe("telegram exec approvals", () => {
       request: {
         command: "echo hi",
         sessionKey: "agent:ops:missing",
-        turnSourceChannel: "slack",
+        turnSourceChannel: "telegram",
         turnSourceTo: "channel:C123",
       },
       createdAtMs: 0,
@@ -345,7 +345,7 @@ describe("telegram exec approvals", () => {
     ).toBe(false);
   });
 
-  it("ignores disabled telegram accounts when checking foreign-channel ambiguity", () => {
+  it("ignores disabled telegram accounts when checking unbound account eligibility", () => {
     const cfg = {
       channels: {
         telegram: {
@@ -374,7 +374,7 @@ describe("telegram exec approvals", () => {
       request: {
         command: "echo hi",
         sessionKey: "agent:ops:missing",
-        turnSourceChannel: "slack",
+        turnSourceChannel: "telegram",
         turnSourceTo: "channel:C123",
       },
       createdAtMs: 0,

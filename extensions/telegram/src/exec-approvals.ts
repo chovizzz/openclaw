@@ -3,7 +3,6 @@ import {
   createChannelExecApprovalProfile,
   isChannelExecApprovalClientEnabledFromConfig,
   isChannelExecApprovalTargetRecipient,
-  matchesApprovalRequestFilters,
 } from "openclaw/plugin-sdk/approval-client-runtime";
 import { resolveApprovalRequestChannelAccountId } from "openclaw/plugin-sdk/approval-native-runtime";
 import type { OpenClawConfig } from "openclaw/plugin-sdk/config-runtime";
@@ -15,7 +14,7 @@ import {
   normalizeLowercaseStringOrEmpty,
   normalizeOptionalString,
 } from "openclaw/plugin-sdk/text-runtime";
-import { listTelegramAccountIds, resolveTelegramAccount } from "./accounts.js";
+import { resolveTelegramAccount } from "./accounts.js";
 import { resolveTelegramInlineButtonsConfigScope } from "./inline-buttons.js";
 import { normalizeTelegramChatId, resolveTelegramTargetChatType } from "./targets.js";
 
@@ -78,34 +77,6 @@ export function isTelegramExecApprovalTargetRecipient(params: {
   });
 }
 
-function countTelegramExecApprovalEligibleAccounts(params: {
-  cfg: OpenClawConfig;
-  request: ExecApprovalRequest | PluginApprovalRequest;
-}): number {
-  return listTelegramAccountIds(params.cfg).filter((accountId) => {
-    const account = resolveTelegramAccount({ cfg: params.cfg, accountId });
-    if (!account.enabled || account.tokenSource === "none") {
-      return false;
-    }
-    const config = resolveTelegramExecApprovalConfig({
-      cfg: params.cfg,
-      accountId,
-    });
-    return (
-      isChannelExecApprovalClientEnabledFromConfig({
-        enabled: config?.enabled,
-        approverCount: getTelegramExecApprovalApprovers({ cfg: params.cfg, accountId }).length,
-      }) &&
-      matchesApprovalRequestFilters({
-        request: params.request.request,
-        agentFilter: config?.agentFilter,
-        sessionFilter: config?.sessionFilter,
-        fallbackAgentIdFromSessionKey: true,
-      })
-    );
-  }).length;
-}
-
 function matchesTelegramRequestAccount(params: {
   cfg: OpenClawConfig;
   accountId?: string | null;
@@ -119,13 +90,13 @@ function matchesTelegramRequestAccount(params: {
     request: params.request,
     channel: "telegram",
   });
+  // Fail closed. An unbound request whose turnSourceChannel names another
+  // channel must never be adopted here just because Telegram happens to have a
+  // single eligible account: doing so routed a foreign conversation's exec
+  // approval — command text and session metadata included — to Telegram
+  // approvers, who could then approve it.
   if (turnSourceChannel && turnSourceChannel !== "telegram" && !boundAccountId) {
-    return (
-      countTelegramExecApprovalEligibleAccounts({
-        cfg: params.cfg,
-        request: params.request,
-      }) <= 1
-    );
+    return false;
   }
   return (
     !boundAccountId ||
