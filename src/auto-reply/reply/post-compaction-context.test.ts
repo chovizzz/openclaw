@@ -412,4 +412,81 @@ Read WORKFLOW.md on startup.
       expect(result).toContain("Init things");
     });
   });
+
+  describe("UTF-16 safe truncation (#102515)", () => {
+    // A lone surrogate is a code unit in D800-DFFF without its partner. Naive
+    // .slice() at a code-unit limit emits one whenever the limit falls inside a
+    // surrogate pair, corrupting the context text handed to the model.
+    const hasLoneSurrogate = (value: string): boolean => {
+      for (let i = 0; i < value.length; i += 1) {
+        const unit = value.charCodeAt(i);
+        if (unit >= 0xd800 && unit <= 0xdbff) {
+          const next = value.charCodeAt(i + 1);
+          if (!(next >= 0xdc00 && next <= 0xdfff)) {
+            return true;
+          }
+          i += 1;
+        } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    const buildCfg = (postCompactionMaxChars: number) =>
+      ({
+        agents: { defaults: { contextLimits: { postCompactionMaxChars } } },
+      }) as OpenClawConfig;
+
+    // Emoji-only body, so consecutive limits alternate between landing on a pair
+    // boundary and landing exactly in the middle of a pair. Sweeping a window of
+    // limits therefore guarantees the mid-pair case is exercised regardless of
+    // how much fixed section header text precedes the body.
+    const emojiBody = "\u{1F642}".repeat(400);
+
+    beforeEach(() => {
+      fs.writeFileSync(
+        path.join(tmpDir, "AGENTS.md"),
+        `## Session Startup\n\n${emojiBody}\n`,
+        "utf8",
+      );
+    });
+
+    it("never splits a surrogate pair at any truncation limit", async () => {
+      const lengths: number[] = [];
+      for (let limit = 200; limit <= 220; limit += 1) {
+        const result = await readPostCompactionContext(tmpDir, { cfg: buildCfg(limit) });
+        expect(result).not.toBeNull();
+        expect(hasLoneSurrogate(result as string)).toBe(false);
+        const truncated = (result as string).split("\n...[truncated]...")[0];
+        lengths.push(truncated.length);
+      }
+      // Proof the sweep actually straddled pairs: if every limit had landed on a
+      // clean boundary the truncated prefix would grow by one at every step.
+      // Backing off a straddled pair makes consecutive limits repeat a length.
+      expect(new Set(lengths).size).toBeLessThan(lengths.length);
+    });
+
+    it("respects the configured limit as a budget and never raises it", async () => {
+      // The fix must only move where the cut lands, never enlarge the budget.
+      // The prose wrapper around the truncated body has a fixed length, so
+      // comparing two limits isolates the body growth from the wrapper.
+      const bodyLength = async (limit: number) => {
+        const result = await readPostCompactionContext(tmpDir, { cfg: buildCfg(limit) });
+        return (result as string).split("\n...[truncated]...")[0].length;
+      };
+      const low = await bodyLength(200);
+      const high = await bodyLength(220);
+      // Growth is capped by the limit delta; back-off may make it 1 shorter.
+      expect(high - low).toBeLessThanOrEqual(20);
+      expect(high - low).toBeGreaterThanOrEqual(19);
+    });
+
+    it("leaves content shorter than the limit untouched", async () => {
+      fs.writeFileSync(path.join(tmpDir, "AGENTS.md"), "## Session Startup\n\nshort \u{1F642}\n");
+      const result = await readPostCompactionContext(tmpDir, { cfg: buildCfg(5000) });
+      expect(result).toContain("short \u{1F642}");
+      expect(result).not.toContain("...[truncated]...");
+    });
+  });
 });

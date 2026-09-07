@@ -1,8 +1,10 @@
 import { resolveSendableOutboundReplyParts } from "openclaw/plugin-sdk/reply-payload";
 import { resolveSessionAgentId } from "../../agents/agent-scope.js";
+import { resolveChannelDefaultAccountId } from "../../channels/plugins/helpers.js";
 import { normalizeChannelId } from "../../channels/plugins/index.js";
+import type { ChannelPlugin } from "../../channels/plugins/types.js";
 import { createOutboundSendDeps } from "../../cli/deps.js";
-import { loadConfig } from "../../config/config.js";
+import { loadConfig, type OpenClawConfig } from "../../config/config.js";
 import { applyPluginAutoEnable } from "../../config/plugin-auto-enable.js";
 import { resolveOutboundChannelPlugin } from "../../infra/outbound/channel-resolution.js";
 import { resolveMessageChannelSelection } from "../../infra/outbound/channel-selection.js";
@@ -21,6 +23,7 @@ import {
   normalizeOptionalString,
   readStringValue,
 } from "../../shared/string-coerce.js";
+import { normalizeAccountId } from "../../utils/account-id.js";
 import {
   ErrorCodes,
   errorShape,
@@ -29,7 +32,7 @@ import {
   validateSendParams,
 } from "../protocol/index.js";
 import { formatForLog } from "../ws-log.js";
-import type { GatewayRequestContext, GatewayRequestHandlers } from "./types.js";
+import type { GatewayRequestContext, GatewayRequestHandlers, RespondFn } from "./types.js";
 
 type InflightResult = {
   ok: boolean;
@@ -51,6 +54,85 @@ const getInflightMap = (context: GatewayRequestContext) => {
   }
   return inflight;
 };
+
+/**
+ * Shared cache + inflight arbitration for idempotent outbound operations.
+ *
+ * Returns a discriminated union rather than responding itself, so each handler
+ * keeps ownership of its own response/meta shape:
+ *  - "cached": a completed result for this key is already memoized.
+ *  - "inflight": an identical request is still running; follow it.
+ *  - "ready": this caller owns the work and must register it in `inflightMap`.
+ */
+function resolveGatewayInflightMap(params: {
+  context: GatewayRequestContext;
+  dedupeKey: string;
+}):
+  | { kind: "cached"; cached: NonNullable<ReturnType<GatewayRequestContext["dedupe"]["get"]>> }
+  | { kind: "inflight"; inflight: Promise<InflightResult> }
+  | { kind: "ready"; inflightMap: Map<string, Promise<InflightResult>> } {
+  const cached = params.context.dedupe.get(params.dedupeKey);
+  if (cached) {
+    return { kind: "cached", cached };
+  }
+  const inflightMap = getInflightMap(params.context);
+  const inflight = inflightMap.get(params.dedupeKey);
+  if (inflight) {
+    return { kind: "inflight", inflight };
+  }
+  return { kind: "ready", inflightMap };
+}
+
+/**
+ * Canonical route component of a dedupe key.
+ *
+ * An idempotency key only identifies an operation *within a route*. Keying on
+ * the bare key made "same key, different channel" return the first channel's
+ * payload and silently skip the second delivery. Scoping by the resolved
+ * channel plus the effective account fixes that.
+ *
+ * The account is canonicalized to the account the send will actually use, so an
+ * omitted accountId and an accountId explicitly set to the channel default
+ * collapse to the same key. An explicit-but-uncanonicalizable account never
+ * collapses into the default: it gets its own `invalid:` bucket, otherwise a
+ * cached default-account result could satisfy a request that still carries the
+ * raw invalid account downstream.
+ */
+function resolveMessageOperationRouteScope(params: {
+  cfg: OpenClawConfig;
+  channel: string;
+  plugin: ChannelPlugin;
+  requestedAccountId?: unknown;
+}): string {
+  const raw = normalizeOptionalString(params.requestedAccountId);
+  const account = raw
+    ? (normalizeAccountId(raw) ?? `invalid:${raw}`)
+    : (normalizeAccountId(
+        resolveChannelDefaultAccountId({ plugin: params.plugin, cfg: params.cfg }),
+      ) ?? null);
+  return JSON.stringify([params.channel, account]);
+}
+
+/**
+ * Awaits an inflight result on behalf of a follower. A rejecting worker would
+ * otherwise leave the caller with no response at all, which hangs the request;
+ * a duplicate-suppressed caller must still always hear back.
+ */
+async function respondFromInflight(params: {
+  respond: RespondFn;
+  inflight: Promise<InflightResult>;
+}): Promise<void> {
+  try {
+    const result = await params.inflight;
+    const meta = result.meta ? { ...result.meta, cached: true } : { cached: true };
+    params.respond(result.ok, result.payload, result.error, meta);
+  } catch (err) {
+    params.respond(false, undefined, errorShape(ErrorCodes.UNAVAILABLE, String(err)), {
+      cached: true,
+      error: formatForLog(err),
+    });
+  }
+}
 
 async function resolveRequestedChannel(params: {
   requestChannel: unknown;
@@ -206,22 +288,6 @@ export const sendHandlers: GatewayRequestHandlers = {
       idempotencyKey: string;
     };
     const idem = request.idempotencyKey;
-    const dedupeKey = `send:${idem}`;
-    const cached = context.dedupe.get(dedupeKey);
-    if (cached) {
-      respond(cached.ok, cached.payload, cached.error, {
-        cached: true,
-      });
-      return;
-    }
-    const inflightMap = getInflightMap(context);
-    const inflight = inflightMap.get(dedupeKey);
-    if (inflight) {
-      const result = await inflight;
-      const meta = result.meta ? { ...result.meta, cached: true } : { cached: true };
-      respond(result.ok, result.payload, result.error, meta);
-      return;
-    }
     const to = normalizeOptionalString(request.to) ?? "";
     const message = normalizeOptionalString(request.message) ?? "";
     const mediaUrl = normalizeOptionalString(request.mediaUrl);
@@ -238,11 +304,25 @@ export const sendHandlers: GatewayRequestHandlers = {
       );
       return;
     }
-    const resolvedChannel = await resolveRequestedChannel({
-      requestChannel: request.channel,
-      unsupportedMessage: (input) => `unsupported channel: ${input}`,
-      rejectWebchatAsInternalOnly: true,
-    });
+    // Route preflight runs before dedupe arbitration: the dedupe key is scoped
+    // by the resolved route, so the route has to be known first. This also
+    // closes a race where two callers both passed the pre-resolution cache check
+    // and then both registered work.
+    let resolvedChannel: Awaited<ReturnType<typeof resolveRequestedChannel>>;
+    try {
+      resolvedChannel = await resolveRequestedChannel({
+        requestChannel: request.channel,
+        unsupportedMessage: (input) => `unsupported channel: ${input}`,
+        rejectWebchatAsInternalOnly: true,
+      });
+    } catch (err) {
+      // loadConfig/applyPluginAutoEnable can throw; never leave the caller
+      // without a response.
+      respond(false, undefined, errorShape(ErrorCodes.UNAVAILABLE, String(err)), {
+        error: formatForLog(err),
+      });
+      return;
+    }
     if ("error" in resolvedChannel) {
       respond(false, undefined, resolvedChannel.error);
       return;
@@ -260,6 +340,36 @@ export const sendHandlers: GatewayRequestHandlers = {
       );
       return;
     }
+    // A plugin-supplied listAccountIds/defaultAccountId can throw; never leave
+    // the caller without a response.
+    let routeScope: string;
+    try {
+      routeScope = resolveMessageOperationRouteScope({
+        cfg,
+        channel,
+        plugin,
+        requestedAccountId: request.accountId,
+      });
+    } catch (err) {
+      respond(false, undefined, errorShape(ErrorCodes.UNAVAILABLE, String(err)), {
+        channel,
+        error: formatForLog(err),
+      });
+      return;
+    }
+    const dedupeKey = `send:${routeScope}:${idem}`;
+    const arbitration = resolveGatewayInflightMap({ context, dedupeKey });
+    if (arbitration.kind === "cached") {
+      respond(arbitration.cached.ok, arbitration.cached.payload, arbitration.cached.error, {
+        cached: true,
+      });
+      return;
+    }
+    if (arbitration.kind === "inflight") {
+      await respondFromInflight({ respond, inflight: arbitration.inflight });
+      return;
+    }
+    const { inflightMap } = arbitration;
 
     const work = (async (): Promise<InflightResult> => {
       try {
@@ -378,6 +488,12 @@ export const sendHandlers: GatewayRequestHandlers = {
     try {
       const result = await work;
       respond(result.ok, result.payload, result.error, result.meta);
+    } catch (err) {
+      // The worker is not expected to reject, but a throw here would otherwise
+      // leave the request with no response at all.
+      respond(false, undefined, errorShape(ErrorCodes.UNAVAILABLE, String(err)), {
+        error: formatForLog(err),
+      });
     } finally {
       inflightMap.delete(dedupeKey);
     }
@@ -410,18 +526,21 @@ export const sendHandlers: GatewayRequestHandlers = {
       idempotencyKey: string;
     };
     const idem = request.idempotencyKey;
-    const cached = context.dedupe.get(`poll:${idem}`);
-    if (cached) {
-      respond(cached.ok, cached.payload, cached.error, {
-        cached: true,
+    const to = request.to.trim();
+    // Route preflight before dedupe arbitration, so the dedupe key can be
+    // scoped by the resolved route (see resolveMessageOperationRouteScope).
+    let resolvedChannel: Awaited<ReturnType<typeof resolveRequestedChannel>>;
+    try {
+      resolvedChannel = await resolveRequestedChannel({
+        requestChannel: request.channel,
+        unsupportedMessage: (input) => `unsupported poll channel: ${input}`,
+      });
+    } catch (err) {
+      respond(false, undefined, errorShape(ErrorCodes.UNAVAILABLE, String(err)), {
+        error: formatForLog(err),
       });
       return;
     }
-    const to = request.to.trim();
-    const resolvedChannel = await resolveRequestedChannel({
-      requestChannel: request.channel,
-      unsupportedMessage: (input) => `unsupported poll channel: ${input}`,
-    });
     if ("error" in resolvedChannel) {
       respond(false, undefined, resolvedChannel.error);
       return;
@@ -451,6 +570,45 @@ export const sendHandlers: GatewayRequestHandlers = {
       );
       return;
     }
+    // Reject an unusable channel before route scoping: the default-account
+    // resolver needs a real plugin.
+    const sendPoll = outbound?.sendPoll;
+    if (!plugin || !sendPoll) {
+      respond(
+        false,
+        undefined,
+        errorShape(ErrorCodes.INVALID_REQUEST, `unsupported poll channel: ${channel}`),
+      );
+      return;
+    }
+    let routeScope: string;
+    try {
+      routeScope = resolveMessageOperationRouteScope({
+        cfg,
+        channel,
+        plugin,
+        requestedAccountId: request.accountId,
+      });
+    } catch (err) {
+      respond(false, undefined, errorShape(ErrorCodes.UNAVAILABLE, String(err)), {
+        channel,
+        error: formatForLog(err),
+      });
+      return;
+    }
+    const dedupeKey = `poll:${routeScope}:${idem}`;
+    const arbitration = resolveGatewayInflightMap({ context, dedupeKey });
+    if (arbitration.kind === "cached") {
+      respond(arbitration.cached.ok, arbitration.cached.payload, arbitration.cached.error, {
+        cached: true,
+      });
+      return;
+    }
+    if (arbitration.kind === "inflight") {
+      await respondFromInflight({ respond, inflight: arbitration.inflight });
+      return;
+    }
+    const { inflightMap } = arbitration;
     const poll = {
       question: request.question,
       options: request.options,
@@ -460,56 +618,55 @@ export const sendHandlers: GatewayRequestHandlers = {
     };
     const threadId = normalizeOptionalString(request.threadId);
     const accountId = normalizeOptionalString(request.accountId);
+
+    // Every path returns an InflightResult; the single runner below responds
+    // exactly once, both for the owner and for any inflight follower.
+    const work = (async (): Promise<InflightResult> => {
+      try {
+        const resolvedTarget = resolveGatewayOutboundTarget({
+          channel,
+          to,
+          cfg,
+          accountId,
+        });
+        if (!resolvedTarget.ok) {
+          return { ok: false, error: resolvedTarget.error };
+        }
+        const normalized = outbound.pollMaxOptions
+          ? normalizePollInput(poll, { maxOptions: outbound.pollMaxOptions })
+          : normalizePollInput(poll);
+        const result = await sendPoll({
+          cfg,
+          to: resolvedTarget.to,
+          poll: normalized,
+          accountId,
+          threadId,
+          silent: request.silent,
+          isAnonymous: request.isAnonymous,
+          gatewayClientScopes: client?.connect?.scopes ?? [],
+        });
+        const payload = buildGatewayDeliveryPayload({ runId: idem, channel, result });
+        cacheGatewayDedupeSuccess({ context, dedupeKey, payload });
+        return { ok: true, payload, meta: { channel } };
+      } catch (err) {
+        const error = errorShape(ErrorCodes.UNAVAILABLE, String(err));
+        cacheGatewayDedupeFailure({ context, dedupeKey, error });
+        return { ok: false, error, meta: { channel, error: formatForLog(err) } };
+      }
+    })();
+
+    inflightMap.set(dedupeKey, work);
     try {
-      if (!outbound?.sendPoll) {
-        respond(
-          false,
-          undefined,
-          errorShape(ErrorCodes.INVALID_REQUEST, `unsupported poll channel: ${channel}`),
-        );
-        return;
-      }
-      const resolvedTarget = resolveGatewayOutboundTarget({
-        channel: channel,
-        to,
-        cfg,
-        accountId,
-      });
-      if (!resolvedTarget.ok) {
-        respond(false, undefined, resolvedTarget.error);
-        return;
-      }
-      const normalized = outbound.pollMaxOptions
-        ? normalizePollInput(poll, { maxOptions: outbound.pollMaxOptions })
-        : normalizePollInput(poll);
-      const result = await outbound.sendPoll({
-        cfg,
-        to: resolvedTarget.to,
-        poll: normalized,
-        accountId,
-        threadId,
-        silent: request.silent,
-        isAnonymous: request.isAnonymous,
-        gatewayClientScopes: client?.connect?.scopes ?? [],
-      });
-      const payload = buildGatewayDeliveryPayload({ runId: idem, channel, result });
-      cacheGatewayDedupeSuccess({
-        context,
-        dedupeKey: `poll:${idem}`,
-        payload,
-      });
-      respond(true, payload, undefined, { channel });
+      const result = await work;
+      respond(result.ok, result.payload, result.error, result.meta);
     } catch (err) {
-      const error = errorShape(ErrorCodes.UNAVAILABLE, String(err));
-      cacheGatewayDedupeFailure({
-        context,
-        dedupeKey: `poll:${idem}`,
-        error,
-      });
-      respond(false, undefined, error, {
-        channel,
+      // The worker is not expected to reject, but a throw here would otherwise
+      // leave the request with no response at all.
+      respond(false, undefined, errorShape(ErrorCodes.UNAVAILABLE, String(err)), {
         error: formatForLog(err),
       });
+    } finally {
+      inflightMap.delete(dedupeKey);
     }
   },
 };

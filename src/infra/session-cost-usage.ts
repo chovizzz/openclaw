@@ -20,6 +20,7 @@ import type { SessionEntry } from "../config/sessions/types.js";
 import { stripEnvelope, stripMessageIdHints } from "../shared/chat-envelope.js";
 import { asFiniteNumber } from "../shared/number-coercion.js";
 import { normalizeOptionalString } from "../shared/string-coerce.js";
+import { truncateUtf16Safe } from "../utils.js";
 import { countToolResults, extractToolCallNames } from "../utils/transcript-tools.js";
 import { estimateUsageCost, resolveModelCostConfig } from "../utils/usage-format.js";
 import type {
@@ -1014,10 +1015,12 @@ export async function loadSessionLogs(params: {
         continue;
       }
 
-      // Truncate very long content
+      // Truncate very long content. Use a UTF-16-safe cut so an emoji or other
+      // astral character straddling the limit is dropped whole instead of being
+      // split into a lone surrogate that renders as U+FFFD in usage output.
       const maxLen = 2000;
       if (content.length > maxLen) {
-        content = content.slice(0, maxLen) + "…";
+        content = truncateUtf16Safe(content, maxLen) + "…";
       }
 
       // Get timestamp

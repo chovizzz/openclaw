@@ -3,16 +3,18 @@ import { buildInboundMediaNote } from "./media-note.js";
 import { createSuccessfulImageMediaDecision } from "./media-understanding.test-fixtures.js";
 
 describe("buildInboundMediaNote", () => {
-  it("formats single MediaPath as a media note", () => {
+  it("formats single MediaPath as a media note (collapses redundant duplicate URL, #47587)", () => {
+    // When the channel mirrors the local path into MediaUrl (Telegram album
+    // media is the canonical case), the formatter should not render `path | path`.
     const note = buildInboundMediaNote({
       MediaPath: "/tmp/a.png",
       MediaType: "image/png",
       MediaUrl: "/tmp/a.png",
     });
-    expect(note).toBe("[media attached: /tmp/a.png (image/png) | /tmp/a.png]");
+    expect(note).toBe("[media attached: /tmp/a.png (image/png)]");
   });
 
-  it("formats multiple MediaPaths as numbered media notes", () => {
+  it("formats multiple MediaPaths as numbered media notes (collapses duplicate URLs, #47587)", () => {
     const note = buildInboundMediaNote({
       MediaPaths: ["/tmp/a.png", "/tmp/b.png", "/tmp/c.png"],
       MediaUrls: ["/tmp/a.png", "/tmp/b.png", "/tmp/c.png"],
@@ -20,11 +22,48 @@ describe("buildInboundMediaNote", () => {
     expect(note).toBe(
       [
         "[media attached: 3 files]",
-        "[media attached 1/3: /tmp/a.png | /tmp/a.png]",
-        "[media attached 2/3: /tmp/b.png | /tmp/b.png]",
-        "[media attached 3/3: /tmp/c.png | /tmp/c.png]",
+        "[media attached 1/3: /tmp/a.png]",
+        "[media attached 2/3: /tmp/b.png]",
+        "[media attached 3/3: /tmp/c.png]",
       ].join("\n"),
     );
+  });
+
+  // Reverse coverage for #47587: only a URL that is genuinely identical to the
+  // path may be dropped. A distinct URL carries information and must survive.
+  it("preserves a URL that differs from the local path (#47587)", () => {
+    const single = buildInboundMediaNote({
+      MediaPath: "/tmp/a.png",
+      MediaType: "image/png",
+      MediaUrl: "https://example.com/a.png",
+    });
+    expect(single).toBe("[media attached: /tmp/a.png (image/png) | https://example.com/a.png]");
+  });
+
+  it("dedupes per entry so a mixed batch keeps its distinct URLs (#47587)", () => {
+    // Index 0 mirrors the path (drop the suffix); index 1 has a real remote URL
+    // (keep it). Each entry is decided independently.
+    const mixed = buildInboundMediaNote({
+      MediaPaths: ["/tmp/local.png", "/tmp/remote.png"],
+      MediaUrls: ["/tmp/local.png", "https://example.com/remote.png"],
+    });
+    expect(mixed).toBe(
+      [
+        "[media attached: 2 files]",
+        "[media attached 1/2: /tmp/local.png]",
+        "[media attached 2/2: /tmp/remote.png | https://example.com/remote.png]",
+      ].join("\n"),
+    );
+  });
+
+  it("keeps a URL whose path prefix matches but which is not identical (#47587)", () => {
+    // Near-miss: the URL merely contains the path. It is still a different
+    // value and must not be collapsed.
+    const note = buildInboundMediaNote({
+      MediaPath: "/tmp/a.png",
+      MediaUrl: "https://example.com/tmp/a.png",
+    });
+    expect(note).toBe("[media attached: /tmp/a.png | https://example.com/tmp/a.png]");
   });
 
   it("skips media notes for attachments with understanding output", () => {

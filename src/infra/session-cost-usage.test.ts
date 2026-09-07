@@ -751,4 +751,84 @@ example
     expect(lastPoint?.cumulativeTokens).toBe(165);
     expect(lastPoint?.cumulativeCost).toBeCloseTo(0.055, 8);
   });
+
+  describe("UTF-16 safe log truncation (#101517)", () => {
+    // A lone surrogate is a code unit in D800-DFFF without its partner. Naive
+    // .slice(0, 2000) emits one whenever the 2000-unit limit lands inside a
+    // surrogate pair, and the CLI renders that as U+FFFD.
+    const hasLoneSurrogate = (value: string): boolean => {
+      for (let i = 0; i < value.length; i += 1) {
+        const unit = value.charCodeAt(i);
+        if (unit >= 0xd800 && unit <= 0xdbff) {
+          const next = value.charCodeAt(i + 1);
+          if (!(next >= 0xdc00 && next <= 0xdfff)) {
+            return true;
+          }
+          i += 1;
+        } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    const writeAssistantContent = async (dir: string, content: string) => {
+      const sessionsDir = path.join(dir, "agents", "main", "sessions");
+      await fs.mkdir(sessionsDir, { recursive: true });
+      const sessionFile = path.join(sessionsDir, "sess-utf16.jsonl");
+      await fs.writeFile(
+        sessionFile,
+        JSON.stringify({
+          type: "message",
+          timestamp: "2026-02-12T10:00:00.000Z",
+          message: { role: "assistant", content },
+        }),
+        "utf-8",
+      );
+      return sessionFile;
+    };
+
+    it("keeps an emoji whole when the 2000-char limit lands mid surrogate pair", async () => {
+      const root = await makeSessionCostRoot("session-utf16-straddle");
+      // The leading "a" shifts the emoji run by one code unit, so unit index
+      // 2000 falls exactly between a high and a low surrogate.
+      const content = `a${"\u{1F642}".repeat(1200)}`;
+      expect(content.slice(0, 2000)).toSatisfy(hasLoneSurrogate);
+      const sessionFile = await writeAssistantContent(root, content);
+
+      await withStateDir(root, async () => {
+        const logs = await loadSessionLogs({ sessionFile });
+        const truncated = logs?.[0]?.content ?? "";
+        expect(truncated.endsWith("…")).toBe(true);
+        expect(hasLoneSurrogate(truncated)).toBe(false);
+        // Backed off one code unit; the 2000 budget itself is unchanged.
+        expect(truncated).toBe(`${content.slice(0, 1999)}…`);
+      });
+    });
+
+    it("cuts exactly at the limit when it lands on a pair boundary", async () => {
+      const root = await makeSessionCostRoot("session-utf16-aligned");
+      // No offset, so unit index 2000 is a clean pair boundary and nothing is
+      // backed off. Proves the fix does not shrink the budget gratuitously.
+      const content = "\u{1F642}".repeat(1200);
+      expect(content.slice(0, 2000)).not.toSatisfy(hasLoneSurrogate);
+      const sessionFile = await writeAssistantContent(root, content);
+
+      await withStateDir(root, async () => {
+        const logs = await loadSessionLogs({ sessionFile });
+        expect(logs?.[0]?.content).toBe(`${content.slice(0, 2000)}…`);
+      });
+    });
+
+    it("leaves content under the limit untouched", async () => {
+      const root = await makeSessionCostRoot("session-utf16-short");
+      const content = "hello \u{1F642} world";
+      const sessionFile = await writeAssistantContent(root, content);
+
+      await withStateDir(root, async () => {
+        const logs = await loadSessionLogs({ sessionFile });
+        expect(logs?.[0]?.content).toBe(content);
+      });
+    });
+  });
 });

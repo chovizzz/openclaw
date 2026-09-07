@@ -133,6 +133,34 @@ async function runSendWithClient(
   return { respond };
 }
 
+// Dedupe lives on the GatewayRequestContext, so exercising it requires callers
+// that share one context. The default helpers above deliberately do not.
+async function runSendOn(context: GatewayRequestContext, params: Record<string, unknown>) {
+  const respond = vi.fn();
+  await sendHandlers.send({
+    params: params as never,
+    respond,
+    context,
+    req: { type: "req", id: "1", method: "send" },
+    client: null as never,
+    isWebchatConnect: () => false,
+  });
+  return { respond };
+}
+
+async function runPollOn(context: GatewayRequestContext, params: Record<string, unknown>) {
+  const respond = vi.fn();
+  await sendHandlers.poll({
+    params: params as never,
+    respond,
+    context,
+    req: { type: "req", id: "1", method: "poll" },
+    client: null as never,
+    isWebchatConnect: () => false,
+  });
+  return { respond };
+}
+
 async function runPoll(params: Record<string, unknown>) {
   return await runPollWithClient(params);
 }
@@ -198,7 +226,12 @@ describe("gateway send mirroring", () => {
       configured: ["slack"],
     });
     mocks.sendPoll.mockResolvedValue({ messageId: "poll-1" });
-    mocks.getChannelPlugin.mockReturnValue({ outbound: { sendPoll: mocks.sendPoll } });
+    // `config.listAccountIds` is part of the ChannelPlugin contract and is read
+    // when canonicalizing the dedupe route scope, so the fixture must supply it.
+    mocks.getChannelPlugin.mockReturnValue({
+      outbound: { sendPoll: mocks.sendPoll },
+      config: { listAccountIds: () => ["default"] },
+    });
     await loadFreshSendHandlersForTest();
   });
 
@@ -799,7 +832,10 @@ describe("gateway send mirroring", () => {
     mocks.deliverOutboundPayloads.mockResolvedValue([
       { messageId: "m-threaded", channel: "slack" },
     ]);
-    const outboundPlugin = { outbound: { sendPoll: mocks.sendPoll } };
+    const outboundPlugin = {
+      outbound: { sendPoll: mocks.sendPoll },
+      config: { listAccountIds: () => ["default"] },
+    };
     mocks.getChannelPlugin
       .mockReturnValueOnce(undefined)
       .mockReturnValueOnce(outboundPlugin)
@@ -826,5 +862,251 @@ describe("gateway send mirroring", () => {
       undefined,
       expect.objectContaining({ channel: "slack" }),
     );
+  });
+
+  describe("outbound request dedupe (#68341) and route canonicalization", () => {
+    const sendParams = (overrides: Record<string, unknown> = {}) => ({
+      to: "channel:C1",
+      message: "hi",
+      channel: "slack",
+      idempotencyKey: "idem-shared",
+      ...overrides,
+    });
+
+    const pollParams = (overrides: Record<string, unknown> = {}) => ({
+      to: "channel:C1",
+      question: "q?",
+      options: ["a", "b"],
+      channel: "slack",
+      idempotencyKey: "idem-shared-poll",
+      ...overrides,
+    });
+
+    it("collapses two concurrent identical sends into one delivery", async () => {
+      const context = makeContext();
+      let release: (() => void) | undefined;
+      mocks.deliverOutboundPayloads.mockImplementation(async () => {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return [{ messageId: "m-dedupe", channel: "slack" }];
+      });
+
+      const first = runSendOn(context, sendParams());
+      // Let the first request finish preflight and register its inflight entry.
+      await vi.waitFor(() => expect(release).toBeDefined());
+      const second = runSendOn(context, sendParams());
+      release?.();
+      const [a, b] = await Promise.all([first, second]);
+
+      expect(mocks.deliverOutboundPayloads).toHaveBeenCalledTimes(1);
+      expect(a.respond).toHaveBeenCalledWith(true, expect.anything(), undefined, expect.anything());
+      expect(b.respond).toHaveBeenCalledWith(
+        true,
+        expect.anything(),
+        undefined,
+        expect.objectContaining({ cached: true }),
+      );
+    });
+
+    it("collapses two concurrent identical polls into one sendPoll", async () => {
+      // Before this change poll had no inflight dedupe at all, so both requests
+      // executed and the user received two polls.
+      const context = makeContext();
+      let release: (() => void) | undefined;
+      mocks.sendPoll.mockImplementation(async () => {
+        await new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        return { messageId: "poll-dedupe" };
+      });
+
+      const first = runPollOn(context, pollParams());
+      await vi.waitFor(() => expect(release).toBeDefined());
+      const second = runPollOn(context, pollParams());
+      release?.();
+      const [a, b] = await Promise.all([first, second]);
+
+      expect(mocks.sendPoll).toHaveBeenCalledTimes(1);
+      expect(a.respond).toHaveBeenCalledTimes(1);
+      expect(b.respond).toHaveBeenCalledWith(
+        true,
+        expect.anything(),
+        undefined,
+        expect.objectContaining({ cached: true }),
+      );
+    });
+
+    it("treats an omitted accountId and the explicit default account as one send", async () => {
+      // Canonicalization: both requests resolve to the same effective account,
+      // so reusing the idempotency key really is a retry of one operation.
+      const context = makeContext();
+      mockDeliverySuccess("m-canon");
+
+      await runSendOn(context, sendParams());
+      const { respond } = await runSendOn(context, sendParams({ accountId: "default" }));
+
+      expect(mocks.deliverOutboundPayloads).toHaveBeenCalledTimes(1);
+      expect(respond).toHaveBeenCalledWith(
+        true,
+        expect.anything(),
+        undefined,
+        expect.objectContaining({ cached: true }),
+      );
+    });
+
+    // Reverse coverage. Each case is two requests that share an idempotency key
+    // but are genuinely different operations. Collapsing any of them would
+    // silently drop a message, which is worse than delivering a duplicate.
+    it("still delivers the same idempotency key to a different channel", async () => {
+      const context = makeContext();
+      mockDeliverySuccess("m-two-channels");
+
+      const a = await runSendOn(context, sendParams({ channel: "slack" }));
+      const b = await runSendOn(context, sendParams({ channel: "telegram" }));
+
+      expect(mocks.deliverOutboundPayloads).toHaveBeenCalledTimes(2);
+      expect(a.respond).toHaveBeenCalledWith(
+        true,
+        expect.anything(),
+        undefined,
+        expect.objectContaining({ channel: "slack" }),
+      );
+      expect(b.respond).toHaveBeenCalledWith(
+        true,
+        expect.anything(),
+        undefined,
+        expect.objectContaining({ channel: "telegram" }),
+      );
+    });
+
+    it("still delivers the same idempotency key to a different account", async () => {
+      const context = makeContext();
+      mockDeliverySuccess("m-two-accounts");
+
+      await runSendOn(context, sendParams({ accountId: "default" }));
+      await runSendOn(context, sendParams({ accountId: "work" }));
+
+      expect(mocks.deliverOutboundPayloads).toHaveBeenCalledTimes(2);
+      const accounts = mocks.deliverOutboundPayloads.mock.calls.map(
+        (call) => (call[0] as { accountId?: string }).accountId,
+      );
+      expect(accounts).toEqual(["default", "work"]);
+    });
+
+    it("does not let an uncanonicalizable account reuse the default account result", async () => {
+      // "__proto__" normalizes to undefined. It must get its own dedupe bucket
+      // instead of inheriting the default account's cached response.
+      const context = makeContext();
+      mockDeliverySuccess("m-invalid-account");
+
+      await runSendOn(context, sendParams());
+      const { respond } = await runSendOn(context, sendParams({ accountId: "__proto__" }));
+
+      expect(mocks.deliverOutboundPayloads).toHaveBeenCalledTimes(2);
+      expect(respond).not.toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({ cached: true }),
+      );
+    });
+
+    it("still sends the same idempotency key as a poll on a different channel", async () => {
+      const context = makeContext();
+      mocks.sendPoll.mockResolvedValue({ messageId: "poll-x" });
+
+      await runPollOn(context, pollParams({ channel: "slack" }));
+      await runPollOn(context, pollParams({ channel: "telegram" }));
+
+      expect(mocks.sendPoll).toHaveBeenCalledTimes(2);
+    });
+
+    it("still sends the same idempotency key as a poll for a different account", async () => {
+      const context = makeContext();
+      mocks.sendPoll.mockResolvedValue({ messageId: "poll-y" });
+
+      await runPollOn(context, pollParams({ accountId: "default" }));
+      await runPollOn(context, pollParams({ accountId: "work" }));
+
+      expect(mocks.sendPoll).toHaveBeenCalledTimes(2);
+      // sendPoll is declared with no parameters in the mock factory above, so
+      // reach for the recorded arguments through unknown.
+      const pollCalls = mocks.sendPoll.mock.calls as unknown as Array<[{ accountId?: string }]>;
+      expect(pollCalls.map((call) => call[0].accountId)).toEqual(["default", "work"]);
+    });
+
+    it("still responds when a plugin account resolver throws", async () => {
+      // A throwing listAccountIds must not leave the request hanging with no
+      // response at all.
+      const context = makeContext();
+      mocks.getChannelPlugin.mockReturnValue({
+        outbound: { sendPoll: mocks.sendPoll },
+        config: {
+          listAccountIds: () => {
+            throw new Error("plugin blew up");
+          },
+        },
+      });
+
+      const { respond } = await runSendOn(context, sendParams());
+
+      expect(respond).toHaveBeenCalledTimes(1);
+      expect(respond).toHaveBeenCalledWith(
+        false,
+        undefined,
+        expect.objectContaining({ message: expect.stringContaining("plugin blew up") }),
+        expect.anything(),
+      );
+    });
+
+    it("still responds to a follower when the inflight worker rejects", async () => {
+      const context = makeContext();
+      let release: ((reason: Error) => void) | undefined;
+      mocks.deliverOutboundPayloads.mockImplementation(async () => {
+        await new Promise<never>((_resolve, reject) => {
+          release = reject;
+        });
+        return [];
+      });
+
+      const first = runSendOn(context, sendParams());
+      await vi.waitFor(() => expect(release).toBeDefined());
+      const second = runSendOn(context, sendParams());
+      release?.(new Error("delivery exploded"));
+      const [a, b] = await Promise.all([first, second]);
+
+      // Both the owner and the duplicate-suppressed follower must hear back.
+      expect(a.respond).toHaveBeenCalledTimes(1);
+      expect(b.respond).toHaveBeenCalledTimes(1);
+      expect(b.respond).toHaveBeenCalledWith(
+        false,
+        undefined,
+        expect.anything(),
+        expect.objectContaining({ cached: true }),
+      );
+    });
+
+    it("replays a completed result for a repeated send on the same route", async () => {
+      const context = makeContext();
+      mockDeliverySuccess("m-replay");
+
+      await runSendOn(context, sendParams());
+      const { respond } = await runSendOn(context, sendParams());
+
+      expect(mocks.deliverOutboundPayloads).toHaveBeenCalledTimes(1);
+      expect(respond).toHaveBeenCalledWith(true, expect.anything(), undefined, { cached: true });
+    });
+
+    it("replays a completed poll result on the same route", async () => {
+      const context = makeContext();
+      mocks.sendPoll.mockResolvedValue({ messageId: "poll-replay" });
+
+      await runPollOn(context, pollParams());
+      const { respond } = await runPollOn(context, pollParams());
+
+      expect(mocks.sendPoll).toHaveBeenCalledTimes(1);
+      expect(respond).toHaveBeenCalledWith(true, expect.anything(), undefined, { cached: true });
+    });
   });
 });

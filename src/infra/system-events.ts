@@ -23,9 +23,11 @@ export type SystemEvent = {
 
 const MAX_EVENTS = 20;
 
+// Dedupe identity is derived from the live queue, never from sticky "last seen"
+// state. A sticky lastText permanently suppressed a repeated event even after
+// the original was drained, which silently dropped events.
 type SessionQueue = {
   queue: SystemEvent[];
-  lastText: string | null;
   lastContextKey: string | null;
 };
 
@@ -64,7 +66,6 @@ function getOrCreateSessionQueue(sessionKey: string): SessionQueue {
   }
   const created: SessionQueue = {
     queue: [],
-    lastText: null,
     lastContextKey: null,
   };
   queues.set(key, created);
@@ -87,6 +88,66 @@ export function isSystemEventContextChanged(
   return normalized !== (existing?.lastContextKey ?? null);
 }
 
+// Total route identity. deliveryContextKey() is deliberately not used here: it
+// returns undefined whenever channel or `to` is missing, which would collapse
+// every partially-specified route into one bucket and dedupe away genuinely
+// different events.
+function deliveryRouteIdentity(context?: DeliveryContext): string {
+  if (!context) {
+    return "";
+  }
+  const threadId = context.threadId != null ? String(context.threadId) : "";
+  // JSON.stringify, not a `|` join: a delimiter-joined key lets distinct routes
+  // collide when a field itself contains the delimiter (to="a|b" would equal
+  // to="a", accountId="b"), and a collision here silently drops a real event.
+  return JSON.stringify([
+    context.channel ?? "",
+    context.to ?? "",
+    context.accountId ?? "",
+    threadId,
+  ]);
+}
+
+function areDeliveryContextsEqual(left?: DeliveryContext, right?: DeliveryContext): boolean {
+  return deliveryRouteIdentity(left) === deliveryRouteIdentity(right);
+}
+
+/**
+ * Two events are the same event only when their full identity matches: visible
+ * text, context key, trust flag, and delivery route. Text alone is far too
+ * coarse — the same wording routed to a different chat, or carrying different
+ * trust, is a genuinely different event and must not be swallowed.
+ */
+function isDuplicateSystemEvent(
+  existing: SystemEvent,
+  incoming: Pick<SystemEvent, "text" | "contextKey" | "deliveryContext" | "trusted">,
+): boolean {
+  return (
+    existing.text === incoming.text &&
+    (existing.contextKey ?? null) === (incoming.contextKey ?? null) &&
+    (existing.trusted ?? true) === (incoming.trusted ?? true) &&
+    areDeliveryContextsEqual(existing.deliveryContext, incoming.deliveryContext)
+  );
+}
+
+/**
+ * Scope of the duplicate search:
+ * - keyed events (contextKey set) scan the whole pending queue, because a
+ *   retried delivery for the same context can arrive after other events.
+ * - unkeyed events only compare against the queue tail, so a recurring status
+ *   line ("Node connected") can legitimately repeat later in the session.
+ */
+function findDuplicateInQueue(
+  queue: readonly SystemEvent[],
+  incoming: Pick<SystemEvent, "text" | "contextKey" | "deliveryContext" | "trusted">,
+): SystemEvent | undefined {
+  if ((incoming.contextKey ?? null) === null) {
+    const last = queue.at(-1);
+    return last && isDuplicateSystemEvent(last, incoming) ? last : undefined;
+  }
+  return queue.find((event) => isDuplicateSystemEvent(event, incoming));
+}
+
 export function enqueueSystemEvent(text: string, options: SystemEventOptions) {
   const key = requireSessionKey(options?.sessionKey);
   const entry = getOrCreateSessionQueue(key);
@@ -96,17 +157,24 @@ export function enqueueSystemEvent(text: string, options: SystemEventOptions) {
   }
   const normalizedContextKey = normalizeContextKey(options?.contextKey);
   const normalizedDeliveryContext = normalizeDeliveryContext(options?.deliveryContext);
-  entry.lastContextKey = normalizedContextKey;
-  if (entry.lastText === cleaned) {
-    return false;
-  } // skip consecutive duplicates
-  entry.lastText = cleaned;
-  entry.queue.push({
+  const trusted = options.trusted !== false;
+  const incoming = {
     text: cleaned,
-    ts: Date.now(),
     contextKey: normalizedContextKey,
     deliveryContext: normalizedDeliveryContext,
-    trusted: options.trusted !== false,
+    trusted,
+  };
+  if (findDuplicateInQueue(entry.queue, incoming)) {
+    return false;
+  }
+  // Only a contextful event may advance lastContextKey; an unkeyed event
+  // interleaving must not clobber the context the caller is tracking.
+  if (normalizedContextKey !== null) {
+    entry.lastContextKey = normalizedContextKey;
+  }
+  entry.queue.push({
+    ...incoming,
+    ts: Date.now(),
   });
   if (entry.queue.length > MAX_EVENTS) {
     entry.queue.shift();
@@ -122,7 +190,6 @@ export function drainSystemEventEntries(sessionKey: string): SystemEvent[] {
   }
   const out = entry.queue.map(cloneSystemEvent);
   entry.queue.length = 0;
-  entry.lastText = null;
   entry.lastContextKey = null;
   queues.delete(key);
   return out;

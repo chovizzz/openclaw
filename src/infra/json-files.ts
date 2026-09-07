@@ -6,6 +6,54 @@ function getErrorCode(err: unknown): string | undefined {
   return err instanceof Error ? (err as NodeJS.ErrnoException).code : undefined;
 }
 
+// Bounded retry policy for transient read races. This runs unattended, so the
+// budget is a hard cap: at most READ_MAX_ATTEMPTS reads with backoff
+// 50ms then 100ms, i.e. at most 150ms of added delay, then we give up. There is
+// deliberately no unbounded loop and no "retry forever until it parses".
+const READ_MAX_ATTEMPTS = 3;
+// Parse failures get a smaller budget than errno failures: a torn read usually
+// resolves on the very next attempt, while a genuinely corrupt file would
+// otherwise pay the full backoff on every single read.
+const PARSE_MAX_ATTEMPTS = 2;
+const RETRY_BASE_DELAY_MS = 50;
+
+// Codes that mean "try again shortly", not "this file is unusable".
+// ENOENT is deliberately absent: a missing file is the expected hot path and
+// must return null immediately rather than stalling for 150ms.
+const TRANSIENT_READ_ERROR_CODES = new Set(["EAGAIN", "EBUSY", "EMFILE", "ENFILE", "EINTR"]);
+// On Windows a sharing violation raised by an in-progress copy fallback, an
+// antivirus scanner, or the search indexer surfaces as EPERM/EACCES. On POSIX
+// those are real permission failures and retrying only delays the error.
+const WINDOWS_TRANSIENT_READ_ERROR_CODES = new Set(["EPERM", "EACCES"]);
+
+function readErrorCode(err: unknown): string | undefined {
+  const fromError = getErrorCode(err);
+  if (fromError) {
+    return fromError;
+  }
+  // Wrapped/plain rejection values still carry a usable code in practice.
+  if (err && typeof err === "object" && "code" in err) {
+    const code = (err as { code?: unknown }).code;
+    return typeof code === "string" ? code : undefined;
+  }
+  return undefined;
+}
+
+function isTransientReadError(err: unknown): boolean {
+  const code = readErrorCode(err);
+  if (!code) {
+    return false;
+  }
+  return (
+    TRANSIENT_READ_ERROR_CODES.has(code) ||
+    (process.platform === "win32" && WINDOWS_TRANSIENT_READ_ERROR_CODES.has(code))
+  );
+}
+
+function retryDelay(attempt: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, RETRY_BASE_DELAY_MS * 2 ** attempt));
+}
+
 async function replaceFileWithWindowsFallback(tempPath: string, filePath: string, mode: number) {
   try {
     await fs.rename(tempPath, filePath);
@@ -26,12 +74,47 @@ async function replaceFileWithWindowsFallback(tempPath: string, filePath: string
   await fs.rm(tempPath, { force: true }).catch(() => undefined);
 }
 
+/**
+ * Reads and parses a JSON file, returning null when it is absent or unreadable.
+ *
+ * Reads are retried a bounded number of times for two distinct races:
+ *  - transient errno failures (EBUSY/EAGAIN/..., plus Windows sharing
+ *    violations), and
+ *  - a torn read, which is observable only as a JSON parse failure. The Windows
+ *    rename fallback in replaceFileWithWindowsFallback copies straight onto the
+ *    live destination and is not atomic, so a concurrent reader can briefly see
+ *    a partially written file.
+ *
+ * `attempt` is a single shared budget across both cases, so the total is capped
+ * at READ_MAX_ATTEMPTS reads and ~150ms of added delay no matter how the
+ * failures interleave. After the budget is exhausted the long-standing contract
+ * is preserved and null is returned rather than throwing, because every caller
+ * treats null as "absent or unreadable" and substitutes its own default.
+ */
 export async function readJsonFile<T>(filePath: string): Promise<T | null> {
-  try {
-    const raw = await fs.readFile(filePath, "utf8");
-    return JSON.parse(raw) as T;
-  } catch {
-    return null;
+  for (let attempt = 0; ; attempt += 1) {
+    let raw: string;
+    try {
+      raw = await fs.readFile(filePath, "utf8");
+    } catch (err) {
+      if (attempt + 1 < READ_MAX_ATTEMPTS && isTransientReadError(err)) {
+        await retryDelay(attempt);
+        continue;
+      }
+      // ENOENT and any other non-transient error: nothing to wait for.
+      return null;
+    }
+    try {
+      return JSON.parse(raw) as T;
+    } catch {
+      if (attempt + 1 < PARSE_MAX_ATTEMPTS) {
+        // Give an in-flight non-atomic write one chance to land.
+        await retryDelay(attempt);
+        continue;
+      }
+      // Still unparseable: treat the file as corrupt, same as before.
+      return null;
+    }
   }
 }
 

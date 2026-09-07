@@ -1,5 +1,6 @@
 import { stripInboundMetadata } from "../auto-reply/reply/strip-inbound-meta.js";
 import { normalizeOptionalString, readStringValue } from "../shared/string-coerce.js";
+import { stripInlineDirectiveTagsForDisplay } from "../utils/directive-tags.js";
 
 const DEDUPE_TIMESTAMP_WINDOW_MS = 5 * 60 * 1000;
 
@@ -34,7 +35,12 @@ function extractComparableText(message: unknown): string | undefined {
   if (!joined) {
     return undefined;
   }
-  const visible = role === "user" ? stripInboundMetadata(joined) : joined;
+  // Also strip inline directive tags before comparing. After a reload the Claude
+  // CLI re-emits the same reply with its directive tags rendered differently, so
+  // comparing raw text lets the identical reply through twice (#125030).
+  const visible = stripInlineDirectiveTagsForDisplay(
+    role === "user" ? stripInboundMetadata(joined) : joined,
+  ).text;
   const normalized = visible.replace(/\s+/g, " ").trim();
   return normalized || undefined;
 }

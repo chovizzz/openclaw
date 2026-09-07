@@ -6,6 +6,7 @@ import { getDefaultRedactPatterns, redactSensitiveText } from "../logging/redact
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import { parseAgentSessionKey } from "../routing/session-key.js";
 import { readStringValue } from "../shared/string-coerce.js";
+import { truncateUtf16Safe } from "../utils.js";
 import { DEFAULT_WS_SLOW_MS, getGatewayWsLogStyle } from "./ws-logging.js";
 
 const LOG_VALUE_LIMIT = 240;
@@ -120,9 +121,12 @@ export function formatForLog(value: unknown): string {
       }
       const combined = parts.filter(Boolean).join(": ").trim();
       if (combined) {
-        return combined.length > LOG_VALUE_LIMIT
-          ? `${combined.slice(0, LOG_VALUE_LIMIT)}...`
-          : combined;
+        // Redact BEFORE truncating. Truncating first can cut a token in half so
+        // the pattern no longer matches, leaving most of the secret in the log.
+        const redacted = redactSensitiveText(combined, WS_LOG_REDACT_OPTIONS);
+        return redacted.length > LOG_VALUE_LIMIT
+          ? `${truncateUtf16Safe(redacted, LOG_VALUE_LIMIT)}...`
+          : redacted;
       }
     }
     if (value && typeof value === "object") {
@@ -135,9 +139,10 @@ export function formatForLog(value: unknown): string {
         if (code) {
           parts.push(`code=${code}`);
         }
-        const combined = parts.join(": ").trim();
+        // Same redact-then-truncate order as the Error and string branches.
+        const combined = redactSensitiveText(parts.join(": ").trim(), WS_LOG_REDACT_OPTIONS);
         return combined.length > LOG_VALUE_LIMIT
-          ? `${combined.slice(0, LOG_VALUE_LIMIT)}...`
+          ? `${truncateUtf16Safe(combined, LOG_VALUE_LIMIT)}...`
           : combined;
       }
     }
@@ -150,7 +155,7 @@ export function formatForLog(value: unknown): string {
     }
     const redacted = redactSensitiveText(str, WS_LOG_REDACT_OPTIONS);
     return redacted.length > LOG_VALUE_LIMIT
-      ? `${redacted.slice(0, LOG_VALUE_LIMIT)}...`
+      ? `${truncateUtf16Safe(redacted, LOG_VALUE_LIMIT)}...`
       : redacted;
   } catch {
     return String(value);
@@ -162,7 +167,7 @@ function compactPreview(input: string, maxLen = 160): string {
   if (oneLine.length <= maxLen) {
     return oneLine;
   }
-  return `${oneLine.slice(0, Math.max(0, maxLen - 1))}…`;
+  return `${truncateUtf16Safe(oneLine, Math.max(0, maxLen - 1))}…`;
 }
 
 export function summarizeAgentEventForWsLog(payload: unknown): Record<string, unknown> {

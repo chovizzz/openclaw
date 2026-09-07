@@ -14,7 +14,11 @@ function formatMediaAttachedLine(params: {
       : "[media attached: ";
   const typePart = params.type?.trim() ? ` (${params.type.trim()})` : "";
   const urlRaw = params.url?.trim();
-  const urlPart = urlRaw ? ` | ${urlRaw}` : "";
+  // When the channel mirrors the local path into MediaUrl (Telegram album media
+  // is the canonical case), rendering ` | ${url}` adds no information and just
+  // clutters the prompt with `path | path` duplication (issue #47587). Genuinely
+  // distinct remote URLs still render.
+  const urlPart = urlRaw && urlRaw !== params.path.trim() ? ` | ${urlRaw}` : "";
   return `${prefix}${params.path}${typePart}${urlPart}]`;
 }
 
