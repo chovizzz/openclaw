@@ -7,6 +7,7 @@ import {
   resolveGatewaySystemdServiceName,
 } from "../daemon/constants.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
+import { formatErrorMessage } from "./errors.js";
 import { cleanStaleGatewayProcessesSync, findGatewayPidsOnPortSync } from "./restart-stale-pids.js";
 import { relaunchGatewayScheduledTask } from "./windows-task-restart.js";
 
@@ -201,6 +202,25 @@ export type RestartDeferralHooks = {
   onCheckError?: (err: unknown) => void;
 };
 
+type RestartDeferralHookName = "onDeferring" | "onReady" | "onTimeout" | "onCheckError";
+
+/**
+ * Invoke a caller-supplied restart deferral hook defensively. Hook callbacks
+ * are diagnostics/state-bookkeeping for the caller; a throwing hook must
+ * never prevent the `emitGatewayRestart()` call that follows it, and must
+ * never crash the process from inside a `setInterval` callback (an uncaught
+ * throw there becomes an unhandled exception with no restart emitted).
+ */
+function safeInvokeRestartDeferralHook(name: RestartDeferralHookName, invoke: () => void): void {
+  try {
+    invoke();
+  } catch (err) {
+    restartLog.warn(
+      `restart deferral hook "${name}" failed; continuing with restart: ${formatErrorMessage(err)}`,
+    );
+  }
+}
+
 /**
  * Poll pending work until it drains (or times out), then emit one restart signal.
  * Shared by both the direct RPC restart path and the config watcher path.
@@ -220,17 +240,23 @@ export function deferGatewayRestartUntilIdle(opts: {
   try {
     pending = opts.getPendingCount();
   } catch (err) {
-    opts.hooks?.onCheckError?.(err);
+    if (opts.hooks?.onCheckError) {
+      safeInvokeRestartDeferralHook("onCheckError", () => opts.hooks?.onCheckError?.(err));
+    }
     emitGatewayRestart();
     return;
   }
   if (pending <= 0) {
-    opts.hooks?.onReady?.();
+    if (opts.hooks?.onReady) {
+      safeInvokeRestartDeferralHook("onReady", () => opts.hooks?.onReady?.());
+    }
     emitGatewayRestart();
     return;
   }
 
-  opts.hooks?.onDeferring?.(pending);
+  if (opts.hooks?.onDeferring) {
+    safeInvokeRestartDeferralHook("onDeferring", () => opts.hooks?.onDeferring?.(pending));
+  }
   const startedAt = Date.now();
   const poll = setInterval(() => {
     let current: number;
@@ -239,14 +265,18 @@ export function deferGatewayRestartUntilIdle(opts: {
     } catch (err) {
       clearInterval(poll);
       activeDeferralPolls.delete(poll);
-      opts.hooks?.onCheckError?.(err);
+      if (opts.hooks?.onCheckError) {
+        safeInvokeRestartDeferralHook("onCheckError", () => opts.hooks?.onCheckError?.(err));
+      }
       emitGatewayRestart();
       return;
     }
     if (current <= 0) {
       clearInterval(poll);
       activeDeferralPolls.delete(poll);
-      opts.hooks?.onReady?.();
+      if (opts.hooks?.onReady) {
+        safeInvokeRestartDeferralHook("onReady", () => opts.hooks?.onReady?.());
+      }
       emitGatewayRestart();
       return;
     }
@@ -254,7 +284,11 @@ export function deferGatewayRestartUntilIdle(opts: {
     if (elapsedMs >= maxWaitMs) {
       clearInterval(poll);
       activeDeferralPolls.delete(poll);
-      opts.hooks?.onTimeout?.(current, elapsedMs);
+      if (opts.hooks?.onTimeout) {
+        safeInvokeRestartDeferralHook("onTimeout", () =>
+          opts.hooks?.onTimeout?.(current, elapsedMs),
+        );
+      }
       emitGatewayRestart();
     }
   }, pollMs);

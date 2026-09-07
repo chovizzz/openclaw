@@ -221,6 +221,59 @@ export function buildGatewayCronService(params: {
     return { runtimeConfig, agentId, sessionKey };
   };
 
+  /**
+   * Sends a cron failure announce and, when it does not succeed, falls back
+   * to an in-agent system event so the failure alert is never dropped
+   * silently. Never throws and never leaves an unhandled rejection: any
+   * failure from the announce call itself (including an unexpected
+   * rejection, not just a `false` "dropped" result) or from resolving the
+   * fallback session key / enqueuing the system event is caught and logged.
+   * Runs the fallback only when the announce did not resolve `true`, so a
+   * successful announce can never be duplicated by the fallback.
+   */
+  async function announceCronFailureWithFallback(input: {
+    runtimeConfig: ReturnType<typeof loadConfig>;
+    agentId: string;
+    jobId: string;
+    target: { channel?: string; to?: string; accountId?: string; sessionKey?: string };
+    announceMessage: string;
+    fallbackMessage: string;
+    requestedSessionKey?: string;
+  }): Promise<void> {
+    let delivered = false;
+    try {
+      delivered = await sendFailureNotificationAnnounce(
+        params.deps,
+        input.runtimeConfig,
+        input.agentId,
+        input.jobId,
+        input.target,
+        input.announceMessage,
+      );
+    } catch (err) {
+      cronLogger.warn(
+        { jobId: input.jobId, err: formatErrorMessage(err) },
+        "cron: failure alert announce threw, falling back to system event",
+      );
+    }
+    if (delivered) {
+      return;
+    }
+    try {
+      const sessionKey = resolveCronSessionKey({
+        runtimeConfig: input.runtimeConfig,
+        agentId: input.agentId,
+        requestedSessionKey: input.requestedSessionKey,
+      });
+      enqueueSystemEvent(input.fallbackMessage, { sessionKey });
+    } catch (err) {
+      cronLogger.warn(
+        { jobId: input.jobId, err: formatErrorMessage(err) },
+        "cron: failure alert fallback system event failed",
+      );
+    }
+  }
+
   const defaultAgentId = resolveDefaultAgentId(params.cfg);
   const runLogPrune = resolveCronRunLogPruneOptions(params.cfg.cron?.runLog);
   const resolveSessionStorePath = (agentId?: string) =>
@@ -349,23 +402,41 @@ export function buildGatewayCronService(params: {
         return;
       }
 
-      const target = await resolveDeliveryTarget(runtimeConfig, agentId, {
-        channel,
-        to,
-        accountId,
-      });
-      if (!target.ok) {
-        throw target.error;
+      // Announce mode: fall back to an in-agent system event when target
+      // resolution or outbound delivery fails, so a transient channel/account
+      // problem does not silently drop the failure alert entirely — the
+      // operator still sees it via the agent's own event stream. This runs
+      // only on failure, so it can never duplicate a successful announce.
+      try {
+        const target = await resolveDeliveryTarget(runtimeConfig, agentId, {
+          channel,
+          to,
+          accountId,
+        });
+        if (!target.ok) {
+          throw target.error;
+        }
+        await deliverOutboundPayloads({
+          cfg: runtimeConfig,
+          channel: target.channel,
+          to: target.to,
+          accountId: target.accountId,
+          threadId: target.threadId,
+          payloads: [{ text }],
+          deps: createOutboundSendDeps(params.deps),
+        });
+      } catch (err) {
+        cronLogger.warn(
+          { jobId: job.id, err: formatErrorMessage(err) },
+          "cron: failure alert announce delivery failed, falling back to system event",
+        );
+        const sessionKey = resolveCronSessionKey({
+          runtimeConfig,
+          agentId,
+          requestedSessionKey: job.sessionKey,
+        });
+        enqueueSystemEvent(text, { sessionKey });
       }
-      await deliverOutboundPayloads({
-        cfg: runtimeConfig,
-        channel: target.channel,
-        to: target.to,
-        accountId: target.accountId,
-        threadId: target.threadId,
-        payloads: [{ text }],
-        deps: createOutboundSendDeps(params.deps),
-      });
     },
     log: getChildLogger({ module: "cron", storePath }),
     onEvent: (evt) => {
@@ -463,38 +534,40 @@ export function buildGatewayCronService(params: {
                 }
               } else if (failureDest.mode === "announce") {
                 const { agentId, cfg: runtimeConfig } = resolveCronAgent(job.agentId);
-                void sendFailureNotificationAnnounce(
-                  params.deps,
+                void announceCronFailureWithFallback({
                   runtimeConfig,
                   agentId,
-                  job.id,
-                  {
+                  jobId: job.id,
+                  target: {
                     channel: failureDest.channel,
                     to: failureDest.to,
                     accountId: failureDest.accountId,
                     sessionKey: job.sessionKey,
                   },
-                  `⚠️ ${failureMessage}`,
-                );
+                  announceMessage: `⚠️ ${failureMessage}`,
+                  fallbackMessage: failureMessage,
+                  requestedSessionKey: job.sessionKey,
+                });
               }
             } else {
               // No explicit failureDestination — fall back to primary delivery channel (#60608)
               const primaryPlan = resolveCronDeliveryPlan(job);
               if (primaryPlan.mode === "announce" && primaryPlan.requested) {
                 const { agentId, cfg: runtimeConfig } = resolveCronAgent(job.agentId);
-                void sendFailureNotificationAnnounce(
-                  params.deps,
+                void announceCronFailureWithFallback({
                   runtimeConfig,
                   agentId,
-                  job.id,
-                  {
+                  jobId: job.id,
+                  target: {
                     channel: primaryPlan.channel,
                     to: primaryPlan.to,
                     accountId: primaryPlan.accountId,
                     sessionKey: job.sessionKey,
                   },
-                  `⚠️ ${failureMessage}`,
-                );
+                  announceMessage: `⚠️ ${failureMessage}`,
+                  fallbackMessage: failureMessage,
+                  requestedSessionKey: job.sessionKey,
+                });
               }
             }
           }

@@ -59,14 +59,16 @@ describe("sendFailureNotificationAnnounce", () => {
     const deps = {} as never;
     const cfg = {} as never;
 
-    await sendFailureNotificationAnnounce(
-      deps,
-      cfg,
-      "main",
-      "job-1",
-      { channel: "telegram", to: "123", accountId: "bot-a" },
-      "Cron failed",
-    );
+    await expect(
+      sendFailureNotificationAnnounce(
+        deps,
+        cfg,
+        "main",
+        "job-1",
+        { channel: "telegram", to: "123", accountId: "bot-a" },
+        "Cron failed",
+      ),
+    ).resolves.toBe(true);
 
     expect(mocks.resolveDeliveryTarget).toHaveBeenCalledWith(cfg, "main", {
       channel: "telegram",
@@ -116,20 +118,22 @@ describe("sendFailureNotificationAnnounce", () => {
     });
   });
 
-  it("does not send when target resolution fails", async () => {
+  it("does not send when target resolution fails, and reports the alert as dropped", async () => {
     mocks.resolveDeliveryTarget.mockResolvedValue({
       ok: false,
       error: new Error("target missing"),
     });
 
-    await sendFailureNotificationAnnounce(
-      {} as never,
-      {} as never,
-      "main",
-      "job-1",
-      { channel: "telegram", to: "123" },
-      "Cron failed",
-    );
+    await expect(
+      sendFailureNotificationAnnounce(
+        {} as never,
+        {} as never,
+        "main",
+        "job-1",
+        { channel: "telegram", to: "123" },
+        "Cron failed",
+      ),
+    ).resolves.toBe(false);
 
     expect(mocks.deliverOutboundPayloads).not.toHaveBeenCalled();
     expect(mocks.warn).toHaveBeenCalledWith(
@@ -138,7 +142,7 @@ describe("sendFailureNotificationAnnounce", () => {
     );
   });
 
-  it("swallows outbound delivery errors after logging", async () => {
+  it("logs outbound delivery errors and reports the alert as dropped (not thrown)", async () => {
     mocks.deliverOutboundPayloads.mockRejectedValue(new Error("send failed"));
 
     await expect(
@@ -150,7 +154,7 @@ describe("sendFailureNotificationAnnounce", () => {
         { channel: "telegram", to: "123" },
         "Cron failed",
       ),
-    ).resolves.toBeUndefined();
+    ).resolves.toBe(false);
 
     expect(mocks.warn).toHaveBeenCalledWith(
       expect.objectContaining({

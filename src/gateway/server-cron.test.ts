@@ -13,13 +13,22 @@ const {
   fetchWithSsrFGuardMock,
   runCronIsolatedAgentTurnMock,
   cleanupBrowserSessionsForLifecycleEndMock,
+  resolveDeliveryTargetMock,
+  deliverOutboundPayloadsMock,
 } = vi.hoisted(() => ({
   enqueueSystemEventMock: vi.fn(),
   requestHeartbeatNowMock: vi.fn(),
   loadConfigMock: vi.fn(),
   fetchWithSsrFGuardMock: vi.fn(),
-  runCronIsolatedAgentTurnMock: vi.fn(async () => ({ status: "ok" as const, summary: "ok" })),
+  runCronIsolatedAgentTurnMock: vi.fn(
+    async (): Promise<{ status: "ok" | "error"; summary?: string; error?: string }> => ({
+      status: "ok",
+      summary: "ok",
+    }),
+  ),
   cleanupBrowserSessionsForLifecycleEndMock: vi.fn(async () => {}),
+  resolveDeliveryTargetMock: vi.fn(),
+  deliverOutboundPayloadsMock: vi.fn(),
 }));
 
 function enqueueSystemEvent(...args: unknown[]) {
@@ -65,6 +74,14 @@ vi.mock("../browser-lifecycle-cleanup.js", () => ({
   cleanupBrowserSessionsForLifecycleEnd: cleanupBrowserSessionsForLifecycleEndMock,
 }));
 
+vi.mock("../cron/isolated-agent/delivery-target.js", () => ({
+  resolveDeliveryTarget: resolveDeliveryTargetMock,
+}));
+
+vi.mock("../infra/outbound/deliver.js", () => ({
+  deliverOutboundPayloads: deliverOutboundPayloadsMock,
+}));
+
 import { buildGatewayCronService } from "./server-cron.js";
 
 function createCronConfig(name: string): OpenClawConfig {
@@ -87,6 +104,8 @@ describe("buildGatewayCronService", () => {
     fetchWithSsrFGuardMock.mockClear();
     runCronIsolatedAgentTurnMock.mockClear();
     cleanupBrowserSessionsForLifecycleEndMock.mockClear();
+    resolveDeliveryTargetMock.mockReset();
+    deliverOutboundPayloadsMock.mockReset();
   });
 
   it("routes main-target jobs to the scoped session for enqueue + wake", async () => {
@@ -259,5 +278,257 @@ describe("buildGatewayCronService", () => {
     } finally {
       state.cron.stop();
     }
+  });
+
+  // Regression coverage for the announce-mode failure-alert delivery path in
+  // sendCronFailureAlert: a channel/account failure must fall back to an
+  // in-agent system event instead of being dropped silently (#129908-style
+  // fix ported for this fork's single-path failure-alert architecture).
+  describe("failure alert announce delivery fallback", () => {
+    function createFailureAlertCronConfig(name: string): OpenClawConfig {
+      const cfg = createCronConfig(name);
+      return {
+        ...cfg,
+        cron: {
+          ...cfg.cron,
+          failureAlert: { enabled: true, after: 1, cooldownMs: 0 },
+        },
+      } as OpenClawConfig;
+    }
+
+    it("falls back to a system event when announce delivery fails, instead of dropping the alert", async () => {
+      const cfg = createFailureAlertCronConfig("server-cron-failure-alert-drop");
+      loadConfigMock.mockReturnValue(cfg);
+      resolveDeliveryTargetMock.mockResolvedValue({
+        ok: true,
+        channel: "telegram",
+        to: "ops-chat",
+        mode: "explicit",
+      });
+      deliverOutboundPayloadsMock.mockRejectedValue(new Error("channel unavailable"));
+      runCronIsolatedAgentTurnMock.mockResolvedValueOnce({
+        status: "error",
+        error: "boom",
+      });
+
+      const state = buildGatewayCronService({
+        cfg,
+        deps: {} as CliDeps,
+        broadcast: () => {},
+      });
+      try {
+        const job = await state.cron.add({
+          name: "flaky-report",
+          enabled: true,
+          schedule: { kind: "every", everyMs: 60_000 },
+          sessionTarget: "isolated",
+          wakeMode: "next-heartbeat",
+          payload: { kind: "agentTurn", message: "run report" },
+          delivery: {
+            mode: "announce",
+            channel: "telegram",
+            to: "ops-chat",
+            // Route the separate per-run primary-channel notice (onEvent
+            // handler) to a webhook so it does not also hit
+            // deliverOutboundPayloadsMock, keeping this test isolated to the
+            // sendCronFailureAlert (threshold-based) announce path under test.
+            failureDestination: { mode: "webhook", to: "http://example.invalid/hook" },
+          },
+        });
+
+        await state.cron.run(job.id, "force");
+
+        expect(deliverOutboundPayloadsMock).toHaveBeenCalledOnce();
+        // The failed announce must not be dropped silently: it lands as a
+        // system event so the operator/agent still sees it.
+        expect(enqueueSystemEventMock).toHaveBeenCalledWith(
+          expect.stringContaining('Cron job "flaky-report" failed 1 times'),
+          expect.any(Object),
+        );
+      } finally {
+        state.cron.stop();
+      }
+    });
+
+    it("does not duplicate the alert via a system event when announce delivery succeeds", async () => {
+      const cfg = createFailureAlertCronConfig("server-cron-failure-alert-no-dup");
+      loadConfigMock.mockReturnValue(cfg);
+      resolveDeliveryTargetMock.mockResolvedValue({
+        ok: true,
+        channel: "telegram",
+        to: "ops-chat",
+        mode: "explicit",
+      });
+      deliverOutboundPayloadsMock.mockResolvedValue(undefined);
+      runCronIsolatedAgentTurnMock.mockResolvedValueOnce({
+        status: "error",
+        error: "boom",
+      });
+
+      const state = buildGatewayCronService({
+        cfg,
+        deps: {} as CliDeps,
+        broadcast: () => {},
+      });
+      try {
+        const job = await state.cron.add({
+          name: "flaky-report-ok",
+          enabled: true,
+          schedule: { kind: "every", everyMs: 60_000 },
+          sessionTarget: "isolated",
+          wakeMode: "next-heartbeat",
+          payload: { kind: "agentTurn", message: "run report" },
+          delivery: {
+            mode: "announce",
+            channel: "telegram",
+            to: "ops-chat",
+            // Route the separate per-run primary-channel notice (onEvent
+            // handler) to a webhook so it does not also hit
+            // deliverOutboundPayloadsMock, keeping this test isolated to the
+            // sendCronFailureAlert (threshold-based) announce path under test.
+            failureDestination: { mode: "webhook", to: "http://example.invalid/hook" },
+          },
+        });
+
+        await state.cron.run(job.id, "force");
+
+        expect(deliverOutboundPayloadsMock).toHaveBeenCalledOnce();
+        // A successful announce must not also enqueue a duplicate system-event alert.
+        expect(enqueueSystemEventMock).not.toHaveBeenCalled();
+      } finally {
+        state.cron.stop();
+      }
+    });
+  });
+
+  // Regression coverage for the separate per-run "primary delivery channel"
+  // failure notice (onEvent handler, #60608) which routes through
+  // sendFailureNotificationAnnounce (src/cron/delivery.ts) via the shared
+  // announceCronFailureWithFallback helper. Distinct from the
+  // sendCronFailureAlert (threshold-based) path covered above.
+  describe("primary-channel failure notice fallback (onEvent handler)", () => {
+    it("falls back to a system event when the primary-channel announce fails", async () => {
+      const cfg = createCronConfig("server-cron-primary-announce-drop");
+      loadConfigMock.mockReturnValue(cfg);
+      resolveDeliveryTargetMock.mockResolvedValue({
+        ok: true,
+        channel: "telegram",
+        to: "ops-chat",
+        mode: "explicit",
+      });
+      deliverOutboundPayloadsMock.mockRejectedValue(new Error("channel unavailable"));
+      runCronIsolatedAgentTurnMock.mockResolvedValueOnce({
+        status: "error",
+        error: "boom",
+      });
+
+      const state = buildGatewayCronService({
+        cfg,
+        deps: {} as CliDeps,
+        broadcast: () => {},
+      });
+      try {
+        const job = await state.cron.add({
+          name: "primary-channel-flaky",
+          enabled: true,
+          schedule: { kind: "every", everyMs: 60_000 },
+          sessionTarget: "isolated",
+          wakeMode: "next-heartbeat",
+          payload: { kind: "agentTurn", message: "run report" },
+          delivery: { mode: "announce", channel: "telegram", to: "ops-chat" },
+        });
+
+        await state.cron.run(job.id, "force");
+
+        expect(deliverOutboundPayloadsMock).toHaveBeenCalledOnce();
+        expect(enqueueSystemEventMock).toHaveBeenCalledWith(
+          expect.stringContaining('Cron job "primary-channel-flaky" failed'),
+          expect.any(Object),
+        );
+      } finally {
+        state.cron.stop();
+      }
+    });
+
+    it("does not duplicate the alert via a system event when the primary-channel announce succeeds", async () => {
+      const cfg = createCronConfig("server-cron-primary-announce-ok");
+      loadConfigMock.mockReturnValue(cfg);
+      resolveDeliveryTargetMock.mockResolvedValue({
+        ok: true,
+        channel: "telegram",
+        to: "ops-chat",
+        mode: "explicit",
+      });
+      deliverOutboundPayloadsMock.mockResolvedValue(undefined);
+      runCronIsolatedAgentTurnMock.mockResolvedValueOnce({
+        status: "error",
+        error: "boom",
+      });
+
+      const state = buildGatewayCronService({
+        cfg,
+        deps: {} as CliDeps,
+        broadcast: () => {},
+      });
+      try {
+        const job = await state.cron.add({
+          name: "primary-channel-ok",
+          enabled: true,
+          schedule: { kind: "every", everyMs: 60_000 },
+          sessionTarget: "isolated",
+          wakeMode: "next-heartbeat",
+          payload: { kind: "agentTurn", message: "run report" },
+          delivery: { mode: "announce", channel: "telegram", to: "ops-chat" },
+        });
+
+        await state.cron.run(job.id, "force");
+
+        expect(deliverOutboundPayloadsMock).toHaveBeenCalledOnce();
+        expect(enqueueSystemEventMock).not.toHaveBeenCalled();
+      } finally {
+        state.cron.stop();
+      }
+    });
+
+    it("falls back to a system event (and does not throw) when target resolution itself rejects", async () => {
+      // Regression guard: sendFailureNotificationAnnounce must never let an
+      // unexpected rejection (as opposed to a `{ ok: false }` result) escape
+      // and skip the fallback, and announceCronFailureWithFallback must never
+      // produce an unhandled rejection from this.
+      const cfg = createCronConfig("server-cron-primary-announce-resolver-throws");
+      loadConfigMock.mockReturnValue(cfg);
+      resolveDeliveryTargetMock.mockRejectedValue(new Error("resolver blew up"));
+      runCronIsolatedAgentTurnMock.mockResolvedValueOnce({
+        status: "error",
+        error: "boom",
+      });
+
+      const state = buildGatewayCronService({
+        cfg,
+        deps: {} as CliDeps,
+        broadcast: () => {},
+      });
+      try {
+        const job = await state.cron.add({
+          name: "primary-channel-resolver-throws",
+          enabled: true,
+          schedule: { kind: "every", everyMs: 60_000 },
+          sessionTarget: "isolated",
+          wakeMode: "next-heartbeat",
+          payload: { kind: "agentTurn", message: "run report" },
+          delivery: { mode: "announce", channel: "telegram", to: "ops-chat" },
+        });
+
+        await expect(state.cron.run(job.id, "force")).resolves.toBeDefined();
+
+        expect(deliverOutboundPayloadsMock).not.toHaveBeenCalled();
+        expect(enqueueSystemEventMock).toHaveBeenCalledWith(
+          expect.stringContaining('Cron job "primary-channel-resolver-throws" failed'),
+          expect.any(Object),
+        );
+      } finally {
+        state.cron.stop();
+      }
+    });
   });
 });
