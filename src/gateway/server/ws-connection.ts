@@ -320,6 +320,14 @@ export function attachGatewayWsConnectionHandler(params: AttachGatewayWsConnecti
     });
 
     const handshakeTimeoutMs = getPreauthHandshakeTimeoutMsFromEnv();
+    // The challenge send above can fail synchronously, which retires the
+    // transport and runs close() while handshakeTimer is still undefined — so
+    // close()'s clearTimeout has nothing to cancel. Arming the timer after that
+    // would leave it running on a dead connection and fire handshake-timeout on
+    // it later.
+    if (closed) {
+      return;
+    }
     handshakeTimer = setTimeout(() => {
       if (!client) {
         handshakeState = "failed";
@@ -357,9 +365,17 @@ export function attachGatewayWsConnectionHandler(params: AttachGatewayWsConnecti
       clearHandshakeTimer: () => clearTimeout(handshakeTimer),
       getClient: () => client,
       setClient: (next) => {
+        // The socket may have closed while the handshake/connect flow was
+        // still in flight (e.g. an aborted connect). Refuse to register a
+        // client for an already-closed connection so it doesn't become a
+        // zombie entry in `clients` that never gets cleaned up.
+        if (closed) {
+          return false;
+        }
         releasePreauthBudget();
         client = next;
         clients.add(next);
+        return true;
       },
       setHandshakeState: (next) => {
         handshakeState = next;

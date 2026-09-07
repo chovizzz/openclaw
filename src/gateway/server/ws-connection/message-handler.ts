@@ -183,7 +183,7 @@ export function attachGatewayWsMessageHandler(params: {
   isClosed: () => boolean;
   clearHandshakeTimer: () => void;
   getClient: () => GatewayWsClient | null;
-  setClient: (next: GatewayWsClient) => void;
+  setClient: (next: GatewayWsClient) => boolean;
   setHandshakeState: (state: "pending" | "connected" | "failed") => void;
   setCloseCause: (cause: string, meta?: Record<string, unknown>) => void;
   setLastFrameMeta: (meta: { type?: string; method?: string; id?: string }) => void;
@@ -1150,6 +1150,15 @@ export function attachGatewayWsMessageHandler(params: {
         const instanceId = connectParams.client.instanceId;
         const presenceKey = shouldTrackPresence ? (device?.id ?? instanceId ?? connId) : undefined;
 
+        if (isClosed()) {
+          // The socket closed while this connect handshake was still working
+          // through its async auth/pairing steps. Registering a client (and
+          // logging/presence side effects) for an already-dead socket would
+          // leave a stale, unreachable entry behind. Drop it silently.
+          setCloseCause("connect-aborted-before-register", { connId, auth: authMethod });
+          return;
+        }
+
         logWs("in", "connect", {
           connId,
           client: connectParams.client.id,
@@ -1244,7 +1253,14 @@ export function attachGatewayWsMessageHandler(params: {
           canvasCapabilityExpiresAtMs,
         };
         setSocketMaxPayload(socket, MAX_PAYLOAD_BYTES);
-        setClient(nextClient);
+        if (!setClient(nextClient)) {
+          // Closed between the isClosed() check above and here (e.g. the
+          // socket dropped while awaiting hello/token issuance). Bail before
+          // any node registration or other side effects run for a client
+          // that will never be reachable.
+          setCloseCause("connect-aborted-before-register", { connId, auth: authMethod });
+          return;
+        }
         setHandshakeState("connected");
         if (role === "node") {
           const context = buildRequestContext();

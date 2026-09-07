@@ -6,6 +6,11 @@ import { createPreauthConnectionBudget } from "./preauth-connection-budget.js";
 import { attachGatewayWsConnectionHandler } from "./ws-connection.js";
 import type { GatewayWsClient } from "./ws-types.js";
 
+const attachGatewayWsMessageHandlerMock = vi.fn();
+vi.mock("./ws-connection/message-handler.js", () => ({
+  attachGatewayWsMessageHandler: (params: unknown) => attachGatewayWsMessageHandlerMock(params),
+}));
+
 const AUTH_NONE = {
   mode: "none" as const,
   token: undefined,
@@ -92,6 +97,29 @@ describe("attachGatewayWsConnectionHandler send() failure handling", () => {
     expect(socket.close).toHaveBeenCalledOnce();
   });
 
+  it("does not arm the handshake timer once the challenge send already retired the transport", () => {
+    // close() clears handshakeTimer, but the failing challenge send runs close()
+    // while the timer is still undefined. Arming it afterwards would leave a
+    // timer alive on a dead connection and fire handshake-timeout on it.
+    vi.useFakeTimers();
+    try {
+      const socket = createFakeSocket();
+      socket.send.mockImplementation(() => {
+        throw new Error("socket is not open");
+      });
+
+      startConnection({ socket });
+      const pendingBefore = vi.getTimerCount();
+
+      vi.advanceTimersByTime(120_000);
+
+      expect(pendingBefore).toBe(0);
+      expect(socket.close).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("does not touch the socket when send() succeeds", () => {
     const { socket } = startConnection();
 
@@ -115,5 +143,52 @@ describe("attachGatewayWsConnectionHandler send() failure handling", () => {
     socket.emit("close", 1000, Buffer.from(""));
     expect(socket.terminate).toHaveBeenCalledOnce();
     expect(socket.close).toHaveBeenCalledOnce();
+  });
+});
+
+describe("attachGatewayWsConnectionHandler setClient() staleness guard", () => {
+  it("rejects late client registration after the socket already closed", () => {
+    const { socket, clients } = startConnection();
+
+    // The connect handshake can still be working through async auth/pairing
+    // steps when the underlying socket drops. setClient() is the seam that
+    // message-handler.ts uses at the end of that flow to register the
+    // connection; it must refuse to register once the socket is gone instead
+    // of leaving a zombie entry in `clients` that nothing ever cleans up.
+    const passed = attachGatewayWsMessageHandlerMock.mock.calls.at(-1)?.[0] as {
+      setClient: (client: GatewayWsClient) => boolean;
+    };
+    expect(passed.setClient).toBeTypeOf("function");
+
+    socket.emit("close", 1001, Buffer.from("client left"));
+
+    const registered = passed.setClient({
+      socket,
+      connect: { client: { id: "openclaw-control-ui", mode: "webchat" } },
+      connId: "late-client",
+      usesSharedGatewayAuth: false,
+    } as unknown as GatewayWsClient);
+
+    expect(registered).toBe(false);
+    expect(clients.size).toBe(0);
+  });
+
+  it("still registers a client when the socket is open (legitimate handshake is not rejected)", () => {
+    const { clients } = startConnection();
+
+    const passed = attachGatewayWsMessageHandlerMock.mock.calls.at(-1)?.[0] as {
+      setClient: (client: GatewayWsClient) => boolean;
+    };
+
+    const client = {
+      socket: {},
+      connect: { client: { id: "openclaw-control-ui", mode: "webchat" } },
+      connId: "live-client",
+      usesSharedGatewayAuth: false,
+    } as unknown as GatewayWsClient;
+    const registered = passed.setClient(client);
+
+    expect(registered).toBe(true);
+    expect(clients.has(client)).toBe(true);
   });
 });

@@ -105,8 +105,28 @@ describe("bound delivery router", () => {
       expected: {
         binding: null,
         mode: "fallback",
-        reason: "ambiguous-without-requester",
+        reason: "missing-requester",
       },
+    },
+    {
+      name: "fails closed for a single binding without requester signal instead of guessing",
+      bindings: [createDiscordBinding(TARGET_SESSION_KEY, "thread-1", 1)],
+      failClosed: true,
+      expected: {
+        binding: null,
+        mode: "fallback",
+        reason: "missing-requester",
+      },
+    },
+    {
+      name: "still resolves the single binding without requester signal when not fail-closed",
+      bindings: [createDiscordBinding(TARGET_SESSION_KEY, "thread-1", 1)],
+      failClosed: false,
+      expected: {
+        mode: "bound",
+        reason: "single-active-binding",
+      },
+      expectedConversationId: "thread-1",
     },
     {
       name: "selects requester-matching conversation when multiple bindings exist",

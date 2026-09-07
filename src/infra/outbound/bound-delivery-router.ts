@@ -77,6 +77,17 @@ export function createBoundDeliveryRouter(
       }
 
       if (!input.requester) {
+        // A missing requester means we cannot verify the completion belongs to
+        // the conversation asking for it. In fail-closed mode, refuse to guess
+        // even when there is exactly one active binding, instead of silently
+        // selecting it.
+        if (input.failClosed) {
+          return {
+            binding: null,
+            mode: "fallback",
+            reason: "missing-requester",
+          };
+        }
         if (activeBindings.length === 1) {
           return {
             binding: activeBindings[0] ?? null,
