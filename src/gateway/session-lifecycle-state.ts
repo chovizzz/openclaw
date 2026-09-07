@@ -1,7 +1,31 @@
 import { updateSessionStoreEntry, type SessionEntry } from "../config/sessions.js";
 import type { AgentEventPayload } from "../infra/agent-events.js";
+import { retryAsync } from "../infra/retry.js";
+import { createSubsystemLogger } from "../logging/subsystem.js";
 import { loadSessionEntry } from "./session-utils.js";
 import type { GatewaySessionRow, SessionRunStatus } from "./session-utils.types.js";
+
+const log = createSubsystemLogger("gateway/session-lifecycle");
+
+/**
+ * The terminal entry write (status/endedAt/runtimeMs) is fire-and-forget from
+ * its caller (server-chat.ts clears the in-memory run context synchronously,
+ * then awaits this write without a caller-side retry — a rejection is
+ * silently swallowed). Without a retry here, a single transient store-lock
+ * contention or I/O hiccup permanently strands the session row on its
+ * pre-terminal status/fields: sessions.list would show it "running" forever
+ * even though the run context has already been cleared.
+ *
+ * Bounded: at most 3 attempts, exponential backoff starting at 200ms
+ * (200ms, then 400ms between attempts) — worst case ~600ms of sleep plus
+ * three store-lock/write attempts before giving up. `update` is a pure
+ * function of the entry read inside the same locked attempt, so retrying is
+ * safe (each attempt recomputes the patch from the then-current entry
+ * instead of replaying a stale one).
+ */
+const LIFECYCLE_PERSIST_RETRY_ATTEMPTS = 3;
+const LIFECYCLE_PERSIST_RETRY_MIN_DELAY_MS = 200;
+const LIFECYCLE_PERSIST_RETRY_MAX_DELAY_MS = 400;
 
 type LifecyclePhase = "start" | "end" | "error";
 
@@ -157,13 +181,33 @@ export async function persistGatewaySessionLifecycleEvent(params: {
     return;
   }
 
-  await updateSessionStoreEntry({
-    storePath: sessionEntry.storePath,
-    sessionKey: sessionEntry.canonicalKey,
-    update: async (entry) =>
-      derivePersistedSessionLifecyclePatch({
-        entry,
-        event: params.event,
-      }),
-  });
+  try {
+    await retryAsync(
+      () =>
+        updateSessionStoreEntry({
+          storePath: sessionEntry.storePath,
+          sessionKey: sessionEntry.canonicalKey,
+          update: async (entry) =>
+            derivePersistedSessionLifecyclePatch({
+              entry,
+              event: params.event,
+            }),
+        }),
+      {
+        attempts: LIFECYCLE_PERSIST_RETRY_ATTEMPTS,
+        minDelayMs: LIFECYCLE_PERSIST_RETRY_MIN_DELAY_MS,
+        maxDelayMs: LIFECYCLE_PERSIST_RETRY_MAX_DELAY_MS,
+        label: "session-lifecycle-persist",
+      },
+    );
+  } catch (err) {
+    // Final behavior after exhausting retries: give up and leave the session
+    // row on its last-persisted (pre-terminal) status rather than throwing —
+    // matching this function's existing fire-and-forget contract — but log
+    // so a permanently-stuck "running" row is at least diagnosable instead
+    // of silently invisible.
+    log.warn?.(
+      `failed to persist terminal lifecycle event for session=${params.sessionKey} after ${LIFECYCLE_PERSIST_RETRY_ATTEMPTS} attempts: ${String(err)}`,
+    );
+  }
 }

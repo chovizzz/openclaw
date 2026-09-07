@@ -204,6 +204,51 @@ describe("startGatewayMaintenanceTimers", () => {
 
     stopMaintenanceTimers(timers);
   });
+
+  // Regression coverage: this fork's chatAbortControllers sweep has no
+  // "terminal pending" skip branch at all (unlike the upstream mechanism
+  // this fork lacks — see session-lifecycle-state.ts's persist retry for the
+  // adjacent fix this fork's architecture actually supports). It only checks
+  // expiresAtMs, and abortChatRunById always deletes the map entry once it
+  // fires. These two tests lock in both halves of that invariant so a future
+  // change cannot silently reintroduce a ghost/ghosted-active regression.
+  it("never aborts a run whose expiry has not elapsed yet (reverse test: a real running session is not mistaken for a ghost)", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-22T00:00:00Z"));
+    const { startGatewayMaintenanceTimers } = await import("./server-maintenance.js");
+    const deps = createMaintenanceTimerDeps();
+    const runId = "run-genuinely-active";
+    const activeRun = createActiveRun("main");
+    deps.chatAbortControllers.set(runId, activeRun);
+
+    const timers = startGatewayMaintenanceTimers(deps);
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(activeRun.controller.signal.aborted).toBe(false);
+    expect(deps.chatAbortControllers.has(runId)).toBe(true);
+
+    stopMaintenanceTimers(timers);
+  });
+
+  it("always removes an expired run from chatAbortControllers once swept (no ghost entry left behind)", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-22T00:00:00Z"));
+    const { startGatewayMaintenanceTimers } = await import("./server-maintenance.js");
+    const deps = createMaintenanceTimerDeps();
+    const runId = "run-expired";
+    const expiredRun = createActiveRun("main");
+    expiredRun.expiresAtMs = Date.now() - 1;
+    deps.chatAbortControllers.set(runId, expiredRun);
+
+    const timers = startGatewayMaintenanceTimers(deps);
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(expiredRun.controller.signal.aborted).toBe(true);
+    expect(deps.chatAbortControllers.has(runId)).toBe(false);
+
+    stopMaintenanceTimers(timers);
+  });
+
   it("evicts dedupe overflow by oldest timestamp even after reinsertion", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-22T00:00:00Z"));

@@ -391,6 +391,45 @@ describe("createGatewayPluginRequestHandler", () => {
     expect(setHeader).toHaveBeenCalledWith("Content-Type", "text/plain; charset=utf-8");
     expect(end).toHaveBeenCalledWith("Internal Server Error");
   });
+
+  it("still finishes the response when a route throws after sending headers", async () => {
+    // Regression: a route that starts streaming (headers already committed) and then
+    // throws used to leave the response hanging forever, because the old handler only
+    // finished the response in the !headersSent branch.
+    const log = createPluginLog();
+    const handler = createGatewayPluginRequestHandler({
+      registry: createTestRegistry({
+        httpRoutes: [
+          createRoute({
+            path: "/boom-mid-stream",
+            handler: async (_req, res) => {
+              (res as unknown as { headersSent: boolean }).headersSent = true;
+              throw new Error("boom mid stream");
+            },
+          }),
+        ],
+      }),
+      log,
+    });
+
+    const end = vi.fn();
+    const socketEnd = vi.fn();
+    const res = {
+      statusCode: 200,
+      headersSent: false,
+      destroyed: false,
+      writableEnded: false,
+      setHeader: vi.fn(),
+      end,
+      socket: { end: socketEnd },
+    } as unknown as ServerResponse;
+
+    const handled = await handler({ url: "/boom-mid-stream" } as IncomingMessage, res);
+    expect(handled).toBe(true);
+    expect(log.warn).toHaveBeenCalledWith(expect.stringContaining("boom mid stream"));
+    expect(end).toHaveBeenCalledWith();
+    expect(socketEnd).toHaveBeenCalledOnce();
+  });
 });
 
 describe("plugin HTTP route auth checks", () => {

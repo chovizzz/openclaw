@@ -3,6 +3,7 @@ import type { createSubsystemLogger } from "../../logging/subsystem.js";
 import type { PluginRegistry } from "../../plugins/registry.js";
 import { resolveActivePluginHttpRouteRegistry } from "../../plugins/runtime.js";
 import { withPluginRuntimeGatewayRequestScope } from "../../plugins/runtime/gateway-request-scope.js";
+import { finishFailedGatewayHttpResponse } from "../http-common.js";
 import { GATEWAY_CLIENT_IDS, GATEWAY_CLIENT_MODES } from "../protocol/client-info.js";
 import { PROTOCOL_VERSION } from "../protocol/index.js";
 import type { GatewayRequestOptions } from "../server-methods/types.js";
@@ -110,11 +111,7 @@ export function createGatewayPluginRequestHandler(params: {
             }
           } catch (err) {
             log.warn(`plugin http route failed (${route.pluginId ?? "unknown"}): ${String(err)}`);
-            if (!res.headersSent) {
-              res.statusCode = 500;
-              res.setHeader("Content-Type", "text/plain; charset=utf-8");
-              res.end("Internal Server Error");
-            }
+            finishFailedGatewayHttpResponse(res);
             return true;
           }
         }

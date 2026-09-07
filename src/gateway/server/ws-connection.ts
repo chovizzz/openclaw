@@ -125,6 +125,11 @@ export function attachGatewayWsConnectionHandler(params: AttachGatewayWsConnecti
   wss.on("connection", (socket, upgradeReq) => {
     let client: GatewayWsClient | null = null;
     let closed = false;
+    // Declared here (not as `const` at its setTimeout() call site further
+    // down) so `close()` — reachable synchronously from send()'s failure
+    // path before that point in the handler runs — never hits a TDZ
+    // ReferenceError trying to clear a not-yet-initialized timer.
+    let handshakeTimer: ReturnType<typeof setTimeout> | undefined;
     const openedAt = Date.now();
     const connId = randomUUID();
     const remoteAddr = (socket as WebSocket & { _socket?: { remoteAddress?: string } })._socket
@@ -193,21 +198,9 @@ export function attachGatewayWsConnectionHandler(params: AttachGatewayWsConnecti
       }
     };
 
-    const send = (obj: unknown) => {
-      try {
-        socket.send(JSON.stringify(obj));
-      } catch {
-        /* ignore */
-      }
-    };
-
-    const connectNonce = randomUUID();
-    send({
-      type: "event",
-      event: "connect.challenge",
-      payload: { nonce: connectNonce, ts: Date.now() },
-    });
-
+    // Declared before `send` (and before the first send() call below) so a
+    // synchronous socket.send() failure on the very first frame can retire
+    // the transport immediately instead of hitting a TDZ error.
     const close = (code = 1000, reason?: string) => {
       if (closed) {
         return;
@@ -224,6 +217,35 @@ export function attachGatewayWsConnectionHandler(params: AttachGatewayWsConnecti
         /* ignore */
       }
     };
+
+    const send = (obj: unknown) => {
+      try {
+        socket.send(JSON.stringify(obj));
+      } catch {
+        // A socket whose send() throws (e.g. already CLOSING) can sit around
+        // without ever cleanly firing its own 'close' event, leaving a dead
+        // client registered forever — e.g. blocking a fresh connection from
+        // completing device pairing / secure-link setup for the same
+        // identity. Force a hard close so cleanup (clients.delete, preauth
+        // budget release) always runs instead of relying on best-effort
+        // socket events that may never arrive.
+        if (!closed) {
+          try {
+            socket.terminate();
+          } catch {
+            /* ignore */
+          }
+          close();
+        }
+      }
+    };
+
+    const connectNonce = randomUUID();
+    send({
+      type: "event",
+      event: "connect.challenge",
+      payload: { nonce: connectNonce, ts: Date.now() },
+    });
 
     socket.once("error", (err) => {
       logWsControl.warn(`error conn=${connId} remote=${remoteAddr ?? "?"}: ${formatError(err)}`);
@@ -298,7 +320,7 @@ export function attachGatewayWsConnectionHandler(params: AttachGatewayWsConnecti
     });
 
     const handshakeTimeoutMs = getPreauthHandshakeTimeoutMsFromEnv();
-    const handshakeTimer = setTimeout(() => {
+    handshakeTimer = setTimeout(() => {
       if (!client) {
         handshakeState = "failed";
         setCloseCause("handshake-timeout", {

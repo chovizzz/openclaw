@@ -21,6 +21,27 @@ export function setDefaultSecurityHeaders(
   }
 }
 
+/** Finish a failed request without rewriting committed headers or orphaning its transport. */
+export function finishFailedGatewayHttpResponse(res: ServerResponse): void {
+  if (res.destroyed || res.writableEnded) {
+    return;
+  }
+  if (!res.headersSent) {
+    res.statusCode = 500;
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.end("Internal Server Error");
+    return;
+  }
+
+  // Headers are already committed (e.g. a streaming/plugin route started writing before
+  // failing). Rewriting status/headers here would throw, and a truncated fixed-length body
+  // can't safely be reused, so flush what's written and tear the socket down instead of
+  // leaving the response hanging forever.
+  const socket = res.socket;
+  res.end();
+  socket?.end();
+}
+
 export function sendJson(res: ServerResponse, status: number, body: unknown) {
   res.statusCode = status;
   res.setHeader("Content-Type", "application/json; charset=utf-8");

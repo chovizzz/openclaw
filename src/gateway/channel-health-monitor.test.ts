@@ -470,6 +470,41 @@ describe("channel-health-monitor", () => {
     monitor.stop();
   });
 
+  it("never bypasses cooldown or the hourly cap for an account stuck in restartPending with reconnectAttempts 0 (reverse test: no unbounded free-pass restart loop)", async () => {
+    // Regression guard for the exact condition upstream's "cap channels stuck
+    // in pending restart" fix targeted: restartPending=true with
+    // reconnectAttempts=0, and no supervisor ownership (isAutoRestartScheduled
+    // is false, so the monitor is the sole restart owner). This fork's
+    // channel-health-monitor.ts has no "continuingPendingRestart" cooldown-skip
+    // branch at all — cooldown and maxRestartsPerHour below are unconditional
+    // — so this must never restart more than maxRestartsPerHour times no
+    // matter how many check cycles elapse.
+    const manager = createSnapshotManager(
+      {
+        discord: {
+          default: {
+            ...managedStoppedAccount("stuck pending restart"),
+            restartPending: true,
+            reconnectAttempts: 0,
+          },
+        },
+      },
+      { isAutoRestartScheduled: vi.fn(() => false) },
+    );
+    const monitor = startDefaultMonitor(manager, {
+      checkIntervalMs: 1_000,
+      cooldownCycles: 1,
+      maxRestartsPerHour: 2,
+    });
+
+    // Run far more cycles than the hourly cap would allow if cooldown were
+    // ever bypassed for this "stuck pending" shape.
+    await vi.advanceTimersByTimeAsync(20 * 1_000 + 1);
+
+    expect(manager.startChannel).toHaveBeenCalledTimes(2);
+    monitor.stop();
+  });
+
   it("runs checks single-flight when restart work is still in progress", async () => {
     let releaseStart: (() => void) | undefined;
     const startGate = new Promise<void>((resolve) => {
