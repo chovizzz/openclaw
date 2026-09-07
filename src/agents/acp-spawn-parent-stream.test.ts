@@ -365,6 +365,113 @@ describe("startAcpSpawnParentStreamRelay", () => {
     relay.dispose();
   });
 
+  it("truncates the snippet without splitting a surrogate pair straddling the cutoff", () => {
+    // 218 'a' chars + a surrogate-pair emoji ("😀", 2 UTF-16 code units) + "tail".
+    // truncate() cuts to STREAM_SNIPPET_MAX_CHARS-1 = 219 code units, which lands
+    // exactly between the emoji's high and low surrogate.
+    const delta = `${"a".repeat(218)}\u{1f600}tail`;
+    expect(delta.charCodeAt(218)).toBeGreaterThanOrEqual(0xd800);
+    expect(delta.charCodeAt(218)).toBeLessThanOrEqual(0xdbff);
+    expect(delta.charCodeAt(219)).toBeGreaterThanOrEqual(0xdc00);
+    expect(delta.charCodeAt(219)).toBeLessThanOrEqual(0xdfff);
+
+    const relay = startAcpSpawnParentStreamRelay({
+      runId: "run-utf16-snippet",
+      parentSessionKey: "agent:main:main",
+      childSessionKey: "agent:codex:acp:utf16-snippet",
+      agentId: "codex",
+      streamFlushMs: 10,
+      noOutputNoticeMs: 120_000,
+    });
+
+    emitAgentEvent({
+      runId: "run-utf16-snippet",
+      stream: "assistant",
+      data: { delta },
+    });
+    vi.advanceTimersByTime(15);
+
+    const texts = collectedTexts();
+    const expected = `codex: ${"a".repeat(218)}…`;
+    expect(texts.some((text) => text === expected)).toBe(true);
+    // Neither surrogate half survived on its own.
+    for (const text of texts) {
+      expect(text).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])/);
+      expect(text).not.toMatch(/(?<![\ud800-\udbff])[\udc00-\udfff]/);
+    }
+    relay.dispose();
+  });
+
+  it("drops a whole surrogate pair (not a lone half) when trimming the retained buffer start", () => {
+    // The emoji sits at the very start; trimming the buffer to its last
+    // STREAM_BUFFER_MAX_CHARS (4000) code units would naively cut at index 1,
+    // right through the emoji's surrogate pair.
+    const delta = `\u{1f600}${"b".repeat(3_999)}`;
+    expect(delta.length).toBe(4_001);
+    expect(delta.charCodeAt(0)).toBeGreaterThanOrEqual(0xd800);
+    expect(delta.charCodeAt(0)).toBeLessThanOrEqual(0xdbff);
+    expect(delta.charCodeAt(1)).toBeGreaterThanOrEqual(0xdc00);
+    expect(delta.charCodeAt(1)).toBeLessThanOrEqual(0xdfff);
+
+    const relay = startAcpSpawnParentStreamRelay({
+      runId: "run-utf16-buffer",
+      parentSessionKey: "agent:main:main",
+      childSessionKey: "agent:codex:acp:utf16-buffer",
+      agentId: "codex",
+      streamFlushMs: 10,
+      noOutputNoticeMs: 120_000,
+    });
+
+    emitAgentEvent({
+      runId: "run-utf16-buffer",
+      stream: "assistant",
+      data: { delta },
+    });
+    vi.advanceTimersByTime(15);
+
+    const texts = collectedTexts();
+    // Once the leading emoji (and its surrogate pair) is dropped by the buffer
+    // trim, only the plain "b" run remains, which is itself re-truncated to
+    // the STREAM_SNIPPET_MAX_CHARS-1 = 219 char preview.
+    const expected = `codex: ${"b".repeat(219)}…`;
+    expect(texts.some((text) => text === expected)).toBe(true);
+    for (const text of texts) {
+      expect(text).not.toMatch(/[\ud800-\udbff](?![\udc00-\udfff])/);
+      expect(text).not.toMatch(/(?<![\ud800-\udbff])[\udc00-\udfff]/);
+    }
+    relay.dispose();
+  });
+
+  // Reverse test: an aligned (non-surrogate-straddling) truncation must not be
+  // shortened any further than STREAM_SNIPPET_MAX_CHARS - 1 code units + the
+  // ellipsis. The UTF-16-safe helper must not clip extra characters when the
+  // cut point already falls on a safe boundary.
+  it("does not shorten an already-aligned truncation boundary", () => {
+    const delta = "a".repeat(300);
+    const relay = startAcpSpawnParentStreamRelay({
+      runId: "run-aligned-truncation",
+      parentSessionKey: "agent:main:main",
+      childSessionKey: "agent:codex:acp:aligned-truncation",
+      agentId: "codex",
+      streamFlushMs: 10,
+      noOutputNoticeMs: 120_000,
+    });
+
+    emitAgentEvent({
+      runId: "run-aligned-truncation",
+      stream: "assistant",
+      data: { delta },
+    });
+    vi.advanceTimersByTime(15);
+
+    const texts = collectedTexts();
+    // 219 'a' chars + the ellipsis: the STREAM_SNIPPET_MAX_CHARS cap itself is
+    // unchanged by the UTF-16-safe fix.
+    const expected = `codex: ${"a".repeat(219)}…`;
+    expect(texts.some((text) => text === expected)).toBe(true);
+    relay.dispose();
+  });
+
   it("resolves ACP spawn stream log path from session metadata", () => {
     readAcpSessionEntryMock.mockReturnValue({
       storePath: "/tmp/openclaw/agents/codex/sessions/sessions.json",

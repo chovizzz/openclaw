@@ -9,6 +9,7 @@ import { scopedHeartbeatWakeOptions } from "../routing/session-key.js";
 import { normalizeAssistantPhase } from "../shared/chat-message-content.js";
 import { normalizeOptionalString } from "../shared/string-coerce.js";
 import { recordTaskRunProgressByRunId } from "../tasks/task-executor.js";
+import { sliceUtf16Safe, truncateUtf16Safe } from "../utils.js";
 
 const DEFAULT_STREAM_FLUSH_MS = 2_500;
 const DEFAULT_NO_OUTPUT_NOTICE_MS = 60_000;
@@ -26,9 +27,9 @@ function truncate(value: string, maxChars: number): string {
     return value;
   }
   if (maxChars <= 1) {
-    return value.slice(0, maxChars);
+    return truncateUtf16Safe(value, maxChars);
   }
-  return `${value.slice(0, maxChars - 1)}…`;
+  return `${truncateUtf16Safe(value, maxChars - 1)}…`;
 }
 
 function toFiniteNumber(value: unknown): number | undefined {
@@ -346,7 +347,7 @@ export function startAcpSpawnParentStreamRelay(params: {
       lastProgressAt = Date.now();
       pendingText += delta;
       if (pendingText.length > STREAM_BUFFER_MAX_CHARS) {
-        pendingText = pendingText.slice(-STREAM_BUFFER_MAX_CHARS);
+        pendingText = sliceUtf16Safe(pendingText, -STREAM_BUFFER_MAX_CHARS);
       }
       if (pendingText.length >= STREAM_SNIPPET_MAX_CHARS || delta.includes("\n\n")) {
         flushPending();
