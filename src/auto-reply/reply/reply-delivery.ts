@@ -8,6 +8,24 @@ import { parseReplyDirectives } from "./reply-directives.js";
 import { applyReplyTagsToPayload, isRenderablePayload } from "./reply-payloads.js";
 import type { TypingSignaler } from "./typing-mode.js";
 
+/**
+ * Delivers a block reply outside the pipeline and records what actually went out.
+ * Tracking happens only after the send resolves, so a failed delivery never marks
+ * content as sent (which would drop it from the final payload).
+ */
+async function sendDirectBlockReply(params: {
+  onBlockReply: (payload: ReplyPayload, context?: BlockReplyContext) => Promise<void> | void;
+  directlySentBlockKeys: Set<string>;
+  directlySentBlockMediaUrls: string[];
+  trackingPayload: ReplyPayload;
+  payload: ReplyPayload;
+}) {
+  await params.onBlockReply(params.payload);
+  params.directlySentBlockKeys.add(createBlockReplyContentKey(params.trackingPayload));
+  const reply = resolveSendableOutboundReplyParts(params.trackingPayload);
+  params.directlySentBlockMediaUrls.push(...reply.mediaUrls);
+}
+
 export type ReplyDirectiveParseMode = "always" | "auto" | "never";
 
 export function normalizeReplyPayloadDirectives(params: {
@@ -68,6 +86,7 @@ export function createBlockReplyDeliveryHandler(params: {
   blockStreamingEnabled: boolean;
   blockReplyPipeline: BlockReplyPipeline | null;
   directlySentBlockKeys: Set<string>;
+  directlySentBlockMediaUrls: string[];
 }): (payload: ReplyPayload) => Promise<void> {
   return async (payload) => {
     const { text, skip } = params.normalizeStreamingText(payload);
@@ -126,14 +145,24 @@ export function createBlockReplyDeliveryHandler(params: {
     } else if (params.blockStreamingEnabled) {
       // Send directly when flushing before tool execution (no pipeline but streaming enabled).
       // Track sent key to avoid duplicate in final payloads.
-      params.directlySentBlockKeys.add(createBlockReplyContentKey(blockPayload));
-      await params.onBlockReply(blockPayload);
+      await sendDirectBlockReply({
+        onBlockReply: params.onBlockReply,
+        directlySentBlockKeys: params.directlySentBlockKeys,
+        directlySentBlockMediaUrls: params.directlySentBlockMediaUrls,
+        trackingPayload: blockPayload,
+        payload: blockPayload,
+      });
     } else if (blockHasMedia) {
       // When block streaming is disabled, text-only block replies are accumulated into the
       // final response. Media cannot be reconstructed later, so send it immediately and let
       // the assistant's final text arrive through the normal final-reply path.
-      params.directlySentBlockKeys.add(createBlockReplyContentKey(blockPayload));
-      await params.onBlockReply({ ...blockPayload, text: undefined });
+      await sendDirectBlockReply({
+        onBlockReply: params.onBlockReply,
+        directlySentBlockKeys: params.directlySentBlockKeys,
+        directlySentBlockMediaUrls: params.directlySentBlockMediaUrls,
+        trackingPayload: blockPayload,
+        payload: { ...blockPayload, text: undefined },
+      });
     }
     // When streaming is disabled entirely, text-only blocks are accumulated in final text.
   };

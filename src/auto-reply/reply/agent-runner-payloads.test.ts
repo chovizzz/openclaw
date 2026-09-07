@@ -188,6 +188,130 @@ describe("buildReplyPayloads media filter integration", () => {
     await expectSameTargetRepliesSuppressed({ provider: "lark", to: "ou_abc123" });
   });
 
+  it("strips media already sent by the block pipeline after normalizing both paths", async () => {
+    const normalizeMediaPaths = async (payload: { mediaUrl?: string; mediaUrls?: string[] }) => {
+      const rewrite = (value?: string) =>
+        value === "file:///tmp/voice.ogg" ? "file:///tmp/outbound/voice.ogg" : value;
+      return {
+        ...payload,
+        mediaUrl: rewrite(payload.mediaUrl),
+        mediaUrls: payload.mediaUrls?.map((value) => rewrite(value) ?? value),
+      };
+    };
+    const pipeline: Parameters<typeof buildReplyPayloads>[0]["blockReplyPipeline"] = {
+      didStream: () => false,
+      isAborted: () => false,
+      hasSentPayload: () => false,
+      enqueue: () => {},
+      flush: async () => {},
+      stop: () => {},
+      hasBuffered: () => false,
+      getSentMediaUrls: () => ["file:///tmp/voice.ogg"],
+    };
+
+    const { replyPayloads } = await buildReplyPayloads({
+      ...baseParams,
+      blockStreamingEnabled: true,
+      blockReplyPipeline: pipeline,
+      normalizeMediaPaths,
+      payloads: [{ text: "caption", mediaUrl: "file:///tmp/voice.ogg" }],
+    });
+
+    expect(replyPayloads).toHaveLength(1);
+    expect(replyPayloads[0]).toMatchObject({
+      text: "caption",
+      mediaUrl: undefined,
+      mediaUrls: undefined,
+    });
+  });
+
+  it("keeps block-pipeline media that was never actually streamed", async () => {
+    const pipeline: Parameters<typeof buildReplyPayloads>[0]["blockReplyPipeline"] = {
+      didStream: () => false,
+      isAborted: () => false,
+      hasSentPayload: () => false,
+      enqueue: () => {},
+      flush: async () => {},
+      stop: () => {},
+      hasBuffered: () => false,
+      getSentMediaUrls: () => ["file:///tmp/already-sent.ogg"],
+    };
+
+    const { replyPayloads } = await buildReplyPayloads({
+      ...baseParams,
+      blockStreamingEnabled: true,
+      blockReplyPipeline: pipeline,
+      normalizeMediaPaths: async (payload) => payload,
+      payloads: [{ text: "caption", mediaUrl: "file:///tmp/different.ogg" }],
+    });
+
+    expect(replyPayloads).toHaveLength(1);
+    expect(replyPayloads[0]).toMatchObject({
+      text: "caption",
+      mediaUrl: "file:///tmp/different.ogg",
+    });
+  });
+
+  it("strips block-sent media before text dedupe so duplicate text cannot survive", async () => {
+    // The payload's text was already sent by the messaging tool and its media was
+    // already sent by the block pipeline, so nothing is left and the whole payload
+    // must go. If block media were stripped after the text stage, the text stage
+    // would see the media as unsent content and keep a duplicate text reply alive.
+    const { replyPayloads } = await buildReplyPayloads({
+      ...baseParams,
+      directlySentBlockMediaUrls: ["/tmp/already.png"],
+      messagingToolSentTexts: ["duplicate text"],
+      payloads: [{ text: "duplicate text", mediaUrl: "/tmp/already.png" }],
+    });
+
+    expect(replyPayloads).toHaveLength(0);
+  });
+
+  it("keeps a duplicate-text payload whose media is genuinely unsent", async () => {
+    const { replyPayloads } = await buildReplyPayloads({
+      ...baseParams,
+      directlySentBlockMediaUrls: ["/tmp/already.png"],
+      messagingToolSentTexts: ["duplicate text"],
+      payloads: [{ text: "duplicate text", mediaUrl: "/tmp/fresh.png" }],
+    });
+
+    expect(replyPayloads).toHaveLength(1);
+    expect(replyPayloads[0]).toMatchObject({ mediaUrl: "/tmp/fresh.png" });
+  });
+
+  it("keeps only media not already sent with a direct block", async () => {
+    const { replyPayloads } = await buildReplyPayloads({
+      ...baseParams,
+      directlySentBlockMediaUrls: ["/tmp/already.png"],
+      payloads: [
+        {
+          text: "response",
+          mediaUrls: ["/tmp/already.png", "/tmp/new.png"],
+        },
+      ],
+    });
+
+    expect(replyPayloads).toHaveLength(1);
+    expect(replyPayloads[0]).toMatchObject({
+      text: "response",
+      mediaUrls: ["/tmp/new.png"],
+    });
+  });
+
+  it("keeps direct-block media that was never actually sent", async () => {
+    const { replyPayloads } = await buildReplyPayloads({
+      ...baseParams,
+      directlySentBlockMediaUrls: ["/tmp/other.png"],
+      payloads: [{ text: "response", mediaUrl: "/tmp/new.png" }],
+    });
+
+    expect(replyPayloads).toHaveLength(1);
+    expect(replyPayloads[0]).toMatchObject({
+      text: "response",
+      mediaUrl: "/tmp/new.png",
+    });
+  });
+
   it("drops all final payloads when block pipeline streamed successfully", async () => {
     const pipeline: Parameters<typeof buildReplyPayloads>[0]["blockReplyPipeline"] = {
       didStream: () => true,
@@ -197,6 +321,7 @@ describe("buildReplyPayloads media filter integration", () => {
       flush: async () => {},
       stop: () => {},
       hasBuffered: () => false,
+      getSentMediaUrls: () => [],
     };
     // shouldDropFinalPayloads short-circuits to [] when the pipeline streamed
     // without aborting, so hasSentPayload is never reached.

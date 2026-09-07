@@ -484,6 +484,7 @@ export async function runReplyAgent(params: {
       fallbackModel,
       fallbackAttempts,
       directlySentBlockKeys,
+      directlySentBlockMediaUrls,
     } = runOutcome;
     let { didLogHeartbeatStrip, autoCompactionCount } = runOutcome;
 
@@ -607,6 +608,7 @@ export async function runReplyAgent(params: {
       blockStreamingEnabled,
       blockReplyPipeline,
       directlySentBlockKeys,
+      directlySentBlockMediaUrls,
       replyToMode,
       replyToChannel,
       currentMessageId: sessionCtx.MessageSidFull ?? sessionCtx.MessageSid,

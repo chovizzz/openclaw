@@ -47,11 +47,11 @@ async function normalizeReplyPayloadMedia(params: {
 }
 
 async function normalizeSentMediaUrlsForDedupe(params: {
-  sentMediaUrls: string[];
+  sentMediaUrls: readonly string[];
   normalizeMediaPaths?: (payload: ReplyPayload) => Promise<ReplyPayload>;
 }): Promise<string[]> {
   if (params.sentMediaUrls.length === 0 || !params.normalizeMediaPaths) {
-    return params.sentMediaUrls;
+    return [...params.sentMediaUrls];
   }
 
   const normalizedUrls: string[] = [];
@@ -96,6 +96,8 @@ export async function buildReplyPayloads(params: {
   blockReplyPipeline: BlockReplyPipeline | null;
   /** Payload keys sent directly (not via pipeline) during tool flush. */
   directlySentBlockKeys?: Set<string>;
+  /** Media URLs successfully sent directly during tool flush. */
+  directlySentBlockMediaUrls?: string[];
   replyToMode: ReplyToMode;
   replyToChannel?: OriginatingChannelType;
   currentMessageId?: string;
@@ -199,17 +201,35 @@ export async function buildReplyPayloads(params: {
         normalizeMediaPaths: params.normalizeMediaPaths,
       })
     : (params.messagingToolSentMediaUrls ?? []);
+  // Media the block pipeline (or a direct block send) already put on the wire is
+  // just as "already sent" as messaging-tool media, so it joins the same stage.
+  const blockSentMediaUrls = await normalizeSentMediaUrlsForDedupe({
+    sentMediaUrls: [
+      ...(params.blockStreamingEnabled
+        ? (params.blockReplyPipeline?.getSentMediaUrls() ?? [])
+        : []),
+      ...(params.directlySentBlockMediaUrls ?? []),
+    ],
+    normalizeMediaPaths: params.normalizeMediaPaths,
+  });
+  const alreadySentMediaUrls = [
+    ...(dedupeMessagingToolPayloads ? messagingToolSentMediaUrls : []),
+    ...blockSentMediaUrls,
+  ];
   // Media dedupe runs first so the text dedupe below sees only content that is
   // genuinely still unsent; otherwise an already-sent media URL would look like
-  // unsent content and keep a fully duplicate payload alive.
-  const mediaFilteredPayloads = dedupeMessagingToolPayloads
-    ? (
-        dedupeRuntime ?? (await loadReplyPayloadsDedupeRuntime())
-      ).filterMessagingToolMediaDuplicates({
-        payloads: silentFilteredPayloads,
-        sentMediaUrls: messagingToolSentMediaUrls,
-      })
-    : silentFilteredPayloads;
+  // unsent content and keep a fully duplicate payload alive. Block-sent media
+  // must be stripped here too, not after the text stage, or the same inversion
+  // returns through the block path.
+  const mediaFilteredPayloads =
+    alreadySentMediaUrls.length > 0
+      ? (
+          dedupeRuntime ?? (await loadReplyPayloadsDedupeRuntime())
+        ).filterMessagingToolMediaDuplicates({
+          payloads: silentFilteredPayloads,
+          sentMediaUrls: alreadySentMediaUrls,
+        })
+      : silentFilteredPayloads;
   const dedupedPayloads = dedupeMessagingToolPayloads
     ? (dedupeRuntime ?? (await loadReplyPayloadsDedupeRuntime())).filterMessagingToolDuplicates({
         payloads: mediaFilteredPayloads,
@@ -217,7 +237,7 @@ export async function buildReplyPayloads(params: {
       })
     : mediaFilteredPayloads;
   // Filter out payloads already sent via pipeline or directly during tool flush.
-  const filteredPayloads = shouldDropFinalPayloads
+  const contentSuppressedPayloads = shouldDropFinalPayloads
     ? []
     : params.blockStreamingEnabled
       ? dedupedPayloads.filter((payload) => !params.blockReplyPipeline?.hasSentPayload(payload))
@@ -226,7 +246,7 @@ export async function buildReplyPayloads(params: {
             (payload) => !params.directlySentBlockKeys!.has(createBlockReplyContentKey(payload)),
           )
         : dedupedPayloads;
-  const replyPayloads = suppressMessagingToolReplies ? [] : filteredPayloads;
+  const replyPayloads = suppressMessagingToolReplies ? [] : contentSuppressedPayloads;
 
   return {
     replyPayloads,

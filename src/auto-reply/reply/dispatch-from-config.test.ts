@@ -2724,6 +2724,189 @@ describe("dispatchReplyFromConfig", () => {
     );
   });
 
+  it("releases inbound dedupe when dispatch fails before completion", async () => {
+    setNoAbort();
+    const cfg = { diagnostics: { enabled: true } } as OpenClawConfig;
+    const ctx = buildTestCtx({
+      Provider: "whatsapp",
+      OriginatingChannel: "whatsapp",
+      OriginatingTo: "whatsapp:+15555550124",
+      To: "whatsapp:+15555550124",
+      AccountId: "default",
+      MessageSid: "msg-dup-error",
+      SessionKey: "agent:main:whatsapp:direct:+15555550124",
+      CommandBody: "hello",
+      RawBody: "hello",
+      Body: "hello",
+    });
+    const replyResolver = vi
+      .fn<
+        (_ctx: MsgContext, _opts?: GetReplyOptions, _cfg?: OpenClawConfig) => Promise<ReplyPayload>
+      >()
+      .mockRejectedValueOnce(new Error("dispatch failed"))
+      .mockResolvedValueOnce({ text: "retry succeeds" });
+
+    await expect(
+      dispatchReplyFromConfig({
+        ctx,
+        cfg,
+        dispatcher: createDispatcher(),
+        replyResolver,
+      }),
+    ).rejects.toThrow("dispatch failed");
+
+    await dispatchReplyFromConfig({
+      ctx,
+      cfg,
+      dispatcher: createDispatcher(),
+      replyResolver,
+    });
+
+    expect(replyResolver).toHaveBeenCalledTimes(2);
+    expect(diagnosticMocks.logMessageProcessed).toHaveBeenCalledWith(
+      expect.objectContaining({
+        channel: "whatsapp",
+        outcome: "error",
+        error: "Error: dispatch failed",
+      }),
+    );
+  });
+
+  it("releases inbound dedupe when setup throws before the dispatch body", async () => {
+    setNoAbort();
+    const ctx = buildTestCtx({
+      Provider: "whatsapp",
+      OriginatingChannel: "whatsapp",
+      OriginatingTo: "whatsapp:+15555550128",
+      To: "whatsapp:+15555550128",
+      AccountId: "default",
+      MessageSid: "msg-setup-throw",
+      SessionKey: "agent:main:whatsapp:direct:+15555550128",
+      CommandBody: "hello",
+      RawBody: "hello",
+      Body: "hello",
+    });
+    // Throwing from the abort resolver stands in for any setup failure that
+    // happens after the dedupe claim. The claim must not stay in flight.
+    mocks.tryFastAbortFromMessage.mockRejectedValueOnce(new Error("setup exploded"));
+
+    await expect(
+      dispatchReplyFromConfig({
+        ctx,
+        cfg: emptyConfig,
+        dispatcher: createDispatcher(),
+        replyResolver: async () => ({ text: "unused" }),
+      }),
+    ).rejects.toThrow("setup exploded");
+
+    setNoAbort();
+    const retryDispatcher = createDispatcher();
+    await dispatchReplyFromConfig({
+      ctx,
+      cfg: emptyConfig,
+      dispatcher: retryDispatcher,
+      replyResolver: async () => ({ text: "retry succeeds" }),
+    });
+
+    expect(retryDispatcher.sendFinalReply).toHaveBeenCalledWith(
+      expect.objectContaining({ text: "retry succeeds" }),
+    );
+  });
+
+  it("poisons inbound dedupe when dispatch fails after a block reply", async () => {
+    setNoAbort();
+    const ctx = buildTestCtx({
+      Provider: "whatsapp",
+      OriginatingChannel: "whatsapp",
+      OriginatingTo: "whatsapp:+15555550125",
+      To: "whatsapp:+15555550125",
+      AccountId: "default",
+      MessageSid: "msg-dup-block-error",
+      SessionKey: "agent:main:whatsapp:direct:+15555550125",
+      CommandBody: "hello",
+      RawBody: "hello",
+      Body: "hello",
+    });
+    const firstDispatcher = createDispatcher();
+    const replyResolver = vi.fn(
+      async (_ctx: MsgContext, opts?: GetReplyOptions): Promise<ReplyPayload | undefined> => {
+        await opts?.onBlockReply?.({ text: "partial answer" });
+        throw new Error("provider failed after block");
+      },
+    );
+
+    await expect(
+      dispatchReplyFromConfig({
+        ctx,
+        cfg: emptyConfig,
+        dispatcher: firstDispatcher,
+        replyResolver,
+      }),
+    ).rejects.toThrow("provider failed after block");
+
+    await dispatchReplyFromConfig({
+      ctx,
+      cfg: emptyConfig,
+      dispatcher: createDispatcher(),
+      replyResolver,
+    });
+
+    expect(firstDispatcher.sendBlockReply).toHaveBeenCalledWith({ text: "partial answer" });
+    expect(replyResolver).toHaveBeenCalledTimes(1);
+  });
+
+  it("still dispatches distinct inbound messages after a poisoned turn", async () => {
+    setNoAbort();
+    const buildCtx = (messageSid: string) =>
+      buildTestCtx({
+        Provider: "whatsapp",
+        OriginatingChannel: "whatsapp",
+        OriginatingTo: "whatsapp:+15555550127",
+        To: "whatsapp:+15555550127",
+        AccountId: "default",
+        MessageSid: messageSid,
+        SessionKey: "agent:main:whatsapp:direct:+15555550127",
+        CommandBody: "hello",
+        RawBody: "hello",
+        Body: "hello",
+      });
+    const poisonResolver = vi.fn(
+      async (_ctx: MsgContext, opts?: GetReplyOptions): Promise<ReplyPayload | undefined> => {
+        await opts?.onBlockReply?.({ text: "partial answer" });
+        throw new Error("provider failed after block");
+      },
+    );
+
+    await expect(
+      dispatchReplyFromConfig({
+        ctx: buildCtx("msg-poison-a"),
+        cfg: emptyConfig,
+        dispatcher: createDispatcher(),
+        replyResolver: poisonResolver,
+      }),
+    ).rejects.toThrow("provider failed after block");
+
+    // A different inbound message that happens to produce near-identical text
+    // must still be delivered: poisoning is keyed per inbound message, not per body.
+    const secondDispatcher = createDispatcher();
+    const secondResolver = vi
+      .fn<
+        (_ctx: MsgContext, _opts?: GetReplyOptions, _cfg?: OpenClawConfig) => Promise<ReplyPayload>
+      >()
+      .mockResolvedValue({ text: "partial answer" });
+    await dispatchReplyFromConfig({
+      ctx: buildCtx("msg-poison-b"),
+      cfg: emptyConfig,
+      dispatcher: secondDispatcher,
+      replyResolver: secondResolver,
+    });
+
+    expect(secondResolver).toHaveBeenCalledTimes(1);
+    expect(secondDispatcher.sendFinalReply).toHaveBeenCalledWith(
+      expect.objectContaining({ text: "partial answer" }),
+    );
+  });
+
   it("passes configOverride to replyResolver when provided", async () => {
     setNoAbort();
     const cfg = emptyConfig;

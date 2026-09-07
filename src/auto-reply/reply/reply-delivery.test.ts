@@ -31,6 +31,7 @@ describe("createBlockReplyDeliveryHandler", () => {
       blockStreamingEnabled: false,
       blockReplyPipeline: null,
       directlySentBlockKeys,
+      directlySentBlockMediaUrls: [],
     });
 
     await handler({
@@ -73,6 +74,7 @@ describe("createBlockReplyDeliveryHandler", () => {
       blockStreamingEnabled: false,
       blockReplyPipeline: null,
       directlySentBlockKeys: new Set(),
+      directlySentBlockMediaUrls: [],
     });
 
     await handler({ text: "text only" });
@@ -95,6 +97,7 @@ describe("createBlockReplyDeliveryHandler", () => {
       blockStreamingEnabled: true,
       blockReplyPipeline,
       directlySentBlockKeys: new Set(),
+      directlySentBlockMediaUrls: [],
     });
 
     await handler({ text: "\n\n  Hello from stream" });
@@ -145,6 +148,7 @@ describe("createBlockReplyDeliveryHandler", () => {
       blockStreamingEnabled: true,
       blockReplyPipeline,
       directlySentBlockKeys: new Set(),
+      directlySentBlockMediaUrls: [],
     });
 
     await handler({ text: "Result\nMEDIA: ./image.png" });

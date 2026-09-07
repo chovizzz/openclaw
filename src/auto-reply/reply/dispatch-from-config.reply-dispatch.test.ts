@@ -12,7 +12,7 @@ import {
   createTestRegistry,
 } from "../../test-utils/channel-plugins.js";
 import { createInternalHookEventPayload } from "../../test-utils/internal-hook-event-payload.js";
-import type { ReplyPayload } from "../types.js";
+import { setReplyPayloadMetadata, type ReplyPayload } from "../types.js";
 import type { ReplyDispatcher } from "./reply-dispatcher.js";
 import { buildTestCtx } from "./test-ctx.js";
 
@@ -420,6 +420,93 @@ describe("dispatchReplyFromConfig reply_dispatch hook", () => {
       counts: { tool: 1, block: 2, final: 3 },
     });
   });
+  it("dedupes byte-identical non-streaming final payload entries for one turn", async () => {
+    hookMocks.runner.hasHooks.mockReturnValue(false);
+    const dispatcher = createDispatcher();
+    const replyPayload = {
+      text: "repeat once",
+      mediaUrls: ["file:///tmp/repeat.png"],
+      channelData: { telegram: { parseMode: "MarkdownV2" } },
+    } satisfies ReplyPayload;
+
+    const result = await dispatchReplyFromConfig({
+      ctx: createHookCtx(),
+      cfg: emptyConfig,
+      dispatcher,
+      replyResolver: async () => [replyPayload, { ...replyPayload }],
+    });
+
+    expect(result.queuedFinal).toBe(true);
+    expect(dispatcher.sendFinalReply).toHaveBeenCalledOnce();
+    expect(dispatcher.sendFinalReply).toHaveBeenCalledWith(replyPayload);
+  });
+
+  it("preserves same-content final payloads from distinct assistant messages", async () => {
+    hookMocks.runner.hasHooks.mockReturnValue(false);
+    const dispatcher = createDispatcher();
+    const firstReply = setReplyPayloadMetadata(
+      { text: "intentional repeat" } satisfies ReplyPayload,
+      { assistantMessageIndex: 1 },
+    );
+    const secondReply = setReplyPayloadMetadata(
+      { text: "intentional repeat" } satisfies ReplyPayload,
+      { assistantMessageIndex: 2 },
+    );
+
+    await dispatchReplyFromConfig({
+      ctx: createHookCtx(),
+      cfg: emptyConfig,
+      dispatcher,
+      replyResolver: async () => [firstReply, secondReply],
+    });
+
+    expect(dispatcher.sendFinalReply).toHaveBeenCalledTimes(2);
+    expect(dispatcher.sendFinalReply).toHaveBeenNthCalledWith(1, firstReply);
+    expect(dispatcher.sendFinalReply).toHaveBeenNthCalledWith(2, secondReply);
+  });
+
+  it("preserves near-identical but distinct final payloads", async () => {
+    hookMocks.runner.hasHooks.mockReturnValue(false);
+    const dispatcher = createDispatcher();
+    const firstReply = { text: "Updated [wiki/roadmap.md]" } satisfies ReplyPayload;
+    const secondReply = {
+      text: "Updated [wiki/roadmap.md] with the launch notes.",
+    } satisfies ReplyPayload;
+
+    await dispatchReplyFromConfig({
+      ctx: createHookCtx(),
+      cfg: emptyConfig,
+      dispatcher,
+      replyResolver: async () => [firstReply, secondReply],
+    });
+
+    expect(dispatcher.sendFinalReply).toHaveBeenCalledTimes(2);
+    expect(dispatcher.sendFinalReply).toHaveBeenNthCalledWith(1, firstReply);
+    expect(dispatcher.sendFinalReply).toHaveBeenNthCalledWith(2, secondReply);
+  });
+
+  it("preserves same-text final payloads that differ only by media", async () => {
+    hookMocks.runner.hasHooks.mockReturnValue(false);
+    const dispatcher = createDispatcher();
+    const firstReply = {
+      text: "here you go",
+      mediaUrl: "file:///tmp/a.png",
+    } satisfies ReplyPayload;
+    const secondReply = {
+      text: "here you go",
+      mediaUrl: "file:///tmp/b.png",
+    } satisfies ReplyPayload;
+
+    await dispatchReplyFromConfig({
+      ctx: createHookCtx(),
+      cfg: emptyConfig,
+      dispatcher,
+      replyResolver: async () => [firstReply, secondReply],
+    });
+
+    expect(dispatcher.sendFinalReply).toHaveBeenCalledTimes(2);
+  });
+
   it("still applies send-policy deny after an unhandled plugin dispatch", async () => {
     hookMocks.runner.runReplyDispatch.mockResolvedValue({
       handled: false,

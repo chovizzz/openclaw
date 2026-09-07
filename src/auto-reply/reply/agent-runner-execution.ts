@@ -99,6 +99,8 @@ export type AgentRunLoopResult =
       autoCompactionCount: number;
       /** Payload keys sent directly (not via pipeline) during tool flush. */
       directlySentBlockKeys?: Set<string>;
+      /** Media URLs successfully sent directly during tool flush. */
+      directlySentBlockMediaUrls?: string[];
     }
   | { kind: "final"; payload: ReplyPayload };
 
@@ -523,6 +525,7 @@ export async function runAgentTurnWithFallback(params: {
   let autoCompactionCount = 0;
   // Track payloads sent directly (not via pipeline) during tool flush to avoid duplicates.
   const directlySentBlockKeys = new Set<string>();
+  const directlySentBlockMediaUrls: string[] = [];
 
   const runId = params.opts?.runId ?? crypto.randomUUID();
   const normalizeReplyMediaPaths = createReplyMediaPathNormalizer({
@@ -702,6 +705,7 @@ export async function runAgentTurnWithFallback(params: {
             blockStreamingEnabled: params.blockStreamingEnabled,
             blockReplyPipeline,
             directlySentBlockKeys,
+            directlySentBlockMediaUrls,
           })
         : undefined;
       const onToolResult = params.opts?.onToolResult;
@@ -1477,5 +1481,7 @@ export async function runAgentTurnWithFallback(params: {
     didLogHeartbeatStrip,
     autoCompactionCount,
     directlySentBlockKeys: directlySentBlockKeys.size > 0 ? directlySentBlockKeys : undefined,
+    directlySentBlockMediaUrls:
+      directlySentBlockMediaUrls.length > 0 ? directlySentBlockMediaUrls : undefined,
   };
 }

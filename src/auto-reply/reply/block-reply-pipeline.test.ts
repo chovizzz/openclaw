@@ -77,6 +77,38 @@ describe("createBlockReplyPipeline dedup with threading", () => {
     expect(pipeline.hasSentPayload({ text: "response text" })).toBe(true);
     expect(pipeline.hasSentPayload({ text: "response text", replyToId: "other-id" })).toBe(true);
   });
+
+  it("tracks media URLs delivered via block replies", async () => {
+    const pipeline = createBlockReplyPipeline({
+      onBlockReply: async () => {},
+      timeoutMs: 5000,
+    });
+
+    expect(pipeline.getSentMediaUrls()).toEqual([]);
+
+    pipeline.enqueue({ text: "caption", mediaUrl: "file:///a.ogg" });
+    pipeline.enqueue({ mediaUrls: ["file:///b.ogg", "file:///c.ogg"] });
+    await pipeline.flush({ force: true });
+
+    expect(pipeline.getSentMediaUrls()).toEqual([
+      "file:///a.ogg",
+      "file:///b.ogg",
+      "file:///c.ogg",
+    ]);
+  });
+
+  it("does not track media when text-only blocks are delivered", async () => {
+    const pipeline = createBlockReplyPipeline({
+      onBlockReply: async () => {},
+      timeoutMs: 5000,
+    });
+
+    pipeline.enqueue({ text: "hello" });
+    pipeline.enqueue({ text: "world" });
+    await pipeline.flush({ force: true });
+
+    expect(pipeline.getSentMediaUrls()).toEqual([]);
+  });
 });
 
 describe("createBlockReplyPipeline coalescing routing", () => {
@@ -121,5 +153,125 @@ describe("createBlockReplyPipeline coalescing routing", () => {
       text: "part one part two",
       channelData: { threadTs: "1.0" },
     });
+  });
+});
+
+describe("createBlockReplyPipeline content coverage dedup", () => {
+  it("matches final assembled text to successfully streamed text chunks after abort", async () => {
+    let callCount = 0;
+    const pipeline = createBlockReplyPipeline({
+      onBlockReply: async () => {
+        callCount += 1;
+        if (callCount === 3) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      },
+      timeoutMs: 1,
+    });
+
+    pipeline.enqueue({ text: "First paragraph." });
+    pipeline.enqueue({ text: "Second paragraph." });
+    pipeline.enqueue({ text: "Third paragraph." });
+    await pipeline.flush({ force: true });
+
+    expect(pipeline.didStream()).toBe(true);
+    expect(pipeline.isAborted()).toBe(true);
+    expect(pipeline.hasSentPayload({ text: "First paragraph.\n\nSecond paragraph." })).toBe(true);
+  });
+
+  it("does not match final assembled text with content that was not streamed", async () => {
+    let callCount = 0;
+    const pipeline = createBlockReplyPipeline({
+      onBlockReply: async () => {
+        callCount += 1;
+        if (callCount === 2) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      },
+      timeoutMs: 1,
+    });
+
+    pipeline.enqueue({ text: "First paragraph." });
+    pipeline.enqueue({ text: "Second paragraph." });
+    await pipeline.flush({ force: true });
+
+    expect(pipeline.didStream()).toBe(true);
+    expect(pipeline.isAborted()).toBe(true);
+    expect(pipeline.hasSentPayload({ text: "First paragraph.\n\nSecond paragraph." })).toBe(false);
+  });
+
+  it("does not suppress media payloads through streamed text coverage", async () => {
+    const pipeline = createBlockReplyPipeline({
+      onBlockReply: async () => {},
+      timeoutMs: 5000,
+    });
+
+    pipeline.enqueue({ text: "Description" });
+    await pipeline.flush({ force: true });
+
+    expect(pipeline.hasSentPayload({ text: "Description", mediaUrl: "file:///photo.jpg" })).toBe(
+      false,
+    );
+  });
+
+  it("does not suppress unrelated shorter text that appears inside streamed content", async () => {
+    const pipeline = createBlockReplyPipeline({
+      onBlockReply: async () => {},
+      timeoutMs: 5000,
+    });
+
+    pipeline.enqueue({ text: "Here is a summary." });
+    await pipeline.flush({ force: true });
+
+    expect(pipeline.hasSentPayload({ text: "summary" })).toBe(false);
+  });
+
+  it("does not suppress a text-covered final that also carries interactive content", async () => {
+    const pipeline = createBlockReplyPipeline({
+      onBlockReply: async () => {},
+      timeoutMs: 5000,
+    });
+
+    // Two fragments so the assembled final only matches through the text-coverage
+    // branch, not the exact content key.
+    pipeline.enqueue({ text: "pick" });
+    pipeline.enqueue({ text: "one" });
+    await pipeline.flush({ force: true });
+
+    expect(pipeline.hasSentPayload({ text: "pick one" })).toBe(true);
+    expect(
+      pipeline.hasSentPayload({
+        text: "pick one",
+        interactive: { blocks: [{ type: "buttons", buttons: [{ label: "A", value: "a" }] }] },
+      } as Parameters<typeof pipeline.hasSentPayload>[0]),
+    ).toBe(false);
+  });
+
+  it("does not suppress a text-covered final that is an error payload", async () => {
+    const pipeline = createBlockReplyPipeline({
+      onBlockReply: async () => {},
+      timeoutMs: 5000,
+    });
+
+    pipeline.enqueue({ text: "something" });
+    pipeline.enqueue({ text: "went wrong" });
+    await pipeline.flush({ force: true });
+
+    expect(pipeline.hasSentPayload({ text: "something went wrong" })).toBe(true);
+    expect(pipeline.hasSentPayload({ text: "something went wrong", isError: true })).toBe(false);
+  });
+
+  it("does not suppress a longer final that extends the streamed text", async () => {
+    const pipeline = createBlockReplyPipeline({
+      onBlockReply: async () => {},
+      timeoutMs: 5000,
+    });
+
+    pipeline.enqueue({ text: "Updated [wiki/roadmap.md]" });
+    await pipeline.flush({ force: true });
+
+    expect(
+      pipeline.hasSentPayload({ text: "Updated [wiki/roadmap.md] with the launch notes." }),
+    ).toBe(false);
   });
 });
