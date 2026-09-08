@@ -327,4 +327,132 @@ describe("anthropic transport stream", () => {
       ]),
     );
   });
+
+  it("drops image blocks from tool results for text-only models", async () => {
+    const model = attachModelProviderRequestTransport(
+      {
+        id: "claude-sonnet-4-6",
+        name: "Claude Sonnet 4.6",
+        api: "anthropic-messages",
+        provider: "anthropic",
+        baseUrl: "https://api.anthropic.com",
+        reasoning: true,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 200000,
+        maxTokens: 8192,
+      } satisfies Model<"anthropic-messages">,
+      undefined,
+    );
+    const streamFn = createAnthropicMessagesTransportStreamFn();
+
+    const stream = await Promise.resolve(
+      streamFn(
+        model,
+        {
+          messages: [
+            {
+              role: "assistant",
+              content: [{ type: "toolCall", id: "tool_1", name: "screenshot", arguments: {} }],
+            },
+            {
+              role: "toolResult",
+              toolCallId: "tool_1",
+              content: [
+                { type: "image", data: "aW1hZ2VkYXRh", mimeType: "image/png" },
+                { type: "text", text: "captured screen" },
+              ],
+              isError: false,
+            },
+          ],
+        } as Parameters<typeof streamFn>[1],
+        { apiKey: "fixture-api-key" } as Parameters<typeof streamFn>[2],
+      ),
+    );
+    await stream.result();
+
+    const params = anthropicMessagesStreamMock.mock.calls[0]?.[0] as {
+      messages: Array<{ role: string; content: unknown }>;
+    };
+    const toolResultContainer = params.messages.find(
+      (message) =>
+        message.role === "user" &&
+        Array.isArray(message.content) &&
+        message.content.some((block: Record<string, unknown>) => block.type === "tool_result"),
+    );
+    const toolResultBlock = (toolResultContainer?.content as Array<Record<string, unknown>>).find(
+      (block) => block.type === "tool_result",
+    );
+
+    // Text-only model: the image block must not survive, and the surviving
+    // text must be preserved rather than replaced or dropped alongside it.
+    expect(typeof toolResultBlock?.content).toBe("string");
+    expect(toolResultBlock?.content as string).toContain("captured screen");
+  });
+
+  it("keeps image blocks in tool results for models that declare image input support", async () => {
+    const model = attachModelProviderRequestTransport(
+      {
+        id: "claude-sonnet-4-6",
+        name: "Claude Sonnet 4.6",
+        api: "anthropic-messages",
+        provider: "anthropic",
+        baseUrl: "https://api.anthropic.com",
+        reasoning: true,
+        input: ["text", "image"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 200000,
+        maxTokens: 8192,
+      } satisfies Model<"anthropic-messages">,
+      undefined,
+    );
+    const streamFn = createAnthropicMessagesTransportStreamFn();
+    const stream = await Promise.resolve(
+      streamFn(
+        model,
+        {
+          messages: [
+            {
+              role: "assistant",
+              content: [{ type: "toolCall", id: "tool_1", name: "screenshot", arguments: {} }],
+            },
+            {
+              role: "toolResult",
+              toolCallId: "tool_1",
+              content: [
+                { type: "image", data: "aW1hZ2VkYXRh", mimeType: "image/png" },
+                { type: "text", text: "captured screen" },
+              ],
+              isError: false,
+            },
+          ],
+        } as Parameters<typeof streamFn>[1],
+        { apiKey: "fixture-api-key" } as Parameters<typeof streamFn>[2],
+      ),
+    );
+    await stream.result();
+
+    const params = anthropicMessagesStreamMock.mock.calls[0]?.[0] as {
+      messages: Array<{ role: string; content: unknown }>;
+    };
+    const toolResultContainer = params.messages.find(
+      (message) =>
+        message.role === "user" &&
+        Array.isArray(message.content) &&
+        message.content.some((block: Record<string, unknown>) => block.type === "tool_result"),
+    );
+    const toolResultBlock = (toolResultContainer?.content as Array<Record<string, unknown>>).find(
+      (block) => block.type === "tool_result",
+    );
+    const blocks = Array.isArray(toolResultBlock?.content)
+      ? (toolResultBlock.content as Array<Record<string, unknown>>)
+      : [];
+
+    // Model declares image support: the image block must be preserved,
+    // proving the text-only gate does not over-fire for capable models.
+    expect(blocks.some((block) => block.type === "image")).toBe(true);
+    expect(blocks.some((block) => block.type === "text" && block.text === "captured screen")).toBe(
+      true,
+    );
+  });
 });

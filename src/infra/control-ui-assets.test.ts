@@ -75,6 +75,7 @@ let resolveControlUiDistIndexHealth: typeof import("./control-ui-assets.js").res
 let isPackageProvenControlUiRootSync: typeof import("./control-ui-assets.js").isPackageProvenControlUiRootSync;
 let resolveControlUiRootOverrideSync: typeof import("./control-ui-assets.js").resolveControlUiRootOverrideSync;
 let resolveControlUiRootSync: typeof import("./control-ui-assets.js").resolveControlUiRootSync;
+let summarizeCommandOutput: typeof import("./control-ui-assets.js").summarizeCommandOutput;
 let openclawRoot: typeof import("./openclaw-root.js");
 
 describe("control UI assets helpers (fs-mocked)", () => {
@@ -86,6 +87,7 @@ describe("control UI assets helpers (fs-mocked)", () => {
       isPackageProvenControlUiRootSync,
       resolveControlUiRootOverrideSync,
       resolveControlUiRootSync,
+      summarizeCommandOutput,
     } = await import("./control-ui-assets.js"));
     openclawRoot = await import("./openclaw-root.js");
   });
@@ -262,5 +264,65 @@ describe("control UI assets helpers (fs-mocked)", () => {
         cwd: abs("fixtures/fallback-root"),
       }),
     ).toBe(false);
+  });
+
+  describe("summarizeCommandOutput", () => {
+    it("keeps a surrogate pair intact when the naive UTF-16 cut point lands mid-pair", () => {
+      // "y" * 238 + rocket emoji (surrogate pair) + "xx" => 242 UTF-16 code units.
+      // A naive `.slice(0, 239)` cuts between the emoji's high/low surrogate halves.
+      const rocket = "🚀";
+      const last = `${"y".repeat(238)}${rocket}xx`;
+      expect(last.length).toBe(242);
+
+      // Sanity: confirm the naive cut point (index 239) really does land inside the
+      // surrogate pair. Without this assertion, a test that only checks the final
+      // output for lone surrogates would pass even if the code were never fixed,
+      // because it would not prove the fixture actually exercises the bug.
+      const highSurrogate = last.charCodeAt(238);
+      const lowSurrogate = last.charCodeAt(239);
+      expect(highSurrogate).toBeGreaterThanOrEqual(0xd800);
+      expect(highSurrogate).toBeLessThanOrEqual(0xdbff);
+      expect(lowSurrogate).toBeGreaterThanOrEqual(0xdc00);
+      expect(lowSurrogate).toBeLessThanOrEqual(0xdfff);
+
+      const result = summarizeCommandOutput(last);
+
+      // The safe cut backs off to the pair boundary rather than splitting it,
+      // dropping the whole emoji instead of leaving a lone surrogate behind.
+      expect(result).toBe(`${"y".repeat(238)}…`);
+
+      // No lone (unpaired) surrogate should ever appear in the truncated output.
+      const stripped = result?.replace("…", "") ?? "";
+      for (let i = 0; i < stripped.length; i++) {
+        const code = stripped.charCodeAt(i);
+        if (code >= 0xd800 && code <= 0xdbff) {
+          // high surrogate must be followed by a low surrogate
+          const next = stripped.charCodeAt(i + 1);
+          expect(next).toBeGreaterThanOrEqual(0xdc00);
+          expect(next).toBeLessThanOrEqual(0xdfff);
+        } else if (code >= 0xdc00 && code <= 0xdfff) {
+          // low surrogate must be preceded by a high surrogate
+          const prev = stripped.charCodeAt(i - 1);
+          expect(prev).toBeGreaterThanOrEqual(0xd800);
+          expect(prev).toBeLessThanOrEqual(0xdbff);
+        }
+      }
+    });
+
+    it("does not shorten truncation further than needed when the cut point is already aligned", () => {
+      // 241 plain ASCII chars: the cut point at 239 does not straddle any surrogate
+      // pair, so the safe truncation must keep exactly 239 characters (not fewer).
+      const last = "a".repeat(241);
+      const result = summarizeCommandOutput(last);
+      expect(result).toBe(`${"a".repeat(239)}…`);
+    });
+
+    it("returns short lines unchanged", () => {
+      expect(summarizeCommandOutput("short line")).toBe("short line");
+    });
+
+    it("returns undefined for empty/whitespace-only input", () => {
+      expect(summarizeCommandOutput("   \n\n  ")).toBeUndefined();
+    });
   });
 });

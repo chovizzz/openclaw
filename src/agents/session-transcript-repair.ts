@@ -15,6 +15,7 @@ type RawToolCallBlock = {
   name?: unknown;
   input?: unknown;
   arguments?: unknown;
+  partialJson?: unknown;
 };
 
 function isThinkingLikeBlock(block: unknown): boolean {
@@ -49,6 +50,66 @@ function hasNonEmptyStringField(value: unknown): boolean {
 
 function hasToolCallId(block: RawToolCallBlock): boolean {
   return hasNonEmptyStringField(block.id);
+}
+
+function hasPartialJson(
+  block: RawToolCallBlock,
+): block is RawToolCallBlock & { partialJson: string } {
+  return typeof block.partialJson === "string";
+}
+
+function isCompleteJsonObject(value: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(value);
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The OpenAI Responses transport streams tool-call arguments into a
+ * `partialJson` scratch buffer (see `openai-transport-stream.ts`) and mints
+ * composite `callId|itemId` tool-call ids. When the turn finishes normally
+ * (`stopReason === "toolUse"`) and the buffer holds a complete JSON object
+ * consistent with the parsed `arguments`, the leftover `partialJson` field is
+ * a streaming artifact, not real content, so it is safe to strip while
+ * keeping the tool call itself.
+ *
+ * Anything short of that full picture -- a different stop reason (the turn
+ * was aborted, errored, or truncated mid-stream), a non-object buffer, or an
+ * id that does not match the composite shape -- means the tool call may be
+ * genuinely unfinished. Those cases are left for the existing
+ * incomplete-tool-call drop path below instead of guessing at repair time:
+ * dropping a real, still-in-flight tool call would be worse than leaving one
+ * scratch field behind.
+ */
+function isFinalizedResponsesToolCallWithStalePartialJson(
+  message: AgentMessage,
+  block: RawToolCallBlock,
+): boolean {
+  if (
+    message.role !== "assistant" ||
+    message.stopReason !== "toolUse" ||
+    !hasPartialJson(block) ||
+    typeof block.id !== "string" ||
+    "input" in block ||
+    !block.arguments ||
+    typeof block.arguments !== "object" ||
+    Array.isArray(block.arguments)
+  ) {
+    return false;
+  }
+
+  const trimmedPartialJson = block.partialJson.trim();
+  const isEmptyArgsToolCall =
+    trimmedPartialJson === "" && Object.keys(block.arguments).length === 0;
+  if (!isCompleteJsonObject(block.partialJson) && !isEmptyArgsToolCall) {
+    return false;
+  }
+
+  const separator = block.id.indexOf("|");
+  return separator > 0 && separator < block.id.length - 1;
 }
 
 function normalizeAllowedToolNames(allowedToolNames?: Iterable<string>): Set<string> | null {
@@ -175,6 +236,7 @@ function isReplaySafeThinkingAssistantTurn(
     sawToolCall = true;
     if (
       !hasToolCallInput(block) ||
+      hasPartialJson(block) ||
       !hasToolCallId(block) ||
       !hasToolCallName(block, allowedToolNames)
     ) {
@@ -340,7 +402,25 @@ export function repairToolCallInputs(
     let droppedInMessage = 0;
     let messageChanged = false;
 
-    for (const block of msg.content) {
+    for (const rawBlock of msg.content) {
+      let block = rawBlock;
+      if (isRawToolCallBlock(block) && hasPartialJson(block)) {
+        if (!isFinalizedResponsesToolCallWithStalePartialJson(msg, block)) {
+          // Not provably finalized: treat the stray scratch buffer like any
+          // other incomplete streaming artifact and drop the tool call.
+          droppedToolCalls += 1;
+          droppedInMessage += 1;
+          changed = true;
+          messageChanged = true;
+          continue;
+        }
+        // Finalized tool call; strip only the stale scratch buffer.
+        const stripped = { ...(block as object) } as RawToolCallBlock & { partialJson?: unknown };
+        delete stripped.partialJson;
+        block = stripped as typeof block;
+        changed = true;
+        messageChanged = true;
+      }
       if (
         isRawToolCallBlock(block) &&
         (!hasToolCallInput(block) ||

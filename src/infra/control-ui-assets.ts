@@ -2,6 +2,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { runCommandWithTimeout } from "../process/exec.js";
 import { defaultRuntime, type RuntimeEnv } from "../runtime.js";
+import { truncateUtf16Safe } from "../utils.js";
 import * as controlUiFsRuntime from "./control-ui-assets.fs.runtime.js";
 import { resolveOpenClawPackageRoot, resolveOpenClawPackageRootSync } from "./openclaw-root.js";
 
@@ -274,7 +275,7 @@ export type EnsureControlUiAssetsResult = {
   message?: string;
 };
 
-function summarizeCommandOutput(text: string): string | undefined {
+export function summarizeCommandOutput(text: string): string | undefined {
   const lines = text
     .split(/\r?\n/g)
     .map((l) => l.trim())
@@ -286,7 +287,7 @@ function summarizeCommandOutput(text: string): string | undefined {
   if (!last) {
     return undefined;
   }
-  return last.length > 240 ? `${last.slice(0, 239)}…` : last;
+  return last.length > 240 ? `${truncateUtf16Safe(last, 239)}…` : last;
 }
 
 export async function ensureControlUiAssetsBuilt(

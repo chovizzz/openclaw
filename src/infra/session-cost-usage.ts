@@ -239,6 +239,36 @@ async function* readJsonlRecords(filePath: string): AsyncGenerator<Record<string
   }
 }
 
+// Deterministic failures (missing file, unreadable permissions) should never
+// be swallowed: they indicate a real problem the caller needs to know about,
+// not a session file that is merely mid-write. Only errors code-tagged as one
+// of these are re-thrown by the best-effort reader below; everything else
+// (truncated tails, mid-stream I/O errors from a concurrent writer, EISDIR,
+// generic stream failures) is treated as "read what we could" noise.
+const NEVER_SWALLOW_READ_ERROR_CODES = new Set(["ENOENT", "EACCES", "EPERM"]);
+
+function isDeterministicReadFailure(err: unknown): boolean {
+  const code = (err as { code?: unknown } | undefined)?.code;
+  return typeof code === "string" && NEVER_SWALLOW_READ_ERROR_CODES.has(code);
+}
+
+async function* readJsonlRecordsBestEffort(
+  filePath: string,
+): AsyncGenerator<Record<string, unknown>> {
+  try {
+    yield* readJsonlRecords(filePath);
+  } catch (err) {
+    if (isDeterministicReadFailure(err)) {
+      throw err;
+    }
+    // Diagnostic readers (single-session log viewers) return the records
+    // available before a stream failure. Aggregate scans across all session
+    // files (loadCostUsageSummary, discoverAllSessions, etc.) still call the
+    // strict `readJsonlRecords` directly so a mid-write failure on one file
+    // does not silently understate totals across the whole summary.
+  }
+}
+
 async function scanTranscriptFile(params: {
   filePath: string;
   config?: OpenClawConfig;
@@ -933,7 +963,7 @@ export async function loadSessionLogs(params: {
   const logs: SessionLogEntry[] = [];
   const limit = params.limit ?? 50;
 
-  for await (const parsed of readJsonlRecords(sessionFile)) {
+  for await (const parsed of readJsonlRecordsBestEffort(sessionFile)) {
     try {
       const message = parsed.message as Record<string, unknown> | undefined;
       if (!message) {

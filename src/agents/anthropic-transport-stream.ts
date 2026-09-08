@@ -175,8 +175,16 @@ function convertContentBlocks(
   content: Array<
     { type: "text"; text: string } | { type: "image"; data: string; mimeType: string }
   >,
+  model: AnthropicTransportModel,
 ) {
-  const hasImages = content.some((item) => item.type === "image");
+  // Text-only models reject requests carrying image content blocks outright.
+  // `model.input` is the same authoritative capability list already used to
+  // gate images on user turns above; when it is missing "image", drop image
+  // blocks from tool results too instead of sending a request the model
+  // cannot accept. If the capability list ever fails to declare "image" for
+  // a model that actually supports it, this only degrades to text-only tool
+  // output -- it never silently drops legitimate text.
+  const hasImages = model.input.includes("image") && content.some((item) => item.type === "image");
   if (!hasImages) {
     return sanitizeTransportPayloadText(
       content.map((item) => ("text" in item ? item.text : "")).join("\n"),
@@ -326,7 +334,7 @@ function convertAnthropicMessages(
         {
           type: "tool_result",
           tool_use_id: toolResult.toolCallId,
-          content: convertContentBlocks(toolResult.content),
+          content: convertContentBlocks(toolResult.content, model),
           is_error: toolResult.isError,
         },
       ];
@@ -339,7 +347,7 @@ function convertAnthropicMessages(
         toolResults.push({
           type: "tool_result",
           tool_use_id: nextMsg.toolCallId,
-          content: convertContentBlocks(nextMsg.content),
+          content: convertContentBlocks(nextMsg.content, model),
           is_error: nextMsg.isError,
         });
         j += 1;

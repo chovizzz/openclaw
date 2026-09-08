@@ -3,10 +3,6 @@ import { fileURLToPath } from "node:url";
 import { formatErrorMessage } from "../../infra/errors.js";
 import { resolveOpenClawPackageRootSync } from "../../infra/openclaw-root.js";
 import { createSubsystemLogger } from "../../logging/subsystem.js";
-import type {
-  BundledChannelEntryContract,
-  BundledChannelSetupEntryContract,
-} from "../../plugin-sdk/channel-entry-contract.js";
 import {
   listBundledChannelPluginMetadata,
   resolveBundledChannelGeneratedPath,
@@ -16,10 +12,33 @@ import type { PluginRuntime } from "../../plugins/runtime/types.js";
 import { isJavaScriptModulePath, loadChannelPluginModule } from "./module-loader.js";
 import type { ChannelId, ChannelPlugin } from "./types.js";
 
+// Core owns its own runtime-shape view of the bundled entry contract instead of
+// importing the plugin-facing type from `../../plugin-sdk/channel-entry-contract.js`.
+// `src/plugin-sdk/*` is the public contract extensions build against; core
+// depending back on it for its own internal loader typing creates an
+// unnecessary core -> plugin-sdk -> core back-edge. This mirrors only the
+// fields bundled.ts actually reads off a loaded module at runtime.
+type BundledChannelEntryRuntimeContract = {
+  kind: "bundled-channel-entry";
+  id: string;
+  name: string;
+  description: string;
+  register: (api: unknown) => void;
+  loadChannelPlugin: () => ChannelPlugin;
+  loadChannelSecrets?: () => ChannelPlugin["secrets"] | undefined;
+  setChannelRuntime?: (runtime: PluginRuntime) => void;
+};
+
+type BundledChannelSetupEntryRuntimeContract = {
+  kind: "bundled-channel-setup-entry";
+  loadSetupPlugin: () => ChannelPlugin;
+  loadSetupSecrets?: () => ChannelPlugin["secrets"] | undefined;
+};
+
 type GeneratedBundledChannelEntry = {
   id: string;
-  entry: BundledChannelEntryContract;
-  setupEntry?: BundledChannelSetupEntryContract;
+  entry: BundledChannelEntryRuntimeContract;
+  setupEntry?: BundledChannelSetupEntryRuntimeContract;
 };
 
 const log = createSubsystemLogger("channels");
@@ -35,7 +54,7 @@ const OPENCLAW_PACKAGE_ROOT =
 
 function resolveChannelPluginModuleEntry(
   moduleExport: unknown,
-): BundledChannelEntryContract | null {
+): BundledChannelEntryRuntimeContract | null {
   const resolved =
     moduleExport &&
     typeof moduleExport === "object" &&
@@ -45,7 +64,7 @@ function resolveChannelPluginModuleEntry(
   if (!resolved || typeof resolved !== "object") {
     return null;
   }
-  const record = resolved as Partial<BundledChannelEntryContract>;
+  const record = resolved as Partial<BundledChannelEntryRuntimeContract>;
   if (record.kind !== "bundled-channel-entry") {
     return null;
   }
@@ -58,12 +77,12 @@ function resolveChannelPluginModuleEntry(
   ) {
     return null;
   }
-  return record as BundledChannelEntryContract;
+  return record as BundledChannelEntryRuntimeContract;
 }
 
 function resolveChannelSetupModuleEntry(
   moduleExport: unknown,
-): BundledChannelSetupEntryContract | null {
+): BundledChannelSetupEntryRuntimeContract | null {
   const resolved =
     moduleExport &&
     typeof moduleExport === "object" &&
@@ -73,14 +92,14 @@ function resolveChannelSetupModuleEntry(
   if (!resolved || typeof resolved !== "object") {
     return null;
   }
-  const record = resolved as Partial<BundledChannelSetupEntryContract>;
+  const record = resolved as Partial<BundledChannelSetupEntryRuntimeContract>;
   if (record.kind !== "bundled-channel-setup-entry") {
     return null;
   }
   if (typeof record.loadSetupPlugin !== "function") {
     return null;
   }
-  return record as BundledChannelSetupEntryContract;
+  return record as BundledChannelSetupEntryRuntimeContract;
 }
 
 function resolveBundledChannelBoundaryRoot(params: {
@@ -188,14 +207,17 @@ function loadGeneratedBundledChannelEntries(): readonly GeneratedBundledChannelE
 
 type BundledChannelState = {
   entries: readonly GeneratedBundledChannelEntry[];
-  entriesById: Map<ChannelId, BundledChannelEntryContract>;
-  setupEntriesById: Map<ChannelId, BundledChannelSetupEntryContract>;
+  entriesById: Map<ChannelId, BundledChannelEntryRuntimeContract>;
+  setupEntriesById: Map<ChannelId, BundledChannelSetupEntryRuntimeContract>;
   sortedIds: readonly ChannelId[];
   pluginsById: Map<ChannelId, ChannelPlugin>;
   setupPluginsById: Map<ChannelId, ChannelPlugin>;
   secretsById: Map<ChannelId, ChannelPlugin["secrets"] | null>;
   setupSecretsById: Map<ChannelId, ChannelPlugin["secrets"] | null>;
-  runtimeSettersById: Map<ChannelId, NonNullable<BundledChannelEntryContract["setChannelRuntime"]>>;
+  runtimeSettersById: Map<
+    ChannelId,
+    NonNullable<BundledChannelEntryRuntimeContract["setChannelRuntime"]>
+  >;
 };
 
 const EMPTY_BUNDLED_CHANNEL_STATE: BundledChannelState = {
@@ -224,11 +246,11 @@ function getBundledChannelState(): BundledChannelState {
   }
   bundledChannelStateLoadInProgress = true;
   const entries = loadGeneratedBundledChannelEntries();
-  const entriesById = new Map<ChannelId, BundledChannelEntryContract>();
-  const setupEntriesById = new Map<ChannelId, BundledChannelSetupEntryContract>();
+  const entriesById = new Map<ChannelId, BundledChannelEntryRuntimeContract>();
+  const setupEntriesById = new Map<ChannelId, BundledChannelSetupEntryRuntimeContract>();
   const runtimeSettersById = new Map<
     ChannelId,
-    NonNullable<BundledChannelEntryContract["setChannelRuntime"]>
+    NonNullable<BundledChannelEntryRuntimeContract["setChannelRuntime"]>
   >();
   for (const { entry } of entries) {
     if (entriesById.has(entry.id)) {

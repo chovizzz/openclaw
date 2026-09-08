@@ -437,6 +437,141 @@ describe("sanitizeToolCallInputs", () => {
     expect(out.map((m) => m.role)).toEqual(["user"]);
   });
 
+  it("strips a stale partialJson scratch buffer from a finalized OpenAI Responses tool call", () => {
+    const input = castAgentMessages([
+      {
+        role: "assistant",
+        stopReason: "toolUse",
+        content: [
+          {
+            type: "toolCall",
+            id: "call_1|item_1",
+            name: "read",
+            arguments: { path: "a" },
+            partialJson: '{"path":"a"}',
+          },
+        ],
+      },
+    ]);
+
+    const out = sanitizeToolCallInputs(input);
+    const toolCalls = getAssistantToolCallBlocks(out);
+
+    expect(toolCalls).toHaveLength(1);
+    expect(toolCalls[0]).not.toHaveProperty("partialJson");
+    expect((toolCalls[0] as { arguments?: unknown }).arguments).toEqual({ path: "a" });
+  });
+
+  it("strips a stale empty partialJson buffer from a finalized no-argument tool call", () => {
+    const input = castAgentMessages([
+      {
+        role: "assistant",
+        stopReason: "toolUse",
+        content: [
+          {
+            type: "toolCall",
+            id: "call_2|item_2",
+            name: "list",
+            arguments: {},
+            partialJson: "",
+          },
+        ],
+      },
+    ]);
+
+    const out = sanitizeToolCallInputs(input);
+    const toolCalls = getAssistantToolCallBlocks(out);
+
+    expect(toolCalls).toHaveLength(1);
+    expect(toolCalls[0]).not.toHaveProperty("partialJson");
+  });
+
+  it.each([
+    {
+      name: "the turn was aborted mid-stream (stopReason !== toolUse)",
+      message: {
+        role: "assistant",
+        stopReason: "aborted",
+        content: [
+          {
+            type: "toolCall",
+            id: "call_1|item_1",
+            name: "read",
+            arguments: { path: "a" },
+            partialJson: '{"path":"a"}',
+          },
+        ],
+      },
+    },
+    {
+      name: "the buffer is not a complete JSON object and arguments are non-empty",
+      message: {
+        role: "assistant",
+        stopReason: "toolUse",
+        content: [
+          {
+            type: "toolCall",
+            id: "call_1|item_1",
+            name: "read",
+            arguments: { path: "a" },
+            partialJson: '{"path":"a', // truncated mid-stream
+          },
+        ],
+      },
+    },
+    {
+      name: "the id does not match the composite callId|itemId shape",
+      message: {
+        role: "assistant",
+        stopReason: "toolUse",
+        content: [
+          {
+            type: "toolCall",
+            id: "call_1",
+            name: "read",
+            arguments: { path: "a" },
+            partialJson: '{"path":"a"}',
+          },
+        ],
+      },
+    },
+  ])(
+    "drops a tool call with a leftover partialJson buffer as an incomplete streaming artifact when $name",
+    ({ message }) => {
+      const input = castAgentMessages([message, { role: "user", content: "hello" }]);
+
+      const out = sanitizeToolCallInputs(input);
+
+      expect(out.map((m) => m.role)).toEqual(["user"]);
+    },
+  );
+
+  it("drops the whole signed-thinking assistant turn instead of stripping a sibling partialJson buffer", () => {
+    const input = castAgentMessages([
+      {
+        role: "assistant",
+        stopReason: "toolUse",
+        content: [
+          { type: "thinking", thinking: "Read it.", thinkingSignature: "sig_read" },
+          {
+            type: "toolCall",
+            id: "call_1|item_1",
+            name: "read",
+            arguments: { path: "a" },
+            partialJson: '{"path":"a"}',
+          },
+        ],
+      },
+    ]);
+
+    const out = sanitizeToolCallInputs(input, {
+      allowedToolNames: ["read"],
+      allowProviderOwnedThinkingReplay: true,
+    });
+
+    expect(out).toEqual([]);
+  });
+
   it.each([
     {
       name: "drops tool calls with missing or blank name/id",
