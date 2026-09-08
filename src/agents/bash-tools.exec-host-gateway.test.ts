@@ -1,3 +1,4 @@
+import { setImmediate } from "node:timers/promises";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const INLINE_EVAL_HIT = {
@@ -41,7 +42,9 @@ const buildEnforcedShellCommandMock = vi.hoisted(() =>
 );
 const recordAllowlistMatchesUseMock = vi.hoisted(() => vi.fn());
 const resolveApprovalDecisionOrUndefinedMock = vi.hoisted(() =>
-  vi.fn(async (): Promise<string | null | undefined> => undefined),
+  vi.fn(
+    async (_params?: { onFailure: () => void }): Promise<string | null | undefined> => undefined,
+  ),
 );
 const resolveExecHostApprovalContextMock = vi.hoisted(() =>
   vi.fn(() => ({
@@ -52,7 +55,9 @@ const resolveExecHostApprovalContextMock = vi.hoisted(() =>
   })),
 );
 const runExecProcessMock = vi.hoisted(() => vi.fn());
-const sendExecApprovalFollowupResultMock = vi.hoisted(() => vi.fn(async () => undefined));
+const sendExecApprovalFollowupResultMock = vi.hoisted(() =>
+  vi.fn(async (_target: unknown, _text: string) => undefined),
+);
 const enforceStrictInlineEvalApprovalBoundaryMock = vi.hoisted(() =>
   vi.fn(
     (value: {
@@ -127,6 +132,19 @@ vi.mock("../infra/exec-inline-eval.js", () => ({
 }));
 
 let processGatewayAllowlist: typeof import("./bash-tools.exec-host-gateway.js").processGatewayAllowlist;
+
+function captureProcessUnhandledRejections() {
+  const reasons: unknown[] = [];
+  const originalProcessEmit = process.emit.bind(process);
+  const processEmit = vi.spyOn(process, "emit").mockImplementation((event, ...args) => {
+    if (event === "unhandledRejection") {
+      reasons.push(args[0]);
+      return true;
+    }
+    return originalProcessEmit(event, ...args);
+  });
+  return { reasons, restore: () => processEmit.mockRestore() };
+}
 
 describe("processGatewayAllowlist", () => {
   beforeAll(async () => {
@@ -392,5 +410,115 @@ describe("processGatewayAllowlist", () => {
       );
     });
     expect(runExecProcessMock).not.toHaveBeenCalled();
+  });
+
+  it("does not send a false approval-request-failed denial once dispatch has started", async () => {
+    const unhandledRejections = captureProcessUnhandledRejections();
+
+    try {
+      resolveApprovalDecisionOrUndefinedMock.mockResolvedValue("allow-once");
+      createExecApprovalDecisionStateMock.mockReturnValue({
+        baseDecision: { timedOut: false },
+        approvedByAsk: true,
+        deniedReason: null,
+      });
+      runExecProcessMock.mockResolvedValue({
+        session: { id: "sess-1" },
+        promise: Promise.resolve({ aggregated: "done", timedOut: false, exitCode: 0 }),
+      });
+      // Delivering the final "finished" summary fails. Once dispatch has started (the
+      // process actually spawned and ran), the outer race guard must not additionally
+      // claim the request itself failed -- that would misreport a real (successful)
+      // execution as an approval failure, i.e. lose the real outcome to the wrong side
+      // of the race.
+      sendExecApprovalFollowupResultMock.mockRejectedValue(
+        new Error("notify delivery unavailable"),
+      );
+
+      const result = await processGatewayAllowlist({
+        command: "echo ok",
+        workdir: process.cwd(),
+        env: process.env as Record<string, string>,
+        pty: false,
+        defaultTimeoutSec: 30,
+        security: "allowlist",
+        ask: "off",
+        safeBins: new Set(),
+        safeBinProfiles: {},
+        warnings: [],
+        approvalRunningNoticeMs: 0,
+        maxOutput: 1000,
+        pendingMaxOutput: 1000,
+      });
+
+      expect(result.pendingResult?.details.status).toBe("approval-pending");
+      await vi.waitFor(() => {
+        expect(runExecProcessMock).toHaveBeenCalledTimes(1);
+      });
+      await vi.waitFor(() => {
+        expect(sendExecApprovalFollowupResultMock).toHaveBeenCalledTimes(1);
+      });
+      await setImmediate();
+
+      expect(unhandledRejections.reasons).toEqual([]);
+      // Only the real "finished" delivery was attempted; a second
+      // "approval-request-failed" call would mean the race guard let the wrong-side
+      // message through after dispatch already started.
+      expect(sendExecApprovalFollowupResultMock).toHaveBeenCalledTimes(1);
+      expect(sendExecApprovalFollowupResultMock.mock.calls[0]?.[1]).not.toContain(
+        "approval-request-failed",
+      );
+    } finally {
+      unhandledRejections.restore();
+    }
+  });
+
+  it("sends the approval-request-failed fallback and reports it cleanly when dispatch never started", async () => {
+    const unhandledRejections = captureProcessUnhandledRejections();
+
+    try {
+      // The approval decision itself fails before dispatch, and even the fallback
+      // follow-up delivery fails. This must not escape as an unhandled rejection.
+      resolveApprovalDecisionOrUndefinedMock.mockImplementation(
+        async (params?: { onFailure: () => void }) => {
+          params?.onFailure();
+          return undefined;
+        },
+      );
+      sendExecApprovalFollowupResultMock.mockRejectedValue(
+        new Error("approval failure follow-up unavailable"),
+      );
+
+      const result = await processGatewayAllowlist({
+        command: "echo ok",
+        workdir: process.cwd(),
+        env: process.env as Record<string, string>,
+        pty: false,
+        defaultTimeoutSec: 30,
+        security: "allowlist",
+        ask: "off",
+        safeBins: new Set(),
+        safeBinProfiles: {},
+        warnings: [],
+        approvalRunningNoticeMs: 0,
+        maxOutput: 1000,
+        pendingMaxOutput: 1000,
+      });
+
+      expect(result.pendingResult?.details.status).toBe("approval-pending");
+      await vi.waitFor(() => {
+        expect(sendExecApprovalFollowupResultMock).toHaveBeenCalledTimes(1);
+      });
+      await setImmediate();
+
+      expect(unhandledRejections.reasons).toEqual([]);
+      expect(sendExecApprovalFollowupResultMock).toHaveBeenCalledWith(
+        null,
+        "Exec denied (gateway id=req-1, approval-request-failed): echo ok",
+      );
+      expect(runExecProcessMock).not.toHaveBeenCalled();
+    } finally {
+      unhandledRejections.restore();
+    }
   });
 });

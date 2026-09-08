@@ -288,15 +288,24 @@ export async function processGatewayAllowlist(
       turnSourceThreadId: params.turnSourceThreadId,
     });
 
-    void (async () => {
+    const sendApprovalRequestFailedFollowup = async (): Promise<void> => {
+      await sendExecApprovalFollowupResult(
+        followupTarget,
+        `Exec denied (gateway id=${approvalId}, approval-request-failed): ${params.command}`,
+      );
+    };
+    let gatewayInvocationStarted = false;
+
+    (async () => {
       const decision = await resolveApprovalDecisionOrUndefined({
         approvalId,
         preResolvedDecision,
-        onFailure: () =>
-          void sendExecApprovalFollowupResult(
-            followupTarget,
-            `Exec denied (gateway id=${approvalId}, approval-request-failed): ${params.command}`,
-          ),
+        onFailure: () => {
+          // resolveApprovalDecisionOrUndefined's onFailure contract is synchronous
+          // fire-and-forget; catch locally so a follow-up delivery failure here cannot
+          // escape as an unhandled rejection or double-fire the outer catch below.
+          void sendApprovalRequestFailedFollowup().catch(() => undefined);
+        },
       });
       if (decision === undefined) {
         return;
@@ -370,6 +379,7 @@ export async function processGatewayAllowlist(
 
       let run: Awaited<ReturnType<typeof runExecProcess>> | null = null;
       try {
+        gatewayInvocationStarted = true;
         run = await runExecProcess({
           command: params.command,
           execCommand: enforcedCommand,
@@ -406,7 +416,18 @@ export async function processGatewayAllowlist(
         ? `Exec finished (gateway id=${approvalId}, session=${run.session.id}, ${exitLabel})\n${output}`
         : `Exec finished (gateway id=${approvalId}, session=${run.session.id}, ${exitLabel})`;
       await sendExecApprovalFollowupResult(followupTarget, summary);
-    })();
+    })()
+      .catch(async (): Promise<void> => {
+        // Once dispatch starts, a delivery/registration failure elsewhere in this
+        // detached flow cannot mean execution was denied -- the try/catch around the
+        // spawn above already owns reporting that outcome. Only send the
+        // "approval-request-failed" fallback when the real command never ran.
+        if (gatewayInvocationStarted) {
+          return;
+        }
+        await sendApprovalRequestFailedFollowup();
+      })
+      .catch(() => undefined);
 
     return {
       pendingResult: buildExecApprovalPendingToolResult({

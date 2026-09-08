@@ -192,12 +192,14 @@ describe("acquireSessionWriteLock", () => {
     }
   });
 
-  it("reclaims payload-less orphan lock files after the short init grace", async () => {
+  it("reclaims payload-less orphan lock files past the short-timeout grace", async () => {
     await withTempSessionLockFile(async ({ sessionFile, lockPath }) => {
       await fs.writeFile(lockPath, "", "utf8");
       const orphanDate = new Date(Date.now() - 10_000);
       await fs.utimes(lockPath, orphanDate, orphanDate);
 
+      // timeoutMs (10_000) is below the 30s full grace, so the 5s short-timeout
+      // grace applies; the 10s-old orphan is well past it and gets reclaimed.
       const lock = await acquireSessionWriteLock({
         sessionFile,
         timeoutMs: 10_000,
@@ -206,6 +208,21 @@ describe("acquireSessionWriteLock", () => {
       const raw = await fs.readFile(lockPath, "utf8");
       expect(JSON.parse(raw)).toMatchObject({ pid: process.pid });
       await lock.release();
+    });
+  });
+
+  it("preserves a payload-less orphan lock within the short-timeout grace (reverse case)", async () => {
+    await withTempSessionLockFile(async ({ sessionFile, lockPath }) => {
+      await fs.writeFile(lockPath, "", "utf8");
+      const orphanDate = new Date(Date.now() - 1_000);
+      await fs.utimes(lockPath, orphanDate, orphanDate);
+
+      // 1s old is well within the 5s short-timeout grace, so the payload-less
+      // lock must NOT be reclaimed while its owner may still be mid-write.
+      await expect(
+        acquireSessionWriteLock({ sessionFile, timeoutMs: 200, staleMs: 60_000 }),
+      ).rejects.toThrow(/session file locked/);
+      await expect(fs.access(lockPath)).resolves.toBeUndefined();
     });
   });
 
@@ -518,5 +535,31 @@ describe("acquireSessionWriteLock", () => {
       process.off("SIGINT", keepAlive);
       process.kill = originalKill;
     }
+  });
+});
+
+describe("resolveOrphanLockPayloadGraceMs", () => {
+  it("uses the short 5s grace for acquire timeouts below the full grace", () => {
+    expect(__testing.resolveOrphanLockPayloadGraceMs(10_000)).toBe(
+      __testing.SHORT_TIMEOUT_ORPHAN_LOCK_PAYLOAD_GRACE_MS,
+    );
+    expect(__testing.resolveOrphanLockPayloadGraceMs(29_999)).toBe(
+      __testing.SHORT_TIMEOUT_ORPHAN_LOCK_PAYLOAD_GRACE_MS,
+    );
+  });
+
+  it("uses the full 30s grace once the acquire timeout reaches it", () => {
+    expect(__testing.resolveOrphanLockPayloadGraceMs(30_000)).toBe(
+      __testing.ORPHAN_LOCK_PAYLOAD_GRACE_MS,
+    );
+    expect(__testing.resolveOrphanLockPayloadGraceMs(60_000)).toBe(
+      __testing.ORPHAN_LOCK_PAYLOAD_GRACE_MS,
+    );
+  });
+
+  it("uses the full 30s grace for an unbounded (Infinity) acquire timeout", () => {
+    expect(__testing.resolveOrphanLockPayloadGraceMs(Number.POSITIVE_INFINITY)).toBe(
+      __testing.ORPHAN_LOCK_PAYLOAD_GRACE_MS,
+    );
   });
 });

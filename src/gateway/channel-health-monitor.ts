@@ -89,7 +89,7 @@ export function startChannelHealthMonitor(deps: ChannelHealthMonitorDeps): Chann
   const startedAt = Date.now();
   let stopped = false;
   let checkInFlight = false;
-  let timer: ReturnType<typeof setInterval> | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
 
   const rKey = (channelId: string, accountId: string) => `${channelId}:${accountId}`;
 
@@ -188,10 +188,24 @@ export function startChannelHealthMonitor(deps: ChannelHealthMonitorDeps): Chann
     }
   }
 
+  function scheduleCheck(delayMs: number) {
+    timer = setTimeout(() => {
+      timer = null;
+      void runCheck().finally(() => {
+        if (!stopped) {
+          scheduleCheck(checkIntervalMs);
+        }
+      });
+    }, delayMs);
+    if (typeof timer === "object" && "unref" in timer) {
+      timer.unref();
+    }
+  }
+
   function stop() {
     stopped = true;
     if (timer) {
-      clearInterval(timer);
+      clearTimeout(timer);
       timer = null;
     }
   }
@@ -200,10 +214,12 @@ export function startChannelHealthMonitor(deps: ChannelHealthMonitorDeps): Chann
     stopped = true;
   } else {
     abortSignal?.addEventListener("abort", stop, { once: true });
-    timer = setInterval(() => void runCheck(), checkIntervalMs);
-    if (typeof timer === "object" && "unref" in timer) {
-      timer.unref();
-    }
+    // Run the first check right when startup grace expires instead of waiting for the
+    // next full checkIntervalMs tick (previously a setInterval armed at t=0 meant the
+    // first real check could be delayed by up to an extra checkIntervalMs beyond grace).
+    // Each subsequent check is scheduled only after the previous one settles, so a slow
+    // check cannot overlap with -- or get silently skipped by -- the next evaluation.
+    scheduleCheck(timing.monitorStartupGraceMs);
     log.info?.(
       `started (interval: ${Math.round(checkIntervalMs / 1000)}s, startup-grace: ${Math.round(timing.monitorStartupGraceMs / 1000)}s, channel-connect-grace: ${Math.round(timing.channelConnectGraceMs / 1000)}s)`,
     );

@@ -166,6 +166,64 @@ describe("waitForAgentRun", () => {
       endedAt: 200,
     });
   });
+
+  it("caps an overflowed grace timeout instead of collapsing the wait to a tiny value", async () => {
+    callGatewayMock.mockResolvedValue({ status: "ok" });
+
+    await waitForAgentRun({ runId: "run-huge", timeoutMs: Number.MAX_VALUE });
+
+    expect(callGatewayMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: "agent.wait",
+        timeoutMs: __testing.MAX_TIMER_TIMEOUT_MS,
+      }),
+    );
+  });
+
+  it("does not shorten an ordinary, well within bounds wait when adding grace", async () => {
+    callGatewayMock.mockResolvedValue({ status: "ok" });
+
+    await waitForAgentRun({ runId: "run-normal", timeoutMs: 30_000 });
+
+    expect(callGatewayMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        method: "agent.wait",
+        // Normal case: grace is simply added, no capping kicks in.
+        timeoutMs: 32_000,
+      }),
+    );
+  });
+});
+
+describe("addWaitTimeoutGraceMs", () => {
+  it("adds the grace period for ordinary finite timeouts", () => {
+    expect(__testing.addWaitTimeoutGraceMs(10_000, 2_000)).toBe(12_000);
+  });
+
+  it("caps the sum at the max safe timer delay instead of overflowing", () => {
+    expect(__testing.addWaitTimeoutGraceMs(__testing.MAX_TIMER_TIMEOUT_MS - 100, 2_000)).toBe(
+      __testing.MAX_TIMER_TIMEOUT_MS,
+    );
+  });
+
+  it("caps overflowed finite sums instead of falling back to a small minimum", () => {
+    expect(__testing.addWaitTimeoutGraceMs(Number.MAX_VALUE, 2_000)).toBe(
+      __testing.MAX_TIMER_TIMEOUT_MS,
+    );
+  });
+
+  it("caps non-finite input instead of propagating Infinity/NaN downstream", () => {
+    expect(__testing.addWaitTimeoutGraceMs(Number.POSITIVE_INFINITY, 2_000)).toBe(
+      __testing.MAX_TIMER_TIMEOUT_MS,
+    );
+  });
+
+  it("does not prematurely cut a legitimate long-but-safe wait short (reverse case)", () => {
+    // A caller requesting a wait comfortably below the max timer delay should get exactly
+    // timeoutMs + grace back, not be clamped down to some smaller "safe" value.
+    const requested = __testing.MAX_TIMER_TIMEOUT_MS - 10_000;
+    expect(__testing.addWaitTimeoutGraceMs(requested, 2_000)).toBe(requested + 2_000);
+  });
 });
 
 describe("waitForAgentRunAndReadUpdatedAssistantReply", () => {

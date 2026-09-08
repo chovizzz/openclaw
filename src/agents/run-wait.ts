@@ -4,6 +4,30 @@ import { extractAssistantText, stripToolMessages } from "./tools/chat-history-te
 
 type GatewayCaller = typeof callGateway;
 
+// Node's setTimeout/setInterval delay is a signed 32-bit int; larger values wrap/overflow
+// in the timer internals. Keep this in sync with the same literal used by ../gateway/call.ts.
+const MAX_TIMER_TIMEOUT_MS = 2_147_483_647;
+
+/**
+ * Adds a grace period on top of an agent-run wait timeout before it is used as the
+ * envelope timeout for the underlying gateway call. Callers can pass arbitrarily large
+ * (even non-finite) `timeoutMs` values; naive `timeoutMs + graceMs` addition can overflow
+ * to `Infinity`, which downstream call.ts's timeout resolution treats as "invalid" and
+ * silently falls back to a small default (10s) -- prematurely cutting a legitimate long
+ * wait short instead of honoring it. Cap the sum at MAX_TIMER_TIMEOUT_MS instead so an
+ * overflowed value still resolves to the longest safe timer delay.
+ */
+function addWaitTimeoutGraceMs(timeoutMs: number, graceMs: number): number {
+  if (!Number.isFinite(timeoutMs)) {
+    return MAX_TIMER_TIMEOUT_MS;
+  }
+  const withGrace = timeoutMs + graceMs;
+  return Math.min(
+    MAX_TIMER_TIMEOUT_MS,
+    Number.isFinite(withGrace) ? withGrace : MAX_TIMER_TIMEOUT_MS,
+  );
+}
+
 const defaultRunWaitDeps = {
   callGateway,
 };
@@ -128,7 +152,7 @@ export async function waitForAgentRun(params: {
         runId: params.runId,
         timeoutMs,
       },
-      timeoutMs: timeoutMs + 2000,
+      timeoutMs: addWaitTimeoutGraceMs(timeoutMs, 2000),
     });
     if (wait?.status === "timeout") {
       return normalizeAgentWaitResult("timeout", wait);
@@ -224,4 +248,6 @@ export const __testing = {
         }
       : defaultRunWaitDeps;
   },
+  addWaitTimeoutGraceMs,
+  MAX_TIMER_TIMEOUT_MS,
 };

@@ -60,6 +60,27 @@ function registerMalformedBootstrapFileHook() {
   });
 }
 
+function registerDuplicateBootstrapFileHook() {
+  registerInternalHook("agent:bootstrap", (event) => {
+    const context = event.context as AgentBootstrapHookContext;
+    context.bootstrapFiles = [
+      ...context.bootstrapFiles,
+      {
+        name: "AGENTS.md",
+        path: "AGENTS.md",
+        content: "duplicate relative hook content",
+        missing: false,
+      } as unknown as WorkspaceBootstrapFile,
+      {
+        name: "AGENTS.md",
+        path: path.join(context.workspaceDir, ".", "AGENTS.md"),
+        content: "duplicate absolute hook content",
+        missing: false,
+      } as unknown as WorkspaceBootstrapFile,
+    ];
+  });
+}
+
 describe("resolveBootstrapFilesForRun", () => {
   beforeEach(() => clearInternalHooks());
   afterEach(() => clearInternalHooks());
@@ -88,6 +109,28 @@ describe("resolveBootstrapFilesForRun", () => {
     ).toBe(true);
     expect(warnings).toHaveLength(3);
     expect(warnings[0]).toContain('missing or invalid "path" field');
+  });
+
+  it("dedupes hook-injected bootstrap paths relative to the workspace", async () => {
+    registerDuplicateBootstrapFileHook();
+
+    const workspaceDir = await makeTempWorkspace("openclaw-bootstrap-");
+    const agentsPath = path.join(workspaceDir, "AGENTS.md");
+    await fs.writeFile(agentsPath, "workspace rules", "utf8");
+
+    const files = await resolveBootstrapFilesForRun({ workspaceDir });
+    const agentsFiles = files.filter((file) => file.path === agentsPath);
+
+    // Two hook-injected duplicates (one relative, one absolute) referring to the same
+    // on-disk file must collapse to a single entry keyed by workspace-relative path, not
+    // depend on the process cwd at hook-registration time.
+    expect(agentsFiles).toHaveLength(1);
+    expect(agentsFiles[0]?.content).toBe("workspace rules");
+
+    const context = await resolveBootstrapContextForRun({ workspaceDir });
+    const agentsContextFiles = context.contextFiles.filter((file) => file.path === agentsPath);
+    expect(agentsContextFiles).toHaveLength(1);
+    expect(agentsContextFiles[0]?.content).toBe("workspace rules");
   });
 });
 

@@ -45,9 +45,15 @@ const DEFAULT_STALE_MS = 30 * 60 * 1000;
 const DEFAULT_MAX_HOLD_MS = 5 * 60 * 1000;
 const DEFAULT_WATCHDOG_INTERVAL_MS = 60_000;
 const DEFAULT_TIMEOUT_GRACE_MS = 2 * 60 * 1000;
-// A payload-less lock can be left behind if shutdown lands between open("wx")
-// and the owner metadata write. Keep the grace short so 10s callers recover.
-const ORPHAN_LOCK_PAYLOAD_GRACE_MS = 5_000;
+// A payload-less lock can be left behind during the window between open("wx")
+// and the owner metadata write if the owner is suspended (CPU pressure,
+// container freeze, I/O stall, GC pause). 30s covers realistic system pauses
+// while staying well below DEFAULT_TIMEOUT_GRACE_MS (120s).
+const ORPHAN_LOCK_PAYLOAD_GRACE_MS = 30_000;
+// Short-timeout callers (below the 30s grace) keep the original, tighter
+// recovery window so they are not forced to wait almost as long as the grace
+// itself before recovering a genuinely orphaned lock.
+const SHORT_TIMEOUT_ORPHAN_LOCK_PAYLOAD_GRACE_MS = 5_000;
 const MAX_LOCK_HOLD_MS = 2_147_000_000;
 
 type CleanupState = {
@@ -379,6 +385,7 @@ async function shouldReclaimContendedLockFile(
   details: LockInspectionDetails,
   staleMs: number,
   nowMs: number,
+  orphanPayloadGraceMs: number = ORPHAN_LOCK_PAYLOAD_GRACE_MS,
 ): Promise<boolean> {
   if (!details.stale) {
     return false;
@@ -389,11 +396,22 @@ async function shouldReclaimContendedLockFile(
   try {
     const stat = await fs.stat(lockPath);
     const ageMs = Math.max(0, nowMs - stat.mtimeMs);
-    return ageMs > Math.min(staleMs, ORPHAN_LOCK_PAYLOAD_GRACE_MS);
+    return ageMs > Math.min(staleMs, orphanPayloadGraceMs);
   } catch (error) {
     const code = (error as { code?: string } | null)?.code;
     return code !== "ENOENT";
   }
+}
+
+// Short acquire timeouts (below the full grace) get the tighter 5s recovery
+// window; default/long-timeout callers get the full 30s grace so a lock
+// isn't reclaimed out from under an owner merely suspended between the
+// exclusive create and the metadata write.
+function resolveOrphanLockPayloadGraceMs(timeoutMs: number): number {
+  if (timeoutMs < ORPHAN_LOCK_PAYLOAD_GRACE_MS) {
+    return SHORT_TIMEOUT_ORPHAN_LOCK_PAYLOAD_GRACE_MS;
+  }
+  return ORPHAN_LOCK_PAYLOAD_GRACE_MS;
 }
 
 function shouldTreatAsOrphanSelfLock(params: {
@@ -481,6 +499,7 @@ export async function acquireSessionWriteLock(params: {
   const timeoutMs = resolvePositiveMs(params.timeoutMs, 10_000, { allowInfinity: true });
   const staleMs = resolvePositiveMs(params.staleMs, DEFAULT_STALE_MS);
   const maxHoldMs = resolvePositiveMs(params.maxHoldMs, DEFAULT_MAX_HOLD_MS);
+  const orphanPayloadGraceMs = resolveOrphanLockPayloadGraceMs(timeoutMs);
   const sessionFile = path.resolve(params.sessionFile);
   const sessionDir = path.dirname(sessionFile);
   await fs.mkdir(sessionDir, { recursive: true });
@@ -587,7 +606,15 @@ export async function acquireSessionWriteLock(params: {
               : [...inspected.staleReasons, "orphan-self-pid"],
           }
         : inspected;
-      if (await shouldReclaimContendedLockFile(lockPath, reclaimDetails, staleMs, nowMs)) {
+      if (
+        await shouldReclaimContendedLockFile(
+          lockPath,
+          reclaimDetails,
+          staleMs,
+          nowMs,
+          orphanPayloadGraceMs,
+        )
+      ) {
         await fs.rm(lockPath, { force: true });
         continue;
       }
@@ -607,6 +634,9 @@ export const __testing = {
   handleTerminationSignal,
   releaseAllLocksSync,
   runLockWatchdogCheck,
+  resolveOrphanLockPayloadGraceMs,
+  ORPHAN_LOCK_PAYLOAD_GRACE_MS,
+  SHORT_TIMEOUT_ORPHAN_LOCK_PAYLOAD_GRACE_MS,
 };
 
 export async function drainSessionWriteLockStateForTest(): Promise<void> {

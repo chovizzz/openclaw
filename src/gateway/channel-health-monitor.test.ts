@@ -68,8 +68,7 @@ async function startAndRunCheck(
 ) {
   const monitor = startDefaultMonitor(manager, overrides);
   const startupGraceMs = overrides.timing?.monitorStartupGraceMs ?? overrides.startupGraceMs ?? 0;
-  const checkIntervalMs = overrides.checkIntervalMs ?? DEFAULT_CHECK_INTERVAL_MS;
-  await vi.advanceTimersByTimeAsync(startupGraceMs + checkIntervalMs + 1);
+  await vi.advanceTimersByTimeAsync(startupGraceMs + 1);
   return monitor;
 }
 
@@ -178,6 +177,61 @@ describe("channel-health-monitor", () => {
     const monitor = startDefaultMonitor(manager, { timing: { monitorStartupGraceMs: 60_000 } });
     await vi.advanceTimersByTimeAsync(5_001);
     expect(manager.getRuntimeSnapshot).not.toHaveBeenCalled();
+    monitor.stop();
+  });
+
+  it("runs the first check exactly when startup grace elapses, not grace + interval", async () => {
+    // Regression guard for the fix itself: with a large checkIntervalMs relative to the
+    // startup grace, the first check must fire at grace elapsed, not wait for the next
+    // full interval tick on top of the grace (which is what a plain setInterval armed at
+    // monitor-start time would do).
+    const manager = createMockChannelManager();
+    const monitor = startDefaultMonitor(manager, {
+      checkIntervalMs: 60_000,
+      timing: { monitorStartupGraceMs: 1_000 },
+    });
+
+    await vi.advanceTimersByTimeAsync(1_001);
+
+    expect(manager.getRuntimeSnapshot).toHaveBeenCalledTimes(1);
+    monitor.stop();
+  });
+
+  it("does not run the first check before grace elapses even with a short interval (reverse case)", async () => {
+    const manager = createMockChannelManager();
+    const monitor = startDefaultMonitor(manager, {
+      checkIntervalMs: 100,
+      timing: { monitorStartupGraceMs: 5_000 },
+    });
+
+    await vi.advanceTimersByTimeAsync(4_999);
+    expect(manager.getRuntimeSnapshot).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(2);
+    expect(manager.getRuntimeSnapshot).toHaveBeenCalledTimes(1);
+    monitor.stop();
+  });
+
+  it("spaces the second check exactly checkIntervalMs after the first settles (reverse case)", async () => {
+    // Guards against a rearm bug that would fire the next check immediately after the
+    // first settles instead of waiting a full checkIntervalMs. The first check fires at
+    // virtual time = monitorStartupGraceMs (500); the rearm timer is set relative to that
+    // fire time, so the second check is due at 500 + checkIntervalMs = 1_500, not
+    // 1_500 + whatever extra time the test spent observing the first call.
+    const manager = createMockChannelManager();
+    const monitor = startDefaultMonitor(manager, {
+      checkIntervalMs: 1_000,
+      timing: { monitorStartupGraceMs: 500 },
+    });
+
+    await vi.advanceTimersByTimeAsync(501);
+    expect(manager.getRuntimeSnapshot).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(998);
+    expect(manager.getRuntimeSnapshot).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(2);
+    expect(manager.getRuntimeSnapshot).toHaveBeenCalledTimes(2);
     monitor.stop();
   });
 

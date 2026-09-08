@@ -31,6 +31,31 @@ import type { ExecToolDetails } from "./bash-tools.exec-types.js";
 import { callGatewayTool } from "./tools/gateway.js";
 import { listNodes, resolveNodeIdFromList } from "./tools/nodes-utils.js";
 
+// Node's setTimeout/setInterval delay is a signed 32-bit int; larger values wrap/overflow
+// in the timer internals. Keep this in sync with the same literal used by ../gateway/call.ts.
+const MAX_TIMER_TIMEOUT_MS = 2_147_483_647;
+
+/**
+ * Adds a grace period on top of a caller-configured exec timeout (in ms) before it is used
+ * as the gateway invoke timeout for `system.run`. `timeoutSec` is user/config-controlled and
+ * unbounded, so `timeoutSec * 1000` can already be an extreme or non-finite value before this
+ * grace is even added. Naively adding grace to such a value can overflow to `Infinity`, which
+ * downstream gateway timeout resolution treats as invalid and silently falls back to a small
+ * default -- prematurely cutting a legitimate long-running command short instead of honoring
+ * the configured timeout. Cap the result at MAX_TIMER_TIMEOUT_MS so an overflowed value still
+ * resolves to the longest safe timer delay.
+ */
+export function addSafeExecTimeoutGraceMs(timeoutMs: number, graceMs: number): number {
+  if (!Number.isFinite(timeoutMs)) {
+    return MAX_TIMER_TIMEOUT_MS;
+  }
+  const withGrace = timeoutMs + graceMs;
+  return Math.min(
+    MAX_TIMER_TIMEOUT_MS,
+    Number.isFinite(withGrace) ? withGrace : MAX_TIMER_TIMEOUT_MS,
+  );
+}
+
 export type ExecuteNodeHostCommandParams = {
   command: string;
   workdir: string | undefined;
@@ -201,8 +226,10 @@ export async function executeNodeHostCommand(
     }) || inlineEvalHit !== null;
   const invokeTimeoutMs = Math.max(
     10_000,
-    (typeof params.timeoutSec === "number" ? params.timeoutSec : params.defaultTimeoutSec) * 1000 +
+    addSafeExecTimeoutGraceMs(
+      (typeof params.timeoutSec === "number" ? params.timeoutSec : params.defaultTimeoutSec) * 1000,
       5_000,
+    ),
   );
   const buildInvokeParams = (
     approvedByAsk: boolean,
@@ -315,15 +342,24 @@ export async function executeNodeHostCommand(
         turnSourceThreadId: params.turnSourceThreadId,
       });
 
-      void (async () => {
+      const sendApprovalRequestFailedFollowup = async (): Promise<void> => {
+        await execHostShared.sendExecApprovalFollowupResult(
+          followupTarget,
+          `Exec denied (node=${nodeId} id=${approvalId}, approval-request-failed): ${params.command}`,
+        );
+      };
+      let nodeInvocationStarted = false;
+
+      (async () => {
         const decision = await execHostShared.resolveApprovalDecisionOrUndefined({
           approvalId,
           preResolvedDecision,
-          onFailure: () =>
-            void execHostShared.sendExecApprovalFollowupResult(
-              followupTarget,
-              `Exec denied (node=${nodeId} id=${approvalId}, approval-request-failed): ${params.command}`,
-            ),
+          onFailure: () => {
+            // resolveApprovalDecisionOrUndefined's onFailure contract is synchronous
+            // fire-and-forget; catch locally so a follow-up delivery failure here
+            // cannot escape as an unhandled rejection or double-fire the outer catch.
+            void sendApprovalRequestFailedFollowup().catch(() => undefined);
+          },
         });
         if (decision === undefined) {
           return;
@@ -370,6 +406,7 @@ export async function executeNodeHostCommand(
         }
 
         try {
+          nodeInvocationStarted = true;
           const raw = await callGatewayTool<{
             payload?: {
               stdout?: string;
@@ -408,7 +445,18 @@ export async function executeNodeHostCommand(
             `Exec denied (node=${nodeId} id=${approvalId}, invoke-failed): ${params.command}`,
           );
         }
-      })();
+      })()
+        .catch(async (): Promise<void> => {
+          // Once dispatch starts, a delivery/registration failure elsewhere in this
+          // detached flow cannot mean execution was denied -- the try/catch around the
+          // invoke call above already owns reporting that outcome. Only send the
+          // "approval-request-failed" fallback when the real command never ran.
+          if (nodeInvocationStarted) {
+            return;
+          }
+          await sendApprovalRequestFailedFollowup();
+        })
+        .catch(() => undefined);
 
       return execHostShared.buildExecApprovalPendingToolResult({
         host: "node",
