@@ -80,22 +80,22 @@ function resolveWatchPaths(workspaceDir: string, config?: OpenClawConfig): strin
   return paths;
 }
 
-function toWatchGlobRoot(raw: string): string {
-  // Chokidar treats globs as POSIX-ish patterns. Normalize Windows separators
-  // so `*` works consistently across platforms.
+function normalizeWatchRoot(raw: string): string {
+  // Normalize Windows separators and trailing slashes so watch targets
+  // compare and dedupe consistently across platforms.
   return raw.replaceAll("\\", "/").replace(/\/+$/, "");
 }
 
 function resolveWatchTargets(workspaceDir: string, config?: OpenClawConfig): string[] {
-  // Skills are defined by SKILL.md; watch only those files to avoid traversing
-  // or watching unrelated large trees (e.g. datasets) that can exhaust FDs.
+  // chokidar v4+ dropped glob support (globs are now matched literally), so a
+  // pattern like `<root>/*/SKILL.md` never matches a real path and silently
+  // never fires. Watch each skills root directory itself instead, bounded by
+  // `depth`, and filter to SKILL.md files in the change handler. This covers
+  // both a root that is itself a skill folder (`<root>/SKILL.md`) and the
+  // standard layout (`<root>/<skillName>/SKILL.md`).
   const targets = new Set<string>();
   for (const root of resolveWatchPaths(workspaceDir, config)) {
-    const globRoot = toWatchGlobRoot(root);
-    // Some configs point directly at a skill folder.
-    targets.add(`${globRoot}/SKILL.md`);
-    // Standard layout: <skillsRoot>/<skillName>/SKILL.md
-    targets.add(`${globRoot}/*/SKILL.md`);
+    targets.add(normalizeWatchRoot(root));
   }
   return Array.from(targets).toSorted();
 }
@@ -156,9 +156,19 @@ function createSkillsPathWatcher(watchPath: string, debounceMs: number): SkillsP
     }, debounceMs);
   };
 
-  watcher.on("add", (p) => schedule(p));
-  watcher.on("change", (p) => schedule(p));
-  watcher.on("unlink", (p) => schedule(p));
+  // chokidar watches the whole root directory tree (bounded by `depth`), not
+  // just SKILL.md files, so filter here to avoid refreshing on unrelated
+  // file changes within a skills root.
+  const isSkillFile = (p: string) => path.basename(p) === "SKILL.md";
+  watcher.on("add", (p) => {
+    if (isSkillFile(p)) schedule(p);
+  });
+  watcher.on("change", (p) => {
+    if (isSkillFile(p)) schedule(p);
+  });
+  watcher.on("unlink", (p) => {
+    if (isSkillFile(p)) schedule(p);
+  });
   watcher.on("error", (err) => {
     log.warn(`skills watcher error (${watchPath}): ${String(err)}`);
   });

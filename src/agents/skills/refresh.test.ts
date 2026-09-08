@@ -47,17 +47,17 @@ describe("ensureSkillsWatcher", () => {
     expect(opts.ignored).toBe(refreshModule.DEFAULT_SKILLS_WATCH_IGNORED);
     expect(opts.depth).toBe(2);
     const posix = (p: string) => p.replaceAll("\\", "/");
+    // Watch targets are the skills root directories themselves (not glob
+    // patterns): chokidar v4+ removed glob support, so a pattern like
+    // `<root>/*/SKILL.md` would be matched literally and never fire.
     expect(targets).toEqual(
       expect.arrayContaining([
-        posix(path.join("/tmp/workspace", "skills", "SKILL.md")),
-        posix(path.join("/tmp/workspace", "skills", "*", "SKILL.md")),
-        posix(path.join("/tmp/workspace", ".agents", "skills", "SKILL.md")),
-        posix(path.join("/tmp/workspace", ".agents", "skills", "*", "SKILL.md")),
-        posix(path.join(os.homedir(), ".agents", "skills", "SKILL.md")),
-        posix(path.join(os.homedir(), ".agents", "skills", "*", "SKILL.md")),
+        posix(path.join("/tmp/workspace", "skills")),
+        posix(path.join("/tmp/workspace", ".agents", "skills")),
+        posix(path.join(os.homedir(), ".agents", "skills")),
       ]),
     );
-    expect(targets.every((target) => target.includes("SKILL.md"))).toBe(true);
+    expect(targets.some((target) => target.includes("*"))).toBe(false);
     const ignored = refreshModule.DEFAULT_SKILLS_WATCH_IGNORED;
 
     // Node/JS paths
@@ -119,7 +119,7 @@ describe("ensureSkillsWatcher", () => {
     refreshModule.ensureSkillsWatcher({ workspaceDir: "/tmp/workspace-a" });
     refreshModule.ensureSkillsWatcher({ workspaceDir: "/tmp/workspace-b" });
 
-    const sharedRoot = posixJoin(os.homedir(), ".agents", "skills", "SKILL.md");
+    const sharedRoot = posixJoin(os.homedir(), ".agents", "skills");
     const sharedIndex = (watchMock.mock.calls as unknown as Array<[string, unknown]>).findIndex(
       (call) => call[0] === sharedRoot,
     );
