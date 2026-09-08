@@ -2,6 +2,22 @@ import { describe, expect, it } from "vitest";
 import { sanitizeForPromptLiteral, wrapUntrustedPromptDataBlock } from "./sanitize-for-prompt.js";
 import { buildAgentSystemPrompt } from "./system-prompt.js";
 
+function hasLoneSurrogate(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next < 0xdc00 || next > 0xdfff) {
+        return true;
+      }
+      index += 1;
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      return true;
+    }
+  }
+  return false;
+}
+
 describe("sanitizeForPromptLiteral (OC-19 hardening)", () => {
   it("strips ASCII control chars (CR/LF/NUL/tab)", () => {
     expect(sanitizeForPromptLiteral("/tmp/a\nb\rc\x00d\te")).toBe("/tmp/abcde");
@@ -85,5 +101,38 @@ describe("wrapUntrustedPromptDataBlock", () => {
     });
     expect(block).toContain("\nabcd\n");
     expect(block).not.toContain("\nabcdef\n");
+  });
+
+  it("does not split a surrogate pair straddling the max char limit", () => {
+    const text = `${"a".repeat(3)}😀tail`;
+
+    // Sanity check: confirm the naive `.slice(0, 4)` cut point really lands
+    // between the high and low surrogate of the emoji for this input, so
+    // this test proves the fix rather than passing trivially.
+    const highSurrogate = text.charCodeAt(3);
+    const lowSurrogate = text.charCodeAt(4);
+    expect(highSurrogate).toBeGreaterThanOrEqual(0xd800);
+    expect(highSurrogate).toBeLessThanOrEqual(0xdbff);
+    expect(lowSurrogate).toBeGreaterThanOrEqual(0xdc00);
+    expect(lowSurrogate).toBeLessThanOrEqual(0xdfff);
+
+    const block = wrapUntrustedPromptDataBlock({
+      label: "Data",
+      text,
+      maxChars: 4,
+    });
+
+    expect(block).toContain(`\n${"a".repeat(3)}\n`);
+    expect(hasLoneSurrogate(block)).toBe(false);
+  });
+
+  it("does not shorten text whose length lands exactly on the max char limit", () => {
+    const block = wrapUntrustedPromptDataBlock({
+      label: "Data",
+      text: "abcd",
+      maxChars: 4,
+    });
+
+    expect(block).toContain("\nabcd\n");
   });
 });

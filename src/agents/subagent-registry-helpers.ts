@@ -36,6 +36,24 @@ const FROZEN_RESULT_TEXT_MAX_BYTES = 100 * 1024;
 
 export type SubagentRunOrphanReason = "missing-session-entry" | "missing-session-id";
 
+/**
+ * Truncates a string to the longest UTF-8 byte-safe prefix within maxBytes,
+ * backing up over any trailing multi-byte sequence instead of splitting it.
+ * UTF-8 continuation bytes have the form 10xxxxxx; the start byte of a
+ * sequence is any byte that is NOT a continuation byte.
+ */
+function truncateUtf8BytePrefix(value: string, maxBytes: number): string {
+  const buf = Buffer.from(value, "utf8");
+  if (buf.byteLength <= maxBytes) {
+    return value;
+  }
+  let end = Math.max(0, maxBytes);
+  while (end > 0 && (buf[end] & 0xc0) === 0x80) {
+    end--;
+  }
+  return buf.subarray(0, end).toString("utf8");
+}
+
 export function capFrozenResultText(resultText: string): string {
   const trimmed = resultText.trim();
   if (!trimmed) {
@@ -50,7 +68,7 @@ export function capFrozenResultText(resultText: string): string {
     0,
     FROZEN_RESULT_TEXT_MAX_BYTES - Buffer.byteLength(notice, "utf8"),
   );
-  const payload = Buffer.from(trimmed, "utf8").subarray(0, maxPayloadBytes).toString("utf8");
+  const payload = truncateUtf8BytePrefix(trimmed, maxPayloadBytes);
   return `${payload}${notice}`;
 }
 

@@ -5,6 +5,7 @@ import {
   normalizeOptionalLowercaseString,
   normalizeOptionalString,
 } from "../shared/string-coerce.js";
+import { truncateUtf16Safe } from "../utils.js";
 import { canonicalizeBase64, estimateBase64DecodedBytes } from "./base64.js";
 import { convertHeicToJpeg } from "./image-ops.js";
 import { detectMime } from "./mime.js";
@@ -226,7 +227,7 @@ function clampText(text: string, maxChars: number): string {
   if (text.length <= maxChars) {
     return text;
   }
-  return text.slice(0, maxChars);
+  return truncateUtf16Safe(text, maxChars);
 }
 
 async function normalizeInputImage(params: {

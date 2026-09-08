@@ -1496,4 +1496,145 @@ describe("openai transport stream", () => {
     expect(params).not.toHaveProperty("store");
     expect(params).not.toHaveProperty("reasoning_effort");
   });
+
+  describe("orphaned msg_* id handling (#88019)", () => {
+    const baseModel = {
+      id: "gpt-5.4",
+      name: "GPT-5.4",
+      api: "openai-responses",
+      provider: "openai",
+      baseUrl: "https://api.openai.com/v1",
+      reasoning: true,
+      input: ["text"],
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+      contextWindow: 200000,
+      maxTokens: 8192,
+    } satisfies Model<"openai-responses">;
+
+    const baseUsage = {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    };
+
+    it("falls back to a synthetic id (not the raw JSON signature) when the paired id was dropped", () => {
+      // Regression for #88019: after downgradeOpenAIReasoningBlocks drops a
+      // replayable reasoning item, the paired text block's textSignature can
+      // be phase-only ({v:1,phase}) with no id. Before the fix, parseTextSignature
+      // treated any signature that didn't match `{v:1,id:string}` as a *plain
+      // string id*, so it replayed the literal JSON text
+      // (`{"v":1,"phase":"commentary"}`) as the Responses item id. Confirm
+      // that literal-JSON-as-id behavior is what the naive path would produce,
+      // then assert the real output avoids it.
+      const orphanedSignature = JSON.stringify({ v: 1, phase: "commentary" });
+
+      const params = buildOpenAIResponsesParams(
+        { ...baseModel } as Model<"openai-responses">,
+        {
+          systemPrompt: "system",
+          messages: [
+            {
+              role: "assistant",
+              api: baseModel.api,
+              provider: baseModel.provider,
+              model: baseModel.id,
+              usage: baseUsage,
+              stopReason: "stop",
+              timestamp: 1,
+              content: [
+                {
+                  type: "text",
+                  text: "thinking out loud",
+                  textSignature: orphanedSignature,
+                },
+              ],
+            },
+            { role: "user", content: "Continue", timestamp: 2 },
+          ],
+          tools: [],
+        } as never,
+        undefined,
+      ) as { input?: Array<{ role?: string; id?: string; phase?: string }> };
+
+      const assistantItem = params.input?.find((item) => item.role === "assistant");
+      expect(assistantItem?.id).not.toBe(orphanedSignature);
+      expect(assistantItem).toMatchObject({ role: "assistant", id: "msg_0", phase: "commentary" });
+    });
+
+    it("assigns distinct synthetic ids to multiple id-less text blocks in one assistant turn", () => {
+      // Two text blocks with no textSignature at all (e.g. commentary + final
+      // answer after a reasoning drop) must not collide on the same
+      // `msg_${msgIndex}` fallback, since msgIndex is per-message, not per-block.
+      const params = buildOpenAIResponsesParams(
+        { ...baseModel } as Model<"openai-responses">,
+        {
+          systemPrompt: "system",
+          messages: [
+            {
+              role: "assistant",
+              api: baseModel.api,
+              provider: baseModel.provider,
+              model: baseModel.id,
+              usage: baseUsage,
+              stopReason: "stop",
+              timestamp: 1,
+              content: [
+                { type: "text", text: "commentary" },
+                { type: "text", text: "final" },
+              ],
+            },
+            { role: "user", content: "Continue", timestamp: 2 },
+          ],
+          tools: [],
+        } as never,
+        undefined,
+      ) as { input?: Array<{ role?: string; id?: string; content?: unknown }> };
+
+      const assistantItems = params.input?.filter((item) => item.role === "assistant") ?? [];
+      expect(assistantItems).toHaveLength(2);
+      const ids = assistantItems.map((item) => item.id);
+      expect(ids).toEqual(["msg_0", "msg_0_1"]);
+      expect(new Set(ids).size).toBe(2);
+    });
+
+    it("keeps a normally-paired msg_* id unchanged (no orphan handling triggered)", () => {
+      // Reverse case: when the textSignature carries a real paired id, the
+      // fix must not touch it -- the fallback/disambiguation path should
+      // never engage for a fully-paired signature.
+      const params = buildOpenAIResponsesParams(
+        { ...baseModel } as Model<"openai-responses">,
+        {
+          systemPrompt: "system",
+          messages: [
+            {
+              role: "assistant",
+              api: baseModel.api,
+              provider: baseModel.provider,
+              model: baseModel.id,
+              usage: baseUsage,
+              stopReason: "stop",
+              timestamp: 1,
+              content: [
+                {
+                  type: "text",
+                  text: "answer",
+                  textSignature: JSON.stringify({ v: 1, id: "msg_paired_123" }),
+                },
+              ],
+            },
+            { role: "user", content: "Continue", timestamp: 2 },
+          ],
+          tools: [],
+        } as never,
+        undefined,
+      ) as { input?: Array<{ role?: string; id?: string; phase?: string }> };
+
+      const assistantItem = params.input?.find((item) => item.role === "assistant");
+      expect(assistantItem).toMatchObject({ role: "assistant", id: "msg_paired_123" });
+      expect(assistantItem?.phase).toBeUndefined();
+    });
+  });
 });

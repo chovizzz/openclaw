@@ -188,17 +188,25 @@ function encodeTextSignatureV1(id: string, phase?: "commentary" | "final_answer"
 
 function parseTextSignature(
   signature: string | undefined,
-): { id: string; phase?: "commentary" | "final_answer" } | undefined {
+): { id?: string; phase?: "commentary" | "final_answer" } | undefined {
   if (!signature) {
     return undefined;
   }
   if (signature.startsWith("{")) {
     try {
       const parsed = JSON.parse(signature) as { v?: unknown; id?: unknown; phase?: unknown };
-      if (parsed.v === 1 && typeof parsed.id === "string") {
-        return parsed.phase === "commentary" || parsed.phase === "final_answer"
-          ? { id: parsed.id, phase: parsed.phase }
-          : { id: parsed.id };
+      if (parsed.v === 1) {
+        const id = typeof parsed.id === "string" ? parsed.id : undefined;
+        const phase =
+          parsed.phase === "commentary" || parsed.phase === "final_answer"
+            ? parsed.phase
+            : undefined;
+        // A reasoning-dropped replay (issue #88019) keeps the phase but omits
+        // the paired msg_* id; fall through to the synthetic-id fallback below.
+        if (id !== undefined || phase !== undefined) {
+          return { id, phase };
+        }
+        return undefined;
       }
     } catch {
       // Keep legacy plain-string behavior below.
@@ -283,6 +291,11 @@ function convertResponsesMessages(
       }
     } else if (msg.role === "assistant") {
       const output: ResponseInput = [];
+      // Reasoning-dropped/model-switch replay strips textSignature ids, which can
+      // leave several text blocks in one assistant turn without ids. msgIndex is
+      // per-message, so disambiguate synthetic fallbacks per text block to avoid
+      // duplicate item ids (issue #88019).
+      let textFallbackOrdinal = 0;
       const isDifferentModel =
         msg.model !== model.id && msg.provider === model.provider && msg.api === model.api;
       for (const block of msg.content) {
@@ -310,11 +323,19 @@ function convertResponsesMessages(
             output.push(replayableReasoningItem);
           }
         } else if (block.type === "text") {
+          const parsedTextSignature = parseTextSignature(block.textSignature);
+          let fallbackMsgId: string | undefined;
+          if (!parsedTextSignature?.id) {
+            fallbackMsgId =
+              textFallbackOrdinal === 0
+                ? `msg_${msgIndex}`
+                : `msg_${msgIndex}_${textFallbackOrdinal}`;
+            textFallbackOrdinal += 1;
+          }
           const msgId =
-            normalizeResponsesReplayItemId(
-              parseTextSignature(block.textSignature)?.id ?? `msg_${msgIndex}`,
-              "msg",
-            ) ?? `msg_${msgIndex}`;
+            normalizeResponsesReplayItemId(parsedTextSignature?.id ?? fallbackMsgId, "msg") ??
+            fallbackMsgId ??
+            `msg_${msgIndex}`;
           output.push({
             type: "message",
             role: "assistant",
@@ -327,7 +348,7 @@ function convertResponsesMessages(
             ],
             status: "completed",
             id: msgId,
-            phase: parseTextSignature(block.textSignature)?.phase,
+            phase: parsedTextSignature?.phase,
           });
         } else if (block.type === "toolCall") {
           const [callId, itemIdRaw] = block.id.split("|");
