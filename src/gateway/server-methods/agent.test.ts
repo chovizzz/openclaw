@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BARE_SESSION_RESET_PROMPT } from "../../auto-reply/reply/session-reset-prompt.js";
+import type { AgentRunContext } from "../../infra/agent-events.js";
 import { findTaskByRunId, resetTaskRegistryForTests } from "../../tasks/task-registry.js";
 import { withTempDir } from "../../test-helpers/temp-dir.js";
 import { agentHandlers } from "./agent.js";
@@ -14,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   updateSessionStore: vi.fn(),
   agentCommand: vi.fn(),
   registerAgentRunContext: vi.fn(),
+  getAgentRunContext: vi.fn((): AgentRunContext | undefined => undefined),
   performGatewaySessionReset: vi.fn(),
   getLatestSubagentRunByChildSessionKey: vi.fn(),
   replaceSubagentRunAfterSteer: vi.fn(),
@@ -68,6 +70,7 @@ vi.mock("../../agents/agent-scope.js", () => ({
 
 vi.mock("../../infra/agent-events.js", () => ({
   registerAgentRunContext: mocks.registerAgentRunContext,
+  getAgentRunContext: mocks.getAgentRunContext,
   onAgentEvent: vi.fn(),
 }));
 
@@ -1080,6 +1083,48 @@ describe("gateway agent handler", () => {
     expect(capturedStore).toBeDefined();
     expect(capturedStore?.["agent:main:work"]).toBeDefined();
     expect(capturedStore?.["agent:main:MAIN"]).toBeUndefined();
+  });
+
+  it("does not dispatch a duplicate agent run when another call already claimed the run context", async () => {
+    primeMainAgentRun();
+    mocks.agentCommand.mockClear();
+    // Simulate a concurrent (or retried-after-dedupe-eviction) call for the
+    // same idempotencyKey that already registered an active run context
+    // before this call reached registration.
+    mocks.getAgentRunContext.mockReturnValueOnce({ sessionKey: "agent:main:main" });
+
+    const respond = await runMainAgent("hi", "test-idem-active-run-context");
+
+    expect(mocks.agentCommand).not.toHaveBeenCalled();
+    expect(respond).toHaveBeenCalledWith(
+      true,
+      { runId: "test-idem-active-run-context", status: "in_flight" },
+      undefined,
+      { cached: true, runId: "test-idem-active-run-context" },
+    );
+  });
+
+  it("still returns the cached result for a genuine duplicate request with the same idempotencyKey", async () => {
+    primeMainAgentRun();
+    mocks.agentCommand.mockClear();
+    const idem = "test-idem-genuine-duplicate";
+    const cachedPayload = { runId: idem, status: "accepted" as const, acceptedAt: Date.now() };
+    const context = makeContext();
+    context.dedupe.set(`agent:${idem}`, { ts: Date.now(), ok: true, payload: cachedPayload });
+
+    const respond = vi.fn();
+    await invokeAgent(
+      {
+        message: "hi",
+        agentId: "main",
+        sessionKey: "agent:main:main",
+        idempotencyKey: idem,
+      },
+      { respond, reqId: idem, context },
+    );
+
+    expect(mocks.agentCommand).not.toHaveBeenCalled();
+    expect(respond).toHaveBeenCalledWith(true, cachedPayload, undefined, { cached: true });
   });
 
   it("handles bare /new by resetting the same session and sending reset greeting prompt", async () => {

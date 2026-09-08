@@ -18,7 +18,7 @@ import {
   type SessionEntry,
   updateSessionStore,
 } from "../../config/sessions.js";
-import { registerAgentRunContext } from "../../infra/agent-events.js";
+import { getAgentRunContext, registerAgentRunContext } from "../../infra/agent-events.js";
 import {
   resolveAgentDeliveryPlan,
   resolveAgentOutboundTarget,
@@ -502,6 +502,11 @@ export const agentHandlers: GatewayRequestHandlers = {
     let resolvedSessionKey = requestedSessionKey;
     let isNewSession = false;
     let skipTimestampInjection = false;
+    // Set from inside the session-resolution block below (idempotencyKey is
+    // known as `idem` by then). Tracks whether another still-active call
+    // already claimed this exact run before we could, so we can avoid
+    // dispatching a duplicate agent run further down.
+    let runContextAlreadyActive = false;
 
     const resetCommandMatch = message.match(RESET_COMMAND_RE);
     if (resetCommandMatch && requestedSessionKey) {
@@ -676,6 +681,11 @@ export const agentHandlers: GatewayRequestHandlers = {
           bestEffortDeliver = true;
         }
       }
+      // Snapshot before registering: registerAgentRunContext is a synchronous
+      // get-then-set with no await in between, so this check is atomic with
+      // the registration and reliably distinguishes "I am the first claimant"
+      // from "another still-active call already owns this runId".
+      runContextAlreadyActive = getAgentRunContext(idem) !== undefined;
       registerAgentRunContext(idem, { sessionKey: canonicalSessionKey });
     }
 
@@ -799,6 +809,20 @@ export const agentHandlers: GatewayRequestHandlers = {
         : resolvedChannel);
 
     const deliver = request.deliver === true && resolvedChannel !== INTERNAL_MESSAGE_CHANNEL;
+
+    // A concurrent call for the same idempotencyKey already claimed this run
+    // context earlier (before this call reached registration) and is still
+    // active. The dedupe cache entry that would normally short-circuit this
+    // retry may have been evicted (see server-maintenance.ts dedupe cleanup)
+    // or not yet written by the winner, so fall back to the run-context claim
+    // as the source of truth and avoid dispatching a duplicate agent run.
+    if (runContextAlreadyActive) {
+      respond(true, { runId, status: "in_flight" as const }, undefined, {
+        cached: true,
+        runId,
+      });
+      return;
+    }
 
     const accepted = {
       runId,

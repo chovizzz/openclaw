@@ -1,4 +1,5 @@
 import type { ChannelId } from "../channels/plugins/types.js";
+import { createDedupeCache } from "../infra/dedupe.js";
 import { resolveAccountEntry } from "../routing/account-lookup.js";
 import { normalizeAccountId } from "../routing/session-key.js";
 import {
@@ -69,7 +70,12 @@ type CompiledSenderPolicy = {
   wildcard?: GroupToolPolicyConfig;
 };
 
-const warnedLegacyToolsBySenderKeys = new Set<string>();
+const MAX_WARNED_LEGACY_TOOLS_BY_SENDER_KEYS = 4096;
+// Warning state spans fresh config snapshots; bounding it means evicted legacy keys can re-warn.
+const warnedLegacyToolsBySenderKeys = createDedupeCache({
+  ttlMs: 0,
+  maxSize: MAX_WARNED_LEGACY_TOOLS_BY_SENDER_KEYS,
+});
 const compiledToolsBySenderCache = new WeakMap<
   GroupToolPolicyBySenderConfig,
   CompiledSenderPolicy
@@ -109,10 +115,9 @@ function normalizeLegacySenderKey(value: string): string {
 
 function warnLegacyToolsBySenderKey(rawKey: string) {
   const trimmed = rawKey.trim();
-  if (!trimmed || warnedLegacyToolsBySenderKeys.has(trimmed)) {
+  if (!trimmed || warnedLegacyToolsBySenderKeys.check(trimmed)) {
     return;
   }
-  warnedLegacyToolsBySenderKeys.add(trimmed);
   process.emitWarning(
     `toolsBySender key "${trimmed}" is deprecated. Use explicit prefixes (id:, e164:, username:, name:). Legacy unprefixed keys are matched as id only.`,
     {

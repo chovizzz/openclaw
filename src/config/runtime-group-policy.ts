@@ -1,3 +1,4 @@
+import { createDedupeCache } from "../infra/dedupe.js";
 import { normalizeOptionalString } from "../shared/string-coerce.js";
 import type { GroupPolicy } from "./types.base.js";
 
@@ -87,7 +88,13 @@ export function resolveAllowlistProviderRuntimeGroupPolicy(
   });
 }
 
-const warnedMissingProviderGroupPolicy = new Set<string>();
+const MAX_WARNED_MISSING_PROVIDER_GROUP_POLICY_KEYS = 4096;
+// Warn-once keys accumulate per provider/account for the process lifetime;
+// bounding them means evicted keys can re-warn instead of growing without limit.
+const warnedMissingProviderGroupPolicy = createDedupeCache({
+  ttlMs: 0,
+  maxSize: MAX_WARNED_MISSING_PROVIDER_GROUP_POLICY_KEYS,
+});
 
 export function warnMissingProviderGroupPolicyFallbackOnce(params: {
   providerMissingFallbackApplied: boolean;
@@ -100,10 +107,9 @@ export function warnMissingProviderGroupPolicyFallbackOnce(params: {
     return false;
   }
   const key = `${params.providerKey}:${params.accountId ?? "*"}`;
-  if (warnedMissingProviderGroupPolicy.has(key)) {
+  if (warnedMissingProviderGroupPolicy.check(key)) {
     return false;
   }
-  warnedMissingProviderGroupPolicy.add(key);
   const blockedLabel = normalizeOptionalString(params.blockedLabel) || "group messages";
   params.log(
     `${params.providerKey}: channels.${params.providerKey} is missing; defaulting groupPolicy to "allowlist" (${blockedLabel} blocked until explicitly configured).`,

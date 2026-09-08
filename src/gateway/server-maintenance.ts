@@ -1,5 +1,5 @@
 import type { HealthSummary } from "../commands/health.js";
-import { sweepStaleRunContexts } from "../infra/agent-events.js";
+import { getAgentRunContext, sweepStaleRunContexts } from "../infra/agent-events.js";
 import { cleanOldMedia } from "../media/store.js";
 import { abortChatRunById, type ChatAbortControllerEntry } from "./chat-abort.js";
 import type { ChatRunEntry } from "./server-chat.js";
@@ -80,7 +80,25 @@ export function startGatewayMaintenanceTimers(params: {
   const dedupeCleanup = setInterval(() => {
     const AGENT_RUN_SEQ_MAX = 10_000;
     const now = Date.now();
+    // The "agent:<idempotencyKey>" entry set on accept is the retry guard for
+    // the whole lifetime of a long-running agent turn (see server-methods
+    // agent.ts). Blind TTL/size-based eviction can drop it mid-run: the next
+    // client retry with the same idempotencyKey then misses the cache and
+    // dispatches a second, duplicate agent run. Skip eviction for keys whose
+    // run is still registered as active (registerAgentRunContext is only
+    // cleared on lifecycle end/error, or by the 49h stale sweep below), so
+    // only genuinely stale/completed entries get pruned.
+    const isActiveRunDedupeKey = (key: string): boolean => {
+      if (!key.startsWith("agent:")) {
+        return false;
+      }
+      const runId = key.slice("agent:".length);
+      return runId ? getAgentRunContext(runId) !== undefined : false;
+    };
     for (const [k, v] of params.dedupe) {
+      if (isActiveRunDedupeKey(k)) {
+        continue;
+      }
       if (now - v.ts > DEDUPE_TTL_MS) {
         params.dedupe.delete(k);
       }
@@ -89,9 +107,15 @@ export function startGatewayMaintenanceTimers(params: {
       // Snapshot the excess count before deleting: the loop bound used to be
       // recomputed against the shrinking Map, so only half the overflow was
       // ever evicted. Sort by entry timestamp rather than Map insertion order
-      // so refresh/reinsert paths still prune the oldest data first.
+      // so refresh/reinsert paths still prune the oldest data first. Active
+      // run entries are excluded from the eviction pool for the same reason
+      // as the TTL sweep above. If every entry were active the pool would be
+      // empty and the map would sit above DEDUPE_MAX until those runs finish —
+      // acceptable because that needs DEDUPE_MAX concurrently *running* agents
+      // and each context is cleared in agent-command's finally.
       const excess = params.dedupe.size - DEDUPE_MAX;
       const oldestKeys = [...params.dedupe.entries()]
+        .filter(([key]) => !isActiveRunDedupeKey(key))
         .toSorted(([, left], [, right]) => left.ts - right.ts)
         .slice(0, excess)
         .map(([key]) => key);

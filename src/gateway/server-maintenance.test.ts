@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { HealthSummary } from "../commands/health.js";
+import { registerAgentRunContext, resetAgentRunContextForTest } from "../infra/agent-events.js";
 import type { ChatAbortControllerEntry } from "./chat-abort.js";
-import { DEDUPE_MAX } from "./server-constants.js";
+import { DEDUPE_MAX, DEDUPE_TTL_MS } from "./server-constants.js";
 
 const cleanOldMediaMock = vi.fn(async () => {});
 
@@ -65,6 +66,7 @@ describe("startGatewayMaintenanceTimers", () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.clearAllMocks();
+    resetAgentRunContextForTest();
   });
 
   it("does not schedule recursive media cleanup unless ttl is configured", async () => {
@@ -300,6 +302,69 @@ describe("startGatewayMaintenanceTimers", () => {
       expect(deps.dedupe.has(`k-${index}`)).toBe(false);
     }
     expect(deps.dedupe.has(`k-${overflow}`)).toBe(true);
+
+    stopMaintenanceTimers(timers);
+  });
+
+  it("keeps active agent dedupe entries past the normal ttl", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-22T00:00:00Z"));
+    const { startGatewayMaintenanceTimers } = await import("./server-maintenance.js");
+    const deps = createMaintenanceTimerDeps();
+    const now = Date.now();
+
+    // Still registered as an active agent run (not yet cleared by lifecycle
+    // end/error), so its dedupe entry is the only thing standing between a
+    // retry and a duplicate dispatch.
+    registerAgentRunContext("active-agent", { sessionKey: "agent:main:main" });
+    deps.dedupe.set("agent:active-agent", {
+      ts: now - DEDUPE_TTL_MS - 1,
+      ok: true,
+      payload: { runId: "active-agent", status: "accepted" },
+    });
+    deps.dedupe.set("agent:stale-agent", {
+      ts: now - DEDUPE_TTL_MS - 1,
+      ok: true,
+      payload: { runId: "stale-agent", status: "accepted" },
+    });
+
+    const timers = startGatewayMaintenanceTimers(deps);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(deps.dedupe.has("agent:active-agent")).toBe(true);
+    expect(deps.dedupe.has("agent:stale-agent")).toBe(false);
+
+    stopMaintenanceTimers(timers);
+  });
+
+  it("does not evict active agent dedupe entries while trimming overflow", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-03-22T00:00:00Z"));
+    const { startGatewayMaintenanceTimers } = await import("./server-maintenance.js");
+    const deps = createMaintenanceTimerDeps();
+    const now = Date.now();
+
+    for (let index = 0; index < DEDUPE_MAX; index += 1) {
+      deps.dedupe.set(`stable-${index}`, { ts: now - 1_000 + index, ok: true });
+    }
+    registerAgentRunContext("active-oldest", { sessionKey: "agent:main:main" });
+    deps.dedupe.set("agent:active-oldest", {
+      ts: now - 10_000,
+      ok: true,
+      payload: { runId: "active-oldest", status: "accepted" },
+    });
+    deps.dedupe.set("overflow-newest", { ts: now, ok: true });
+
+    const timers = startGatewayMaintenanceTimers(deps);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(deps.dedupe.size).toBe(DEDUPE_MAX);
+    expect(deps.dedupe.has("agent:active-oldest")).toBe(true);
+    expect(deps.dedupe.has("stable-0")).toBe(false);
+    expect(deps.dedupe.has("stable-1")).toBe(false);
+    expect(deps.dedupe.has("overflow-newest")).toBe(true);
 
     stopMaintenanceTimers(timers);
   });
