@@ -166,6 +166,30 @@ export class ConfigRuntimeRefreshError extends Error {
   }
 }
 
+/**
+ * Thrown by writeConfigFile when the on-disk config exists but could not be
+ * read (see ConfigFileSnapshot.readError). Writing in that state would
+ * serialize an empty best-effort fallback over the still-rich live file
+ * (for example after `sudo` leaves openclaw.json root-owned and EACCES),
+ * silently destroying the user's real config. There is intentionally no
+ * bypass option: fix the underlying read failure (permissions, corruption)
+ * and retry.
+ */
+export class ConfigWriteUnreadableBaseError extends Error {
+  readonly code = "CONFIG_WRITE_UNREADABLE_BASE";
+  readonly reason = "unreadable-config-before-write";
+
+  constructor(configPath: string, readErrorCode: string | null) {
+    super(
+      `Refusing to write ${configPath}: the existing config file could not be read` +
+        `${readErrorCode ? ` (${readErrorCode})` : ""}. Writing now would overwrite it with an ` +
+        `empty fallback config. Fix the underlying read failure (for example file ownership/` +
+        `permissions) and retry.`,
+    );
+    this.name = "ConfigWriteUnreadableBaseError";
+  }
+}
+
 function hashConfigRaw(raw: string | null): string {
   return crypto
     .createHash("sha256")
@@ -983,6 +1007,7 @@ function createConfigFileSnapshot(params: {
   valid: boolean;
   runtimeConfig: OpenClawConfig;
   hash?: string;
+  readError?: { code: string | null };
   issues: ConfigFileSnapshot["issues"];
   warnings: ConfigFileSnapshot["warnings"];
   legacyIssues: LegacyConfigIssue[];
@@ -1000,6 +1025,7 @@ function createConfigFileSnapshot(params: {
     runtimeConfig,
     config: runtimeConfig,
     hash: params.hash,
+    ...(params.readError ? { readError: params.readError } : {}),
     issues: params.issues,
     warnings: params.warnings,
     legacyIssues: params.legacyIssues,
@@ -1358,6 +1384,7 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
           valid: false,
           runtimeConfig: {},
           hash: hashConfigRaw(null),
+          readError: { code: nodeErr?.code ?? null },
           issues: [{ path: "", message }],
           warnings: [],
           legacyIssues: [],
@@ -1389,6 +1416,15 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
     clearConfigCache();
     let persistCandidate: unknown = cfg;
     const { snapshot } = await readConfigFileSnapshotInternal();
+    // Fail closed: a present-but-unreadable config produces an empty best-effort
+    // fallback snapshot (raw: null, runtimeConfig: {}). Proceeding to write here
+    // would serialize that skeletal fallback over the still-rich live file,
+    // permanently discarding the user's real config (issue-class: EACCES after
+    // `sudo` leaves openclaw.json root-owned). Block unconditionally; there is no
+    // caller today that legitimately needs to overwrite an unreadable config.
+    if (snapshot.exists && snapshot.readError) {
+      throw new ConfigWriteUnreadableBaseError(configPath, snapshot.readError.code);
+    }
     let envRefMap: Map<string, string> | null = null;
     let changedPaths: Set<string> | null = null;
     if (snapshot.valid && snapshot.exists) {

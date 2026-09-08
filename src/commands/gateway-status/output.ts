@@ -27,6 +27,49 @@ export function pickPrimaryProbedTarget(probed: GatewayStatusProbedTarget[]) {
   );
 }
 
+/**
+ * Builds a per-target identity key from the probe's self-reported host/ip
+ * plus a device/instance discriminator. Two probe targets (e.g. an SSH
+ * tunnel and a configured remote URL) that both answer as the *same*
+ * gateway process should not trip the "multiple gateways" warning just
+ * because they were reached over different transports/ports.
+ *
+ * Returns null when identity can't be established (missing self info, or a
+ * self record with host/ip but no device/instance discriminator) - callers
+ * treat null as "can't prove same identity", which conservatively still
+ * warns rather than silently hiding a real multi-gateway situation.
+ */
+function gatewaySelfIdentityKey(entry: GatewayStatusProbedTarget): string | null {
+  if (!entry.self) {
+    return null;
+  }
+  const host = typeof entry.self.host === "string" ? entry.self.host.trim().toLowerCase() : "";
+  const ip = typeof entry.self.ip === "string" ? entry.self.ip.trim().toLowerCase() : "";
+  const discriminator =
+    typeof entry.self.instanceId === "string" && entry.self.instanceId.trim()
+      ? `instance:${entry.self.instanceId.trim().toLowerCase()}`
+      : typeof entry.self.deviceId === "string" && entry.self.deviceId.trim()
+        ? `device:${entry.self.deviceId.trim().toLowerCase()}`
+        : "";
+  if ((!host && !ip) || !discriminator) {
+    return null;
+  }
+  return `${host}\0${ip}\0${discriminator}`;
+}
+
+function hasMultipleReachableGatewayIdentities(reachable: GatewayStatusProbedTarget[]): boolean {
+  if (reachable.length <= 1) {
+    return false;
+  }
+  const identityKeys = reachable.map((entry) => gatewaySelfIdentityKey(entry));
+  // Any target we can't identify keeps the warning conservative: dropping a
+  // false alarm (missed reporting a real dupe) is worse than a false positive.
+  if (identityKeys.some((key) => key === null)) {
+    return true;
+  }
+  return new Set(identityKeys).size > 1;
+}
+
 export function buildGatewayStatusWarnings(params: {
   probed: GatewayStatusProbedTarget[];
   sshTarget: string | null;
@@ -54,11 +97,13 @@ export function buildGatewayStatusWarnings(params: {
       targetIds: ["localLoopback"],
     });
   }
-  if (reachable.length > 1) {
+  if (hasMultipleReachableGatewayIdentities(reachable)) {
+    // Multiple reachable gateways are valid for isolated profiles but surprising
+    // enough to call out before users debug against the wrong process.
     warnings.push({
       code: "multiple_gateways",
       message:
-        "Unconventional setup: multiple reachable gateways detected. Usually one gateway per network is recommended unless you intentionally run isolated profiles, like a rescue bot (see docs: /gateway#multiple-gateways-same-host).",
+        "Unconventional setup: multiple reachable gateway identities detected. Usually one gateway per network is recommended unless you intentionally run isolated profiles, like a rescue bot (see docs: /gateway#multiple-gateways-same-host).",
       targetIds: reachable.map((entry) => entry.target.id),
     });
   }

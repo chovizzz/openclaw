@@ -168,6 +168,13 @@ export type ConfigFileSnapshot = {
   /** @deprecated Prefer runtimeConfig. */
   config: RuntimeConfig;
   hash?: string;
+  /**
+   * Set when the config file exists but could not be read/parsed off disk (for
+   * example EACCES after a `sudo` command left it root-owned). `runtimeConfig`
+   * is an empty best-effort fallback in that case, not a faithful read of the
+   * file - callers must not treat it as safe to persist over the live file.
+   */
+  readError?: { code: string | null };
   issues: ConfigValidationIssue[];
   warnings: ConfigValidationIssue[];
   legacyIssues: LegacyConfigIssue[];
