@@ -1,13 +1,17 @@
 import { chmodSync, existsSync, mkdirSync } from "node:fs";
 import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { requireNodeSqlite } from "../infra/node-sqlite.js";
+import { createSubsystemLogger } from "../logging/subsystem.js";
 import type { DeliveryContext } from "../utils/delivery-context.js";
+import { resolveSqliteJournalMode } from "./sqlite-filesystem-safety.js";
 import {
   resolveTaskFlowRegistryDir,
   resolveTaskFlowRegistrySqlitePath,
 } from "./task-flow-registry.paths.js";
 import type { TaskFlowRegistryStoreSnapshot } from "./task-flow-registry.store.js";
 import type { TaskFlowRecord, TaskFlowSyncMode, JsonValue } from "./task-flow-registry.types.js";
+
+const log = createSubsystemLogger("tasks/task-flow-registry-sqlite");
 
 type FlowRegistryRow = {
   flow_id: string;
@@ -47,7 +51,10 @@ type FlowRegistryDatabase = {
 let cachedDatabase: FlowRegistryDatabase | null = null;
 const FLOW_REGISTRY_DIR_MODE = 0o700;
 const FLOW_REGISTRY_FILE_MODE = 0o600;
-const FLOW_REGISTRY_SIDECAR_SUFFIXES = ["", "-shm", "-wal"] as const;
+// "-journal" is the rollback-journal sidecar SQLite uses when the journal
+// mode is downgraded from WAL on an unsafe filesystem; without it that file
+// would keep the default umask instead of the 0600 this enforces.
+const FLOW_REGISTRY_SIDECAR_SUFFIXES = ["", "-shm", "-wal", "-journal"] as const;
 
 function normalizeNumber(value: number | bigint | null): number | undefined {
   if (typeof value === "bigint") {
@@ -340,7 +347,14 @@ function openFlowRegistryDatabase(): FlowRegistryDatabase {
   ensureFlowRegistryPermissions(pathname);
   const { DatabaseSync } = requireNodeSqlite();
   const db = new DatabaseSync(pathname);
-  db.exec(`PRAGMA journal_mode = WAL;`);
+  const journalMode = resolveSqliteJournalMode(resolveTaskFlowRegistryDir(process.env));
+  if (journalMode === "delete") {
+    log.warn(
+      "Task flow registry database directory is on a filesystem that cannot provide WAL's shared-memory coherence (for example virtiofs, 9p, or a network mount); falling back to journal_mode=DELETE to avoid database corruption.",
+      { pathname },
+    );
+  }
+  db.exec(`PRAGMA journal_mode = ${journalMode === "delete" ? "DELETE" : "WAL"};`);
   db.exec(`PRAGMA synchronous = NORMAL;`);
   db.exec(`PRAGMA busy_timeout = 5000;`);
   ensureSchema(db);
