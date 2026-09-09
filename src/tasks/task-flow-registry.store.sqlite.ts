@@ -3,7 +3,7 @@ import type { DatabaseSync, StatementSync } from "node:sqlite";
 import { requireNodeSqlite } from "../infra/node-sqlite.js";
 import { createSubsystemLogger } from "../logging/subsystem.js";
 import type { DeliveryContext } from "../utils/delivery-context.js";
-import { resolveSqliteJournalMode } from "./sqlite-filesystem-safety.js";
+import { resolveSqliteFilesystemSafety } from "./sqlite-filesystem-safety.js";
 import {
   resolveTaskFlowRegistryDir,
   resolveTaskFlowRegistrySqlitePath,
@@ -347,11 +347,21 @@ function openFlowRegistryDatabase(): FlowRegistryDatabase {
   ensureFlowRegistryPermissions(pathname);
   const { DatabaseSync } = requireNodeSqlite();
   const db = new DatabaseSync(pathname);
-  const journalMode = resolveSqliteJournalMode(resolveTaskFlowRegistryDir(process.env));
-  if (journalMode === "delete") {
+  const safety = resolveSqliteFilesystemSafety(resolveTaskFlowRegistryDir(process.env));
+  const journalMode = safety.mode;
+  if (safety.status === "unsafe") {
     log.warn(
       "Task flow registry database directory is on a filesystem that cannot provide WAL's shared-memory coherence (for example virtiofs, 9p, or a network mount); falling back to journal_mode=DELETE to avoid database corruption.",
-      { pathname },
+      { pathname, filesystemType: safety.filesystemType },
+    );
+  } else if (safety.status !== "safe") {
+    // Staying on WAL here is deliberate — downgrading on a guess would cost
+    // concurrency on an ordinary disk. But "could not tell" must not look the
+    // same as "checked and it is local": without this line nobody would learn
+    // that the corruption guard is not actually deciding anything on this host.
+    log.warn(
+      "Task flow registry could not confirm its database filesystem is safe for WAL; keeping journal_mode=WAL. Verify the path is on a local disk, not a VM share or network mount.",
+      { pathname, status: safety.status, filesystemType: safety.filesystemType },
     );
   }
   db.exec(`PRAGMA journal_mode = ${journalMode === "delete" ? "DELETE" : "WAL"};`);

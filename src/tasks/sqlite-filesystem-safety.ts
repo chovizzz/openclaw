@@ -22,6 +22,41 @@ const LINUX_SMB_SUPER_MAGIC = 0x517b;
 const LINUX_CIFS_SUPER_MAGIC = 0xff534d42;
 const LINUX_SMB2_SUPER_MAGIC = 0xfe534d42;
 const LINUX_V9FS_SUPER_MAGIC = 0x01021997; // Linux 9p (V9FS)
+/**
+ * Why status is reported separately from mode: "we checked and it is a local
+ * disk" and "we could not tell" both end up on WAL, but only the first is an
+ * answer. Collapsing them hides the case where the guard is not actually
+ * running on a machine — which is exactly the case worth knowing about, since
+ * a host can later move onto a share.
+ */
+export type SqliteFilesystemSafety = {
+  mode: SqliteJournalMode;
+  status: "safe" | "unsafe" | "unrecognized" | "undetermined";
+  filesystemType?: string;
+};
+
+// Ordinary local filesystems. Only used to tell "confirmed safe" apart from
+// "not recognized"; anything absent here still runs on WAL.
+const KNOWN_SAFE_FILESYSTEM_TYPE_NAMES = new Set([
+  "apfs",
+  "hfs",
+  "ext2",
+  "ext3",
+  "ext4",
+  "xfs",
+  "btrfs",
+  "zfs",
+  "f2fs",
+  "ntfs",
+  "ntfs3",
+  "exfat",
+  "vfat",
+  "msdos",
+  "overlay",
+  "tmpfs",
+  "devtmpfs",
+]);
+
 const UNSAFE_STATFS_MAGICS = new Set([
   LINUX_NFS_SUPER_MAGIC,
   LINUX_SMB_SUPER_MAGIC,
@@ -171,17 +206,23 @@ function isPathWithinMount(targetPath: string, mountPoint: string): boolean {
   );
 }
 
-function resolveJournalModeFromMountEntries(
+function resolveSafetyFromMountEntries(
   targetPath: string,
   mountEntries: MountEntry[],
-): SqliteJournalMode {
+): SqliteFilesystemSafety {
   const mountEntry = mountEntries
     .filter((entry) => isPathWithinMount(targetPath, entry.mountPoint))
     .toSorted((a, b) => b.mountPoint.length - a.mountPoint.length)[0];
-  if (mountEntry && isUnsafeFilesystemTypeName(mountEntry.fsType)) {
-    return "delete";
+  if (!mountEntry) {
+    return { mode: "wal", status: "undetermined" };
   }
-  return "wal";
+  if (isUnsafeFilesystemTypeName(mountEntry.fsType)) {
+    return { mode: "delete", status: "unsafe", filesystemType: mountEntry.fsType };
+  }
+  if (KNOWN_SAFE_FILESYSTEM_TYPE_NAMES.has(mountEntry.fsType.trim().toLowerCase())) {
+    return { mode: "wal", status: "safe", filesystemType: mountEntry.fsType };
+  }
+  return { mode: "wal", status: "unrecognized", filesystemType: mountEntry.fsType };
 }
 
 /** Find the nearest existing ancestor of `targetPath`, resolving symlinks. */
@@ -206,21 +247,25 @@ function resolveExistingAncestor(targetPath: string): string | null {
  * detection is inconclusive, so this never regresses performance on ordinary
  * local disks; it only downgrades when a known-unsafe filesystem is found.
  */
-export function resolveSqliteJournalMode(dirPath: string): SqliteJournalMode {
+export function resolveSqliteFilesystemSafety(dirPath: string): SqliteFilesystemSafety {
   const existingPath = resolveExistingAncestor(dirPath);
   if (!existingPath) {
-    return "wal";
+    return { mode: "wal", status: "undetermined" };
   }
   if (typeof fs.statfsSync === "function") {
     try {
       const filesystemType = fs.statfsSync(existingPath).type;
       if (UNSAFE_STATFS_MAGICS.has(filesystemType)) {
-        return "delete";
+        return { mode: "delete", status: "unsafe", filesystemType: `statfs:${filesystemType}` };
       }
     } catch {
       // statfs is unsupported for this path (for example on macOS, where the
       // magic-number check does not apply); fall through to mount parsing.
     }
   }
-  return resolveJournalModeFromMountEntries(existingPath, readMountEntries());
+  return resolveSafetyFromMountEntries(existingPath, readMountEntries());
+}
+
+export function resolveSqliteJournalMode(dirPath: string): SqliteJournalMode {
+  return resolveSqliteFilesystemSafety(dirPath).mode;
 }

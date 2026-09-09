@@ -3,7 +3,10 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { resolveSqliteJournalMode } from "./sqlite-filesystem-safety.js";
+import {
+  resolveSqliteFilesystemSafety,
+  resolveSqliteJournalMode,
+} from "./sqlite-filesystem-safety.js";
 
 describe("resolveSqliteJournalMode", () => {
   const tempDirs: string[] = [];
@@ -118,6 +121,59 @@ describe("resolveSqliteJournalMode", () => {
       `some-share on ${resolvedDir} (virtiofs, nodev, nosuid, mounted by user)\n`,
     );
     expect(resolveSqliteJournalMode(dir)).toBe("delete");
+  });
+
+  it("separates a confirmed-safe filesystem from one it could not identify", () => {
+    // Both stay on WAL — downgrading on a guess would cost concurrency on an
+    // ordinary disk. The point is that they must not be indistinguishable:
+    // "unrecognized" means the guard is not really deciding anything here.
+    const dir = makeTempDir();
+    const resolvedDir = fs.realpathSync(dir);
+    vi.spyOn(fs, "statfsSync").mockImplementation(() => {
+      throw new Error("statfs unsupported for this path");
+    });
+    vi.spyOn(fs, "readFileSync").mockReturnValue(
+      `1 0 0:1 / ${resolvedDir} rw,relatime shared:1 - ext4 /dev/sda1 rw\n`,
+    );
+
+    expect(resolveSqliteFilesystemSafety(dir)).toMatchObject({
+      mode: "wal",
+      status: "safe",
+      filesystemType: "ext4",
+    });
+  });
+
+  it("reports an unfamiliar filesystem as unrecognized rather than silently safe", () => {
+    const dir = makeTempDir();
+    const resolvedDir = fs.realpathSync(dir);
+    vi.spyOn(fs, "statfsSync").mockImplementation(() => {
+      throw new Error("statfs unsupported for this path");
+    });
+    vi.spyOn(fs, "readFileSync").mockReturnValue(
+      `1 0 0:1 / ${resolvedDir} rw,relatime shared:1 - somefuturefs host rw\n`,
+    );
+
+    const safety = resolveSqliteFilesystemSafety(dir);
+    expect(safety).toMatchObject({ mode: "wal", status: "unrecognized" });
+    // Behavior is unchanged for callers that only read the mode.
+    expect(resolveSqliteJournalMode(dir)).toBe("wal");
+  });
+
+  it("reports undetermined when no mount entry covers the path", () => {
+    const dir = makeTempDir();
+    vi.spyOn(fs, "statfsSync").mockImplementation(() => {
+      throw new Error("statfs unsupported for this path");
+    });
+    vi.spyOn(fs, "readFileSync").mockImplementation(() => {
+      throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    });
+    const childProcess = process.getBuiltinModule("node:child_process");
+    vi.spyOn(childProcess, "execFileSync").mockReturnValue("");
+
+    expect(resolveSqliteFilesystemSafety(dir)).toMatchObject({
+      mode: "wal",
+      status: "undetermined",
+    });
   });
 
   it("returns delete for a Parallels shared folder (prl_fs)", () => {
