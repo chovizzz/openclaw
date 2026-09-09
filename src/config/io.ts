@@ -175,6 +175,37 @@ export class ConfigRuntimeRefreshError extends Error {
  * bypass option: fix the underlying read failure (permissions, corruption)
  * and retry.
  */
+/**
+ * Thrown by writeConfigFile when the outgoing config would clobber the live one:
+ * it drops below half the previous size, or it removes gateway.mode that the
+ * previous file had. Both mean the caller is serializing a degraded object over
+ * a rich file rather than editing it.
+ *
+ * Seen in production: a caller that reads through the pinned runtime snapshot
+ * gets an empty config once that snapshot is pinned from a failed load, then
+ * writes `{...cfg, browser: {...}}` — leaving a 51KB / 17-key config as a 623
+ * byte file holding only `browser` and `meta`, after which the gateway refuses
+ * to start. The write path already computed exactly this evidence and only
+ * logged it.
+ *
+ * Set OPENCLAW_ALLOW_CONFIG_SHRINK=1 for the rare legitimate large deletion.
+ */
+export class ConfigWriteClobberError extends Error {
+  readonly code = "CONFIG_WRITE_CLOBBER";
+  readonly reasons: readonly string[];
+
+  constructor(configPath: string, reasons: readonly string[]) {
+    super(
+      `Refusing to write ${configPath}: this write looks like it would clobber the ` +
+        `existing config (${reasons.join(", ")}). The caller is most likely holding a ` +
+        `degraded config object rather than one loaded from disk. Set ` +
+        `OPENCLAW_ALLOW_CONFIG_SHRINK=1 to override if the shrink is intentional.`,
+    );
+    this.name = "ConfigWriteClobberError";
+    this.reasons = reasons;
+  }
+}
+
 export class ConfigWriteUnreadableBaseError extends Error {
   readonly code = "CONFIG_WRITE_UNREADABLE_BASE";
   readonly reason = "unreadable-config-before-write";
@@ -1572,6 +1603,15 @@ export function createConfigIO(overrides: ConfigIoDeps = {}) {
         }),
       );
     };
+    // These two reasons are not anomalies to note after the fact, they are
+    // evidence that the incoming object is not an edit of the file on disk.
+    // Everything below this point writes, so block here.
+    const clobberReasons = suspiciousReasons.filter(
+      (reason) => reason.startsWith("size-drop:") || reason === "gateway-mode-removed",
+    );
+    if (clobberReasons.length > 0 && deps.env.OPENCLAW_ALLOW_CONFIG_SHRINK !== "1") {
+      throw new ConfigWriteClobberError(configPath, clobberReasons);
+    }
     const logConfigWriteAnomalies = () => {
       if (suspiciousReasons.length === 0) {
         return;

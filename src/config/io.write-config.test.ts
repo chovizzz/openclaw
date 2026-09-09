@@ -60,6 +60,107 @@ describe("config io write", () => {
     await suiteRootTracker.cleanup();
   });
 
+  describe("clobber guard", () => {
+    // Reproduces a production incident: a caller holding a degraded config
+    // object (an empty pinned runtime snapshot) wrote `{...cfg, browser}` over
+    // a 51KB / 17-key config, leaving 623 bytes with only `browser` and `meta`.
+    // The gateway then refused to start for want of gateway.mode. The write
+    // path already computed size-drop and gateway-mode-removed and only warned.
+    const buildLiveConfig = () => ({
+      gateway: { mode: "local" as const },
+      // Bulk that a clobbering write would discard. Uses browser profiles
+      // because that is both schema-valid at any size and what the real
+      // incident was carrying: 100 profiles went down to 3.
+      commands: { ownerDisplay: "hash" as const },
+      browser: {
+        enabled: true,
+        profiles: Object.fromEntries(
+          Array.from({ length: 100 }, (_, i) => [
+            `profile-${i}`,
+            { cdpPort: 18800 + i, color: "#2f5d8c" },
+          ]),
+        ),
+      },
+    });
+
+    it("refuses a write that drops most of the file and removes gateway.mode", async () => {
+      await withSuiteHome(async (home) => {
+        const io = createConfigIO({
+          env: {} as NodeJS.ProcessEnv,
+          homedir: () => home,
+          logger: silentLogger,
+        });
+        const configPath = path.join(home, ".openclaw", "openclaw.json");
+
+        await io.writeConfigFile(buildLiveConfig());
+        const before = await fs.readFile(configPath, "utf-8");
+
+        await expect(
+          io.writeConfigFile({
+            browser: {
+              enabled: true,
+              profiles: { "hubstudio-1": { cdpPort: 53851, color: "#a8620d" } },
+            },
+          } as never),
+        ).rejects.toMatchObject({ code: "CONFIG_WRITE_CLOBBER" });
+
+        // The bytes on disk must be untouched, not merely restored afterwards.
+        expect(await fs.readFile(configPath, "utf-8")).toBe(before);
+      });
+    });
+
+    it("still allows an ordinary edit that keeps the config intact", async () => {
+      await withSuiteHome(async (home) => {
+        const io = createConfigIO({
+          env: {} as NodeJS.ProcessEnv,
+          homedir: () => home,
+          logger: silentLogger,
+        });
+        const configPath = path.join(home, ".openclaw", "openclaw.json");
+
+        const live = buildLiveConfig();
+        await io.writeConfigFile(live);
+        await io.writeConfigFile({
+          ...live,
+          browser: {
+            enabled: true,
+            profiles: {
+              ...live.browser.profiles,
+              "hubstudio-1": { cdpPort: 53851, color: "#a8620d" },
+            },
+          },
+        });
+
+        const persisted = JSON.parse(await fs.readFile(configPath, "utf-8")) as Record<
+          string,
+          unknown
+        >;
+        expect((persisted.gateway as { mode?: string }).mode).toBe("local");
+        expect(Object.keys((persisted.browser as { profiles: object }).profiles)).toHaveLength(101);
+      });
+    });
+
+    it("lets an intentional shrink through when explicitly allowed", async () => {
+      await withSuiteHome(async (home) => {
+        const io = createConfigIO({
+          env: { OPENCLAW_ALLOW_CONFIG_SHRINK: "1" } as NodeJS.ProcessEnv,
+          homedir: () => home,
+          logger: silentLogger,
+        });
+        const configPath = path.join(home, ".openclaw", "openclaw.json");
+
+        await io.writeConfigFile(buildLiveConfig());
+        await io.writeConfigFile({ gateway: { mode: "local" } });
+
+        const persisted = JSON.parse(await fs.readFile(configPath, "utf-8")) as Record<
+          string,
+          unknown
+        >;
+        expect(persisted.commands).toBeUndefined();
+      });
+    });
+  });
+
   const expectInputOwnerDisplayUnchanged = (input: Record<string, unknown>) => {
     expect((input.commands as Record<string, unknown>).ownerDisplay).toBe("hash");
   };
