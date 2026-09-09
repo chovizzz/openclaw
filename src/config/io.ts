@@ -181,12 +181,13 @@ export class ConfigRuntimeRefreshError extends Error {
  * previous file had. Both mean the caller is serializing a degraded object over
  * a rich file rather than editing it.
  *
- * Seen in production: a caller that reads through the pinned runtime snapshot
- * gets an empty config once that snapshot is pinned from a failed load, then
- * writes `{...cfg, browser: {...}}` — leaving a 51KB / 17-key config as a 623
- * byte file holding only `browser` and `meta`, after which the gateway refuses
- * to start. The write path already computed exactly this evidence and only
- * logged it.
+ * Seen in production: a 51KB / 17-key config became a 408 byte file holding
+ * only `browser` and `meta`, after which the gateway crash-looped for want of
+ * gateway.mode. That particular write came from an operator script writing the
+ * file directly and so never reached this code — but the same shape can arrive
+ * through any caller that hands writeConfigFile an object it did not derive
+ * from the file on disk, and the write path already computed exactly this
+ * evidence and only logged it.
  *
  * Set OPENCLAW_ALLOW_CONFIG_SHRINK=1 for the rare legitimate large deletion.
  */

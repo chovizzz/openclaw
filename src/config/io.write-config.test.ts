@@ -61,11 +61,13 @@ describe("config io write", () => {
   });
 
   describe("clobber guard", () => {
-    // Reproduces a production incident: a caller holding a degraded config
-    // object (an empty pinned runtime snapshot) wrote `{...cfg, browser}` over
-    // a 51KB / 17-key config, leaving 623 bytes with only `browser` and `meta`.
-    // The gateway then refused to start for want of gateway.mode. The write
-    // path already computed size-drop and gateway-mode-removed and only warned.
+    // Reproduces the shape of a production incident: a 51KB / 17-key config
+    // became a 408 byte file with only `browser` and `meta`, after which the
+    // gateway refused to start for want of gateway.mode. That write bypassed
+    // this code entirely (an operator script wrote the file directly), but the
+    // same shape can arrive from any caller passing an object it did not derive
+    // from disk, and the write path already computed size-drop and
+    // gateway-mode-removed and only warned.
     const buildLiveConfig = () => ({
       gateway: { mode: "local" as const },
       // Bulk that a clobbering write would discard. Uses browser profiles
